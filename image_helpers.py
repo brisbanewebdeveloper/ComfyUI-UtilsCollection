@@ -9,10 +9,248 @@ from fractions import Fraction
 from typing import Callable, Iterator, Sequence
 
 import av
+import cv2
 import numpy as np
 import torch
 
 from .helper_functions import resize_nchw
+
+
+def _robust_channel_stats(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    low, median, high = np.percentile(values, (10.0, 50.0, 90.0), axis=0)
+    return median.astype(np.float32), np.maximum(high - low, 1e-4).astype(np.float32)
+
+
+def _covariance_shape(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+    clipped = np.clip(
+        values,
+        np.percentile(values, 1.0, axis=0),
+        np.percentile(values, 99.0, axis=0),
+    )
+    center = np.median(clipped, axis=0).astype(np.float32)
+    covariance = (
+        np.cov(clipped - center, rowvar=False).astype(np.float32)
+        if len(clipped) > 1
+        else np.zeros((2, 2), dtype=np.float32)
+    )
+    covariance += np.eye(2, dtype=np.float32) * 1e-5
+    spread = max(float(np.trace(covariance)), 1e-5)
+    return center, covariance / spread, spread
+
+
+def _symmetric_matrix_power(matrix: np.ndarray, power: float) -> np.ndarray:
+    values, vectors = np.linalg.eigh(matrix)
+    values = np.maximum(values, 1e-5) ** power
+    return (vectors * values) @ vectors.T
+
+
+def _prepare_mask(mask: torch.Tensor | None, index: int, height: int, width: int) -> np.ndarray | None:
+    if mask is None:
+        return None
+    selected = mask[min(index, mask.shape[0] - 1)].detach().float().cpu().numpy().squeeze()
+    if selected.shape != (height, width):
+        selected = cv2.resize(selected, (width, height), interpolation=cv2.INTER_LINEAR)
+    return np.clip(selected, 0.0, 1.0).astype(np.float32)
+
+
+def _feather_outpaint_mask(mask: np.ndarray | None) -> np.ndarray | None:
+    if mask is None:
+        return None
+    binary = (mask > 0.5).astype(np.uint8)
+    if not np.any(binary) or np.all(binary):
+        return mask
+    feather_width = max(2.0, math.hypot(*mask.shape) * 0.005)
+    distance_inside = cv2.distanceTransform(binary, cv2.DIST_L2, 3)
+    inward_feather = np.clip(distance_inside / feather_width, 0.0, 1.0)
+    return mask * inward_feather
+
+
+def _alignment_detail_image(image_rgb: np.ndarray) -> tuple[np.ndarray, float]:
+    gray = cv2.cvtColor((image_rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    scale = min(1.0, 1024.0 / max(gray.shape))
+    if scale < 1.0:
+        gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    sigma = max(0.8, math.hypot(*gray.shape) * 0.0015)
+    blurred = cv2.GaussianBlur(gray, (0, 0), sigmaX=sigma, sigmaY=sigma)
+    return cv2.addWeighted(gray, 1.75, blurred, -0.75, 0.0), scale
+
+
+def _fit_source_to_target(source_rgb: np.ndarray, target_rgb: np.ndarray) -> np.ndarray | None:
+    source_gray, source_scale = _alignment_detail_image(source_rgb)
+    target_gray, target_scale = _alignment_detail_image(target_rgb)
+    detector = cv2.SIFT_create(nfeatures=2500, contrastThreshold=0.01, edgeThreshold=20)
+    source_points, source_descriptors = detector.detectAndCompute(source_gray, None)
+    target_points, target_descriptors = detector.detectAndCompute(target_gray, None)
+    if source_descriptors is None or target_descriptors is None:
+        return None
+    pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(source_descriptors, target_descriptors, k=2)
+    matches = [first for first, second in pairs if first.distance < 0.8 * second.distance]
+    if len(matches) < 4:
+        return None
+    source_xy = np.float32([source_points[match.queryIdx].pt for match in matches])
+    target_xy = np.float32([target_points[match.trainIdx].pt for match in matches])
+    threshold = max(2.0, math.hypot(*target_rgb.shape[:2]) * 0.003)
+    affine, inliers = cv2.estimateAffinePartial2D(
+        source_xy,
+        target_xy,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=threshold,
+        maxIters=3000,
+        confidence=0.995,
+        refineIters=20,
+    )
+    inlier_count = 0 if inliers is None else int(inliers.sum())
+    if affine is None or inliers is None or inlier_count < 4 or inlier_count / len(matches) < 0.6:
+        return None
+    affine_full = np.eye(3, dtype=np.float64)
+    affine_full[:2] = affine
+    affine_full = (
+        np.diag([1.0 / target_scale, 1.0 / target_scale, 1.0])
+        @ affine_full
+        @ np.diag([source_scale, source_scale, 1.0])
+    )
+    affine = affine_full[:2]
+    scale = math.hypot(float(affine[0, 0]), float(affine[1, 0]))
+    if not 0.2 <= scale <= 5.0:
+        return None
+    source_h, source_w = source_rgb.shape[:2]
+    corners = np.float32([[[0, 0], [source_w, 0], [source_w, source_h], [0, source_h]]])
+    mapped = cv2.transform(corners, affine)[0]
+    target_h, target_w = target_rgb.shape[:2]
+    visible = cv2.intersectConvexConvex(
+        mapped.astype(np.float32),
+        np.float32([[0, 0], [target_w, 0], [target_w, target_h], [0, target_h]]),
+    )[0]
+    mapped_area = abs(float(cv2.contourArea(mapped)))
+    if mapped_area <= 1.0 or visible / mapped_area < 0.5:
+        return None
+    return affine.astype(np.float32)
+
+
+def _matched_overlap_edge_pixels(
+    source_rgb: np.ndarray,
+    target_rgb: np.ndarray,
+    source_lab: np.ndarray,
+    target_lab: np.ndarray,
+    outpaint_mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    affine = _fit_source_to_target(source_rgb, target_rgb)
+    if affine is None:
+        return None
+    target_h, target_w = target_rgb.shape[:2]
+    warped_source = cv2.warpAffine(
+        source_lab,
+        affine,
+        (target_w, target_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+    )
+    source_mask = np.ones(source_rgb.shape[:2], dtype=np.uint8)
+    overlap = cv2.warpAffine(
+        source_mask,
+        affine,
+        (target_w, target_h),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+    )
+    distance = cv2.distanceTransform(overlap, cv2.DIST_L2, 3)
+    overlap_area = int(np.count_nonzero(overlap))
+    edge_width = max(3.0, math.sqrt(overlap_area) * 0.04)
+    source_edge = (overlap > 0) & (distance <= edge_width)
+    outside = (overlap == 0).astype(np.uint8)
+    outside_distance = cv2.distanceTransform(outside, cv2.DIST_L2, 3)
+    target_edge = (outside > 0) & (outside_distance <= edge_width)
+    if outpaint_mask is not None:
+        target_edge &= outpaint_mask > 1e-4
+        radius = max(1, int(math.ceil(edge_width)))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+        adjacent = cv2.dilate(target_edge.astype(np.uint8), kernel) > 0
+        source_edge &= adjacent
+    if np.count_nonzero(source_edge) < 16 or np.count_nonzero(target_edge) < 16:
+        return None
+    return warped_source[source_edge], target_lab[target_edge]
+
+
+def match_image_properties(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    overall_weight: float,
+    color_weight: float,
+    lighting_weight: float,
+    texture_preservation: float,
+    mask: torch.Tensor | None = None,
+    saturation_weight: float = 1.0,
+    contrast_weight: float = 1.0,
+) -> torch.Tensor:
+    """Transfer global color and lighting statistics without spatial correspondence."""
+    if overall_weight <= 0.0 or (color_weight <= 0.0 and lighting_weight <= 0.0 and saturation_weight <= 0.0 and contrast_weight <= 0.0):
+        return target.clone()
+
+    outputs = []
+    for index in range(target.shape[0]):
+        source_index = min(index, source.shape[0] - 1)
+        source_rgb = np.clip(source[source_index, ..., :3].detach().float().cpu().numpy(), 0.0, 1.0)
+        target_rgb = np.clip(target[index, ..., :3].detach().float().cpu().numpy(), 0.0, 1.0)
+        source_lab = cv2.cvtColor(source_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        target_lab = cv2.cvtColor(target_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+        apply_mask = _feather_outpaint_mask(_prepare_mask(mask, index, *target_rgb.shape[:2]))
+
+        matched_pixels = _matched_overlap_edge_pixels(
+            source_rgb,
+            target_rgb,
+            source_lab,
+            target_lab,
+            apply_mask,
+        )
+        if matched_pixels is None:
+            source_pixels = source_lab.reshape(-1, 3)
+            target_pixels = target_lab.reshape(-1, 3)
+        else:
+            source_pixels, target_pixels = matched_pixels
+
+        source_l_center, source_l_range = _robust_channel_stats(source_pixels[:, :1])
+        target_l_center, target_l_range = _robust_channel_stats(target_pixels[:, :1])
+        contrast = float(np.clip(source_l_range[0] / target_l_range[0], 0.25, 4.0))
+        contrast = 1.0 + (contrast - 1.0) * contrast_weight * overall_weight
+        lighting = lighting_weight * overall_weight
+
+        target_l = target_lab[..., 0]
+        sigma = max(1.0, math.hypot(*target_l.shape) * 0.01)
+        base = cv2.GaussianBlur(target_l, (0, 0), sigmaX=sigma, sigmaY=sigma)
+        detail = target_l - base
+        full_transfer = (target_l - target_l_center[0]) * contrast + target_l_center[0]
+        detail_preserving = (base - target_l_center[0]) * contrast + target_l_center[0] + detail
+        transferred_l = full_transfer * (1.0 - texture_preservation) + detail_preserving * texture_preservation
+        transferred_l += (source_l_center[0] - target_l_center[0]) * lighting
+
+        source_center, source_shape, source_spread = _covariance_shape(source_pixels[:, 1:3])
+        target_center, target_shape, target_spread = _covariance_shape(target_pixels[:, 1:3])
+        shape_transform = _symmetric_matrix_power(source_shape, 0.5) @ _symmetric_matrix_power(target_shape, -0.5)
+        centered_chroma = target_lab[..., 1:3] - target_center
+        shaped_chroma = centered_chroma @ shape_transform.T
+        saturation = math.sqrt(source_spread / target_spread)
+        saturation = float(np.clip(saturation, 0.25, 4.0))
+        saturation = 1.0 + (saturation - 1.0) * saturation_weight * overall_weight
+        color = color_weight * overall_weight
+        color_matched = shaped_chroma + source_center
+        transferred_chroma = target_lab[..., 1:3] * (1.0 - color) + color_matched * color
+        transferred_chroma *= saturation
+
+        result_lab = target_lab.copy()
+        result_lab[..., 0] = transferred_l
+        result_lab[..., 1:3] = transferred_chroma
+        result_lab[..., 0] = np.clip(result_lab[..., 0], 0.0, 100.0)
+        result_lab[..., 1:3] = np.clip(result_lab[..., 1:3], -127.0, 127.0)
+        result_rgb = np.clip(cv2.cvtColor(result_lab, cv2.COLOR_LAB2RGB), 0.0, 1.0)
+
+        if apply_mask is not None:
+            result_rgb = target_rgb * (1.0 - apply_mask[..., None]) + result_rgb * apply_mask[..., None]
+        if target.shape[-1] > 3:
+            extra = target[index, ..., 3:].detach().float().cpu().numpy()
+            result_rgb = np.concatenate((result_rgb, extra), axis=-1)
+        outputs.append(torch.from_numpy(result_rgb.astype(np.float32)))
+
+    return torch.stack(outputs).to(device=target.device, dtype=target.dtype)
 
 
 def mask_to_bounding_box(
@@ -287,11 +525,13 @@ VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_STRUCTURE = (
     "<<segments>> segments. <<shot>> at <<timestamp>>."
 )
 
-_VIDEO_TIMELINE_TEXT_MARKERS = frozenset({"time", "picture", "shot"})
-_VIDEO_STRUCTURED_TIMELINE_TEXT_MARKERS = frozenset(
-    {"duration", "segments", "references"}
+_VIDEO_TIMELINE_TEXT_MARKERS = frozenset(
+    {"time", "timestamp", "picture", "shot"}
 )
-_VIDEO_TEXT_TIMELINE_TEXT_MARKERS = frozenset({"shot", "timestamp"})
+_VIDEO_STRUCTURED_TIMELINE_TEXT_MARKERS = frozenset(
+    {"duration", "segments", "timestamps", "references", "shot", "timestamp"}
+)
+_VIDEO_TEXT_TIMELINE_TEXT_MARKERS = frozenset({"shot", "time", "timestamp"})
 _VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_MARKERS = frozenset(
     {"duration", "segments", "timestamps", "shot", "timestamp"}
 )
@@ -927,10 +1167,35 @@ def build_video_timeline_text(
     )
     return "\n".join(
         timeline_text_structure.replace("<<time>>", timestamp)
+        .replace("<<timestamp>>", timestamp)
         .replace("<<picture>>", f"<Picture {index + index_offset}>")
         .replace("<<shot>>", f"[Shot {index}]")
         for index, timestamp in enumerate(timestamps, start=1)
     )
+
+
+def _expand_structured_shot_timestamps(
+    structure: str, timestamps: Sequence[str], structure_name: str
+) -> str:
+    shot_count = structure.count("<<shot>>")
+    timestamp_count = structure.count("<<timestamp>>")
+    if shot_count != timestamp_count:
+        raise ValueError(
+            f"{structure_name} must use <<shot>> and <<timestamp>> together."
+        )
+    if shot_count > 1:
+        raise ValueError(
+            f"{structure_name} may contain one <<shot>> and <<timestamp>> pair."
+        )
+    if not shot_count:
+        return structure
+
+    before, repeated = structure.split("<<shot>>")
+    between, after = repeated.split("<<timestamp>>")
+    return before + ", ".join(
+        f"Shot {index}{between}{timestamp}"
+        for index, timestamp in enumerate(timestamps, start=1)
+    ) + after
 
 
 def build_structured_video_timeline_text(
@@ -955,11 +1220,17 @@ def build_structured_video_timeline_text(
         if references
         else ""
     )
+    structured_timeline_text_structure = _expand_structured_shot_timestamps(
+        structured_timeline_text_structure,
+        timestamps,
+        "Structured timeline text structure",
+    )
     return (
         structured_timeline_text_structure.replace(
             "<<duration>>", f"{video_runtime:g}"
         )
         .replace("<<segments>>", str(len(timestamps)))
+        .replace("<<timestamps>>", ", ".join(timestamps))
         .replace("<<references>>", reference_text)
     )
 
@@ -971,7 +1242,7 @@ def build_text_video_timeline_text(timestamps: Sequence[str], structure: str) ->
     return "\n".join(
         structure.replace("<<shot>>", f"Shot {index}").replace(
             "<<timestamp>>", timestamp
-        )
+        ).replace("<<time>>", timestamp)
         for index, timestamp in enumerate(timestamps, start=1)
     )
 
@@ -984,23 +1255,9 @@ def build_text_structured_video_timeline_text(
         _VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_MARKERS,
         "text structured timeline structure",
     )
-    shot_count = structure.count("<<shot>>")
-    timestamp_count = structure.count("<<timestamp>>")
-    if shot_count != timestamp_count:
-        raise ValueError(
-            "Text structured timeline structure must use <<shot>> and <<timestamp>> together."
-        )
-    if shot_count > 1:
-        raise ValueError(
-            "Text structured timeline structure may contain one <<shot>> and <<timestamp>> pair."
-        )
-    if shot_count:
-        before, repeated = structure.split("<<shot>>")
-        between, after = repeated.split("<<timestamp>>")
-        structure = before + ", ".join(
-            f"Shot {index}{between}{timestamp}"
-            for index, timestamp in enumerate(timestamps, start=1)
-        ) + after
+    structure = _expand_structured_shot_timestamps(
+        structure, timestamps, "Text structured timeline structure"
+    )
     return (
         structure.replace("<<duration>>", f"{video_runtime:g}")
         .replace("<<segments>>", str(len(timestamps)))

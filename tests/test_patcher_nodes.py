@@ -534,6 +534,18 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
     )
     video_result = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
     audio_result = torch.arange(1.0, 9.0).reshape(2, 4)
+    final_layer_args = {}
+
+    def final_layer(
+        hidden, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts
+    ):
+        final_layer_args.update(
+            sigma=sigma,
+            sample_sigmas=sample_sigmas,
+            shifts=shifts,
+        )
+        return video_result, audio_result
+
     model = types.SimpleNamespace(
         patch_size=(1, 2, 2),
         sigma_shift_video=1.0,
@@ -548,10 +560,7 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
         _cond_audio_rows=lambda payload, device: None,
         time_embedder=lambda values: values[:, None].expand(-1, 4),
         rope_freqs=lambda position_ids, device: torch.zeros((1, 1)),
-        final_layer=lambda hidden, t_emb, video_seg, audio_seg: (
-            video_result,
-            audio_result,
-        ),
+        final_layer=final_layer,
     )
     monkeypatch.setattr(
         patcher_helpers.minimax_model,
@@ -562,6 +571,7 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
     video = torch.zeros((1, 1, 1, 2, 2), dtype=torch.float16)
     audio = torch.zeros((1, 4, 2, 1), dtype=torch.float16)
     context = torch.zeros((1, 1, 4), dtype=torch.float32)
+    sample_sigmas = torch.tensor([1.0, 0.5, 0.0])
 
     assert not hasattr(patcher_helpers.minimax_model, "time_shift_slope")
     output = patcher_helpers.minimax_h3_block_patch_forward(
@@ -569,6 +579,11 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
         [video, audio],
         torch.tensor([500.0]),
         context,
+        transformer_options={
+            "sample_sigmas": sample_sigmas,
+            "minimax_h3_sigma_shift_video": 1.25,
+            "minimax_h3_sigma_shift_audio": 0.75,
+        },
         minimax_payload={"layout": layout},
     )
 
@@ -580,6 +595,9 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
     )
     assert torch.equal(output[0], expected_video)
     assert torch.equal(output[1], expected_audio)
+    assert final_layer_args["sigma"].item() == pytest.approx(0.5)
+    assert final_layer_args["sample_sigmas"] is sample_sigmas
+    assert final_layer_args["shifts"] == (1.25, 0.75)
 
 
 def test_model_helper_adds_only_reversible_instance_patch(monkeypatch):
@@ -684,10 +702,6 @@ def test_cache_and_spectrum_reject_both_stacking_orders():
     pdd_model = types.SimpleNamespace(
         model_options={patcher_helpers.MINIMAX_H3_PDD_OWNER_KEY: True}
     )
-    with pytest.raises(ValueError, match="cannot be combined"):
-        patcher_helpers.patch_minimax_h3_cache_model(
-            pdd_model, 0.1, 0.1, 0.9, 2, "auto", False
-        )
     with pytest.raises(ValueError, match="cannot be combined"):
         patcher_helpers.patch_minimax_h3_spectrum_model(
             pdd_model, _spectrum_config(degree=1, warmup_steps=1)
@@ -1026,13 +1040,18 @@ def test_minimax_h3_pdd_schema_uses_existing_lora_category(monkeypatch):
         "on_off_grid",
     ]
     assert schema.inputs[1].options == ["minimax_h3_pdd.safetensors"]
+    assert schema.inputs[2].options == ["8", "7", "6", "5", "4"]
     assert [value.id for value in schema.outputs] == ["model", "sigmas"]
 
 
 def test_minimax_h3_pdd_partition_and_sigmas_stay_on_trained_grid():
     assert patcher_helpers.resolve_pdd_partition(32, 8) == (4,) * 8
+    assert patcher_helpers.resolve_pdd_partition(32, 7) == (8, 4, 4, 4, 4, 4, 4)
     assert patcher_helpers.resolve_pdd_partition(32, 6) == (8, 8, 4, 4, 4, 4)
+    assert patcher_helpers.resolve_pdd_partition(32, 5) == (8, 8, 8, 4, 4)
     assert patcher_helpers.resolve_pdd_partition(32, 4) == (8,) * 4
+    assert len(patcher_helpers.pdd_block_boundaries(32, patcher_helpers.resolve_pdd_partition(32, 7))) == 8
+    assert len(patcher_helpers.pdd_block_boundaries(32, patcher_helpers.resolve_pdd_partition(32, 5))) == 6
     bounds = patcher_helpers.pdd_block_boundaries(32, (8,) * 4)
     assert bounds[0] == 1.0
     assert bounds[-1] == 0.0

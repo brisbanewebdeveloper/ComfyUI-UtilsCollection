@@ -40,6 +40,7 @@ from .encoder_helpers import(
     prepare_vlm_image,
     prepare_vae_reference_image,
     qwen3vl_visual_encoder_path,
+    is_klein_vl_text_encoder,
     is_minimax_h3_text_encoder,
     tokenize_minimax_h3_prompt,
     format_minimax_h3_prompt,
@@ -2049,6 +2050,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
         # Collect, extract, and parse all active (non-null) connected images sequentially (including batched images)
         _, active_images, _ = extract_and_flatten_images(image_inputs)
         minimax_h3 = is_minimax_h3_text_encoder(clip)
+        klein_vl = is_klein_vl_text_encoder(clip)
         if minimax_h3 and ref_latent_mode != "off":
             raise ValueError(
                 "MiniMax H3 reference latents require Core's MiniMax H3 reference conditioning node; set ref_latent_mode to off."
@@ -2057,6 +2059,8 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
         def format_krea_prompt(user_prompt):
             if minimax_h3:
                 return format_minimax_h3_prompt(user_prompt, system_prompt)
+            if klein_vl and not system_prompt:
+                return user_prompt
             if system_prompt or active_images:
                 return (
                     "<|im_start|>user\n<|im_end|>\n"
@@ -2126,6 +2130,8 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
             fusion_active=visual_method != "off",
             context="AdvancedVisualConditioning",
         )
+        if klein_vl:
+            prepared_prompt = prepared_prompt.replace(VISION_BLOCK, "")
 
         inline_mode = False
         if visual_method == "off" and inline_numbers:
@@ -2189,7 +2195,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
 
             # Ensure prompt has image pad tokens so tokenizer knows where to inject the image
             modified_prompt = prepared_prompt
-            if not any(tag in modified_prompt for tag in ["<|image_pad|>", "<|image|>", "<|vision_start|>"]):
+            if not klein_vl and not any(tag in modified_prompt for tag in ["<|image_pad|>", "<|image|>", "<|vision_start|>"]):
                 modified_prompt = VISION_BLOCK + modified_prompt
             picture_number = 1 if visual_method != "off" else idx + 1
             modified_prompt = add_semantic_anchors(
@@ -2199,7 +2205,9 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
 
             processed_img = prepare_vlm_image(source_image, vlm_resolution)
             tokenize_callback = None
-            encode_kwargs = {"images": [processed_img], "skip_template": True}
+            encode_kwargs = {"images": [processed_img]}
+            if not klein_vl:
+                encode_kwargs["skip_template"] = True
             if minimax_h3:
                 tokenize_callback = lambda text, image=processed_img: (
                     tokenize_minimax_h3_prompt(clip, text, [image])
@@ -3316,21 +3324,26 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         return io.Schema(
             node_id="UC_MiniMaxH3MediaConfig", display_name="MiniMax H3 Media Configurator",
             category="advanced/conditioning", is_input_list=True, is_experimental=True,
-            description="Anchors existing MiniMax H3 Picture slots at formatted timestamps and can add optional native audio conditioning.",
+            description="Sets optional Picture timestamp syntax and the Video sampling rate used by Qwen for the Advanced MiniMax H3 nodes.",
             inputs=[
-                io.AnyType.Input("timestamps", optional=True, tooltip="Optional sequential timestamps for existing Picture slots. When disconnected, anchors one visual at 0 seconds."),
-                io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="0.0s", tooltip="Formatting used when <<time>> is expanded."),
-                io.String.Input("structure", multiline=True, dynamic_prompts=False, default=MINIMAX_H3_MEDIA_STRUCTURE, tooltip="Per-shot structure using <<time>>, <<picture>>, <<visual>>, and <<shot>>."),
-                io.Audio.Input("audio", optional=True, tooltip="Optional native H3 reference audio. Qwen receives only an Audio label; hard synchronization with Video timestamps is not guaranteed."),
-                io.Vae.Input("audio_vae", optional=True, tooltip="Required with audio. Resamples to this MiniMax H3 audio VAE rate and creates native audio reference rows."),
+                io.AnyType.Input("timestamps", optional=True, tooltip="Optional sequential timestamps for existing Picture slots. Leave disconnected to keep the default Core Picture presentation."),
+                io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="0.0s", tooltip="Formatting used when the Picture structure contains <<time>>."),
+                io.String.Input("structure", multiline=True, dynamic_prompts=False, default=MINIMAX_H3_MEDIA_STRUCTURE, tooltip="Picture constructor using required <<picture>> and <<visual>> tags. Default matches Core: <<picture>>: <<visual>>. Timestamped example: At <<time>>, <<picture>>: <<visual>> (from <<shot>>) is fully anchored."),
+                io.Int.Input("video_fps", default=2, min=1, max=24, step=1, tooltip="VLM presentation sampling rate for the 24 fps Video input. Latent video usage is unchanged."),
             ],
             outputs=[MiniMaxH3MediaConfig.Output(display_name="media_config", tooltip="Runtime media configuration for the Advanced MiniMax H3 encoder nodes.")],
         )
 
     @classmethod
-    def execute(cls, timestamps=None, timestamp_format="0.0s", structure=MINIMAX_H3_MEDIA_STRUCTURE, audio=None, audio_vae=None):
+    def execute(
+        cls,
+        timestamps=None,
+        timestamp_format="0.0s",
+        structure=MINIMAX_H3_MEDIA_STRUCTURE,
+        video_fps=2,
+    ):
         return io.NodeOutput(build_minimax_h3_media_config(
-            timestamps, timestamp_format, structure, audio, audio_vae
+            timestamps, timestamp_format, structure, video_fps
         ))
 
 
@@ -3360,7 +3373,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
             description=(
                 "Creates coordinated MiniMax H3 Qwen conditioning from independent frame, reference, and fusion "
                 "inputs together with native visual controls and the matching joint video/audio latent. Optional media "
-                "configuration adds Qwen-only Video timeline images and native audio conditioning."
+                    "configuration controls optional Picture timestamp syntax and Video sampling for Qwen."
             ),
             inputs=[
                 io.Clip.Input(
@@ -3370,7 +3383,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                 io.Vae.Input(
                     "vae",
                     optional=True,
-                    tooltip="MiniMax H3 video VAE used for connected frame anchors and native image references.",
+                    tooltip="Encodes first/last frames, reference images, and a complete Video. Not required when reference image size is none.",
                 ),
                 io.Image.Input(
                     "first_frame",
@@ -3422,8 +3435,8 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                     default="match",
                     tooltip=(
                         "Match limits each native reference to the generation pixel area; max limits its short edge to "
-                        "2048 pixels. None keeps frame and reference inputs as Qwen pictures but skips native VAE "
-                        "keyframe and reference conditioning. All image sizing preserves aspect ratio; final 32-pixel "
+                        "2048 pixels. None keeps frame, reference, and Video inputs available to the text encoder but does not "
+                        "VAE-encode them. All image sizing preserves aspect ratio; final 32-pixel "
                         "alignment can marginally enlarge a dimension."
                     ),
                 ),
@@ -3436,6 +3449,17 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                     tooltip=(
                         "Equivalent-square Qwen3-VL target from 256 to 3584. Values outside that range preserve "
                         "the original image resolution. This is independent of VAE frame and reference sizing."
+                    ),
+                ),
+                io.Int.Input(
+                    "vlm_video_resolution",
+                    default=384,
+                    min=0,
+                    max=4096,
+                    step=32,
+                    tooltip=(
+                        "Qwen3-VL resolution for Video frames. Higher values use more visual tokens. "
+                        "Values outside 256 to 3584 preserve the input resolution."
                     ),
                 ),
                 io.Autogrow.Input(
@@ -3462,8 +3486,11 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                 ),
                 MiniMaxH3MediaConfig.Input(
                     "media_config", optional=True,
-                    tooltip="Adds a Qwen-only Video after existing Pictures and optional native audio. It creates no native video latent and excludes Video blocks from fusion; active mixed-media fusion requires grid-deepstack.",
+                    tooltip="Optionally formats Picture timestamps and sets the Qwen Video sampling rate. Its default Picture constructor matches Core handling.",
                 ),
+                io.Image.Input("video", optional=True, tooltip="Complete Video frame batch at 24 fps. The configurator controls only how densely Qwen samples it."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional H3 reference audio."),
+                io.Vae.Input("audio_vae", optional=True, tooltip="Required with audio. Resamples and encodes the reference audio."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -3489,7 +3516,11 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         multiplier=1.0,
         ref_image_size="match",
         vlm_resolution=384,
+        vlm_video_resolution=384,
         media_config=None,
+        video=None,
+        audio=None,
+        audio_vae=None,
     ) -> io.NodeOutput:
         conditioning, latent = execute_advanced_minimax_h3_image_to_video(
             clip,
@@ -3506,7 +3537,11 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
             multiplier=multiplier,
             ref_image_size=ref_image_size,
             vlm_resolution=vlm_resolution,
+            vlm_video_resolution=vlm_video_resolution,
             media_config=media_config,
+            video=video,
+            audio=audio,
+            audio_vae=audio_vae,
         )
         return io.NodeOutput(conditioning, latent)
 
@@ -3577,7 +3612,11 @@ class UC_AdvancedMiniMaxH3ImageToVideoCombined(
         multiplier=1.0,
         ref_image_size="match",
         vlm_resolution=384,
+        vlm_video_resolution=384,
         media_config=None,
+        video=None,
+        audio=None,
+        audio_vae=None,
     ) -> io.NodeOutput:
         patched_model, conditioning, latent = (
             execute_advanced_minimax_h3_image_to_video_combined(
@@ -3596,7 +3635,11 @@ class UC_AdvancedMiniMaxH3ImageToVideoCombined(
                 multiplier=multiplier,
                 ref_image_size=ref_image_size,
                 vlm_resolution=vlm_resolution,
+                vlm_video_resolution=vlm_video_resolution,
                 media_config=media_config,
+                video=video,
+                audio=audio,
+                audio_vae=audio_vae,
             )
         )
         return io.NodeOutput(patched_model, conditioning, latent)
@@ -4128,7 +4171,8 @@ class UC_AdvMiniMaxH3ImageToVideoTokenFusion(UC_AdvancedMiniMaxH3ImageToVideo):
         cls, clip, vae=None, prompt=None, width=None, height=None, length=None, first_frame=None,
         last_frame=None, reference_images=None, fusion_images=None,
         visual_fusion_config=None, multiplier=1.0, ref_image_size="match",
-        vlm_resolution=384, media_config=None,
+        vlm_resolution=384, vlm_video_resolution=384, media_config=None,
+        video=None, audio=None, audio_vae=None,
     ):
         conditioning, latent = execute_advanced_minimax_h3_image_to_video(
             clip, vae, prompt, width, height, length,
@@ -4136,7 +4180,9 @@ class UC_AdvMiniMaxH3ImageToVideoTokenFusion(UC_AdvancedMiniMaxH3ImageToVideo):
             reference_images=reference_images, fusion_images=fusion_images,
             visual_fusion_config=visual_fusion_config, multiplier=multiplier,
             ref_image_size=ref_image_size, vlm_resolution=vlm_resolution,
-            media_config=media_config, token_fusion=True,
+            vlm_video_resolution=vlm_video_resolution,
+            media_config=media_config, video=video, audio=audio,
+            audio_vae=audio_vae, token_fusion=True,
         )
         return io.NodeOutput(conditioning, latent)
 
@@ -4156,7 +4202,9 @@ class UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion(
         cls, model, clip, vae=None, prompt=None, width=None, height=None, length=None,
         first_frame=None, last_frame=None, reference_images=None,
         fusion_images=None, visual_fusion_config=None, multiplier=1.0,
-        ref_image_size="match", vlm_resolution=384, media_config=None,
+        ref_image_size="match", vlm_resolution=384, vlm_video_resolution=384,
+        media_config=None,
+        video=None, audio=None, audio_vae=None,
     ):
         patched_model, conditioning, latent = (
             execute_advanced_minimax_h3_image_to_video_combined(
@@ -4165,7 +4213,9 @@ class UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion(
                 reference_images=reference_images, fusion_images=fusion_images,
                 visual_fusion_config=visual_fusion_config, multiplier=multiplier,
                 ref_image_size=ref_image_size, vlm_resolution=vlm_resolution,
-                media_config=media_config, token_fusion=True,
+                vlm_video_resolution=vlm_video_resolution,
+                media_config=media_config, video=video, audio=audio,
+                audio_vae=audio_vae, token_fusion=True,
             )
         )
         return io.NodeOutput(patched_model, conditioning, latent)

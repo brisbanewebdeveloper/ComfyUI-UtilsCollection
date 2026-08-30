@@ -551,6 +551,39 @@ def test_advanced_visual_encoder_uses_one_base_resolution_pass_per_source(
     )
 
 
+def test_advanced_visual_encoder_does_not_duplicate_klein_vision_block(
+    monkeypatch,
+):
+    encoded_prompts = []
+    encoded_kwargs = []
+
+    def encode(_clip, prompt, **kwargs):
+        encoded_prompts.append(prompt)
+        encoded_kwargs.append(kwargs)
+        return [[torch.ones(1, 512, 2), {}]]
+
+    class Clip:
+        cond_stage_model = types.SimpleNamespace(clip_name="qwen3_4b")
+
+    monkeypatch.setattr(
+        encoder_nodes, "encode_embedding_classical_scaled_bias", encode
+    )
+    monkeypatch.setattr(encoder_nodes, "is_klein_vl_text_encoder", lambda _clip: True)
+
+    UC_AdvancedVisualConditioningEncode.execute(
+        Clip(),
+        prompt="",
+        system_prompt="",
+        vlm_resolution=384,
+        image_inputs={"image_1": torch.zeros(1, 2, 2, 3)},
+        visual_fusion_config=_config(method="off"),
+    )
+
+    assert len(encoded_prompts) == 1
+    assert encoded_prompts[0] == ""
+    assert "skip_template" not in encoded_kwargs[0]
+
+
 def test_advanced_visual_encoder_spatial_output_contains_every_source(monkeypatch):
     def encode(_clip, _prompt, images, **_kwargs):
         value = float(images[0].flatten()[0])

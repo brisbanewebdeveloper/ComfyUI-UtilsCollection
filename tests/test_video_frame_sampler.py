@@ -23,6 +23,7 @@ from utils_collection_video_frame_sampler_test.image_helpers import (
     VIDEO_TIMELINE_TEXT_STRUCTURE,
     VideoFrameRecord,
     build_structured_video_timeline_text,
+    build_text_video_timeline_text,
     build_video_timeline_text,
     format_video_timestamp,
     images_to_video_timeline,
@@ -180,6 +181,7 @@ def test_text_only_video_timeline_schema_and_outputs():
         "timestamp_format",
         "timeline_text_structure",
         "structured_timeline_text_structure",
+        "video",
     ]
     assert [output.id for output in schema.outputs] == [
         "timestamps_text",
@@ -212,6 +214,30 @@ def test_text_only_video_timeline_schema_and_outputs():
     )[3] == (
         "Target video duration is 3 seconds divided into 3 segments. "
         "Shot 1 at 0.0s, Shot 2 at 1.5s, Shot 3 at 3.0s."
+    )
+
+    class FakeVideo:
+        @staticmethod
+        def get_duration():
+            return 8.0
+
+    output = UC_VideoTimelineText.execute(
+        segment_count=3,
+        focus_areas=0,
+        focus_one=0.5,
+        focus_two=0.5,
+        focus_three=0.5,
+        timestamp_format="0.0s",
+        timeline_text_structure=VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE,
+        structured_timeline_text_structure=VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_STRUCTURE,
+        duration=99.0,
+        video=FakeVideo(),
+    )
+    assert output[0] == "0.0s, 4.0s, 8.0s"
+    assert output[2] == 8.0
+    assert output[3] == (
+        "Target video duration is 8 seconds divided into 3 segments. "
+        "Shot 1 at 0.0s, Shot 2 at 4.0s, Shot 3 at 8.0s."
     )
 
 
@@ -290,6 +316,36 @@ def test_structured_timeline_text_describes_duration_segments_and_references():
         "<Picture 6> at 07.80s, <Picture 7> at 10.84s and "
         "<Picture 8> at 12.10s."
     )
+
+
+def test_structured_image_timeline_can_repeat_shots_without_picture_references():
+    assert build_structured_video_timeline_text(
+        13.9676,
+        ["0.00s", "6.98s", "13.97s"],
+        (
+            "Target video duration is <<duration>> seconds divided into "
+            "<<segments>> segments. <<shot>> at <<timestamp>>."
+        ),
+    ) == (
+        "Target video duration is 13.9676 seconds divided into 3 segments. "
+        "Shot 1 at 0.00s, Shot 2 at 6.98s, Shot 3 at 13.97s."
+    )
+
+
+def test_video_timeline_placeholder_aliases_are_consistent():
+    timestamps = ["0.00s", "1.25s"]
+
+    assert build_video_timeline_text(
+        timestamps, "custom", "<<shot>> at <<timestamp>> (<<time>>)"
+    ) == "[Shot 1] at 0.00s (0.00s)\n[Shot 2] at 1.25s (1.25s)"
+    assert build_text_video_timeline_text(
+        timestamps, "<<shot>> at <<time>> (<<timestamp>>)"
+    ) == "Shot 1 at 0.00s (0.00s)\nShot 2 at 1.25s (1.25s)"
+    assert build_structured_video_timeline_text(
+        1.25,
+        timestamps,
+        "<<segments>> segments at <<timestamps>>.",
+    ) == "2 segments at 0.00s, 1.25s."
 
 
 def test_index_offset_shifts_all_picture_references():

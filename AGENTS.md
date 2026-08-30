@@ -88,23 +88,26 @@ python_executable: C:\Users\ishim\Tools\ComfyUI\.venv\Scripts\python.exe
   A `git diff --check` trailing-whitespace warning may originate inside a preset
   string; report it, but never trim, normalize, format, or otherwise alter that
   whitespace without explicit user authorization.
-- Before changing a VLM preset, inspect `vlm_presets_vars.py` and the narrowly
-  relevant `local/sync_vlm_*.py` utility. Edit the readable variable first,
-  run the synchronizer without `--apply`, then run it with `--apply` only after
-  its validation succeeds.
-- Complete synchronization before modifying or running tests: after readable
-  edits, run every relevant synchronizer without `--apply`, apply each validated
-  synchronization, rerun each synchronizer without `--apply` until it reports
-  no pending updates, and inspect the bounded generated diff. For the managed
-  VLM presets, use tracked `scripts/manage_vlm_preset_authorities.py`; it owns
-  every configured readable/runtime authority pair. Preset-specific files under
-  `local/` and specialized `sync_vlm_*` scripts are not synchronization
-  authorities. Do not begin test edits or test execution before this sequence is
-  complete.
-- When an existing synchronizer does not cover the requested preset, extend or
-  add deterministic synchronization tooling before changing runtime data. Do
-  not fall back to ambiguous dictionary-boundary patches or manual replacement
-  of generated literals.
+- Before changing a managed VLM preset, inspect the matching tracked `*_vars.py`
+  authority identified by `CONFIG` in
+  `scripts/manage_vlm_preset_authorities.py`. Also inspect any narrowly relevant
+  `local/sync_vlm_*.py` utility to understand its preset-specific relationship.
+  Local utilities are focused validators, not synchronization authorities: run
+  them without `--apply` and do not use their `--apply` paths during the normal
+  managed workflow.
+- Edit the matching readable authority first. Run every relevant local validator
+  without `--apply`, then run `scripts/manage_vlm_preset_authorities.py` without
+  `--apply`. After both validations succeed, apply synchronization only with
+  `scripts/manage_vlm_preset_authorities.py --apply`. Rerun the manager without
+  `--apply` until its `changed` list is empty, rerun relevant local validators
+  without `--apply` until they report synchronized state, and inspect the bounded
+  generated diff. Do not begin test edits or test execution before this sequence
+  is complete.
+- When `CONFIG` in `scripts/manage_vlm_preset_authorities.py` does not cover the
+  requested readable/runtime pair, extend that tracked manager or add compatible
+  deterministic tooling before changing runtime data. Do not fall back to
+  ambiguous dictionary-boundary patches or manual replacement of generated
+  literals.
 - Inspect the resulting bounded runtime diff and test both readable/runtime
   synchronization and the consuming node's exposed preset options.
 - Treat `{user_query}` and `{system_query}` as legacy injection markers unless
@@ -126,15 +129,18 @@ python_executable: C:\Users\ishim\Tools\ComfyUI\.venv\Scripts\python.exe
   and validate it in dry-run mode before another mutation.
 - Never restore a dirty managed preset from `HEAD` merely because generated
   syntax is damaged. First establish whether the file contains other legitimate
-  changes and use its readable authority plus synchronizer for recovery. Ask
-  before discarding any change whose ownership or recoverability is uncertain.
+  changes and use its readable authority plus the tracked manager for recovery.
+  Ask before discarding any change whose ownership or recoverability is
+  uncertain.
 
 ### Session continuity
 
-- Treat an automatic context summary as a non-authoritative index. Before any
-  post-compaction mutation, re-read applicable rules and required skills, then
-  verify scoped status, the current user contract, affected files, and the
-  intended deterministic tooling from direct evidence.
+- Treat an automatic context summary as a non-authoritative index. Let the
+  compact-scoped `resume-state-lock` hook reload applicable rules and required
+  skills, end its turn, and wait for explicit user confirmation. After that
+  confirmation, do not repeat the hook's reload; verify scoped status, the
+  current user contract, affected files, and the intended deterministic tooling
+  from direct evidence before any mutation.
 - Do not claim recovered state from a preserved session unless the preservation
   result identifies the intended source. Read only its generated delta, and use
   historical messages to recover execution constraints and known failures, not

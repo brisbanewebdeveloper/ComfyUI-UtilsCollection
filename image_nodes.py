@@ -10,7 +10,7 @@ import folder_paths
 from tqdm import tqdm
 from PIL import Image, ImageOps, ImageSequence, ImageDraw, ImageFont
 import kornia.morphology as morph
-from .helper_functions import pil2tensor, math_diag, pct_to_px, composite, fill_mask_from_edges, iterative_directional_stretch_fill, gaussian_blur_nchw, hex_to_rgb, string_to_color, match_image_properties, resize_nchw, FLOW_PRESETS
+from .helper_functions import pil2tensor, math_diag, pct_to_px, composite, fill_mask_from_edges, iterative_directional_stretch_fill, gaussian_blur_nchw, hex_to_rgb, string_to_color, resize_nchw, FLOW_PRESETS
 from .tile_helpers import (
     accumulate_tile_images,
     apply_tile_differential_diffusion,
@@ -28,6 +28,7 @@ from .image_helpers import (
     downscale_nohalo_lohalo,
     images_to_video_timeline,
     mask_to_bounding_box,
+    match_image_properties,
     sample_video_frames_as_images,
     video_timeline_text,
 )
@@ -689,7 +690,7 @@ class UC_SampleVideoFramesAsImages(io.ComfyNode):
                     default=VIDEO_TIMELINE_TEXT_STRUCTURE,
                     tooltip=(
                         "One structure repeated for every selected frame. Use "
-                        "<<time>>, <<picture>>, and <<shot>>."
+                        "<<time>> or <<timestamp>>, <<picture>>, and <<shot>>."
                     ),
                 ),
                 io.String.Input(
@@ -699,7 +700,8 @@ class UC_SampleVideoFramesAsImages(io.ComfyNode):
                     default=VIDEO_STRUCTURED_TIMELINE_TEXT_STRUCTURE,
                     tooltip=(
                         "One whole-timeline structure. Use <<duration>>, "
-                        "<<segments>>, and <<references>>."
+                        "<<segments>>, <<timestamps>>, and <<references>>. One <<shot>> … "
+                        "<<timestamp>> section repeats for every selected frame."
                     ),
                 ),
                 io.Int.Input(
@@ -819,8 +821,8 @@ class UC_ImagesToVideoTimeline(io.ComfyNode):
                 ),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="00.000s", tooltip="How timestamps look in text outputs."),
                 io.Combo.Input("timeline_style", options=list(VIDEO_FRAME_TIMELINE_STYLES), default="H3 alignment prefix", tooltip="Built-in timeline syntax, or custom to use the timeline text structure."),
-                io.String.Input("timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_TIMELINE_TEXT_STRUCTURE, tooltip="One structure repeated for every image when timeline style is custom. Use <<time>>, <<picture>>, and <<shot>>."),
-                io.String.Input("structured_timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_STRUCTURED_TIMELINE_TEXT_STRUCTURE, tooltip="One whole-timeline structure. Use <<duration>>, <<segments>>, and <<references>>."),
+                io.String.Input("timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_TIMELINE_TEXT_STRUCTURE, tooltip="One structure repeated for every image when timeline style is custom. Use <<time>> or <<timestamp>>, <<picture>>, and <<shot>>."),
+                io.String.Input("structured_timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_STRUCTURED_TIMELINE_TEXT_STRUCTURE, tooltip="One whole-timeline structure. Use <<duration>>, <<segments>>, <<timestamps>>, and <<references>>. One <<shot>> … <<timestamp>> section repeats for every image."),
                 io.Int.Input("index_offset", default=0, min=0, step=1, tooltip="Skip this many Picture numbers before the first image."),
                 io.Autogrow.Input("image_inputs", template=image_template, tooltip="Add images in order. Each image in a batch gets its own timestamp."),
             ],
@@ -852,17 +854,18 @@ class UC_VideoTimelineText(io.ComfyNode):
             node_id="UC_VideoTimelineText",
             display_name="Video Timeline (Text)",
             category="image/video",
-            description="Builds text-only video timeline guidance without image or video inputs.",
+            description="Builds text-only video timeline guidance from a manual duration or connected video.",
             inputs=[
-                io.Float.Input("duration", default=5.0, min=0.01, step=0.01, tooltip="Length of the video in seconds."),
+                io.Float.Input("duration", default=5.0, min=0.01, step=0.01, optional=True, tooltip="Length of the video in seconds. Ignored when video is connected."),
                 io.Int.Input("segment_count", default=5, min=1, step=1, tooltip="Number of timestamped timeline entries."),
                 io.Int.Input("focus_areas", default=0, min=0, max=3, step=1, tooltip="How many parts to split the timeline into. 0 spaces entries evenly."),
                 io.Float.Input("focus_one", default=0.50, min=0.00, max=1.00, step=0.01, tooltip="Where entries group in the first part. 0 is early, 0.5 is balanced, 1 is late."),
                 io.Float.Input("focus_two", default=0.50, min=0.00, max=1.00, step=0.01, tooltip="Where entries group in the second part. 0 is early, 0.5 is balanced, 1 is late."),
                 io.Float.Input("focus_three", default=0.50, min=0.00, max=1.00, step=0.01, tooltip="Where entries group in the third part. 0 is early, 0.5 is balanced, 1 is late."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="00.000s", tooltip="Formatting reused verbatim by every text output."),
-                io.String.Input("timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE, tooltip="One structure repeated for every timeline entry. Use <<shot>> and <<timestamp>>."),
+                io.String.Input("timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE, tooltip="One structure repeated for every timeline entry. Use <<shot>> and <<time>> or <<timestamp>>."),
                 io.String.Input("structured_timeline_text_structure", multiline=True, dynamic_prompts=False, default=VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_STRUCTURE, tooltip="One whole-timeline structure. <<duration>> and <<segments>> are scalars; <<timestamps>> is comma-and-space-separated; one <<shot>> … <<timestamp>> section repeats comma-and-space-separated for every timeline entry."),
+                io.Video.Input("video", optional=True, tooltip="Optional video whose native duration overrides the duration widget."),
             ],
             outputs=[
                 io.String.Output("timestamps_text", display_name="timestamps text", tooltip="All formatted timestamps in one line."),
@@ -873,8 +876,9 @@ class UC_VideoTimelineText(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, duration: float, segment_count: int, focus_areas: int, focus_one: float, focus_two: float, focus_three: float, timestamp_format: str, timeline_text_structure: str, structured_timeline_text_structure: str) -> io.NodeOutput:
-        return io.NodeOutput(*video_timeline_text(duration, segment_count, focus_areas, focus_one, focus_two, focus_three, timestamp_format, timeline_text_structure, structured_timeline_text_structure))
+    def execute(cls, segment_count: int, focus_areas: int, focus_one: float, focus_two: float, focus_three: float, timestamp_format: str, timeline_text_structure: str, structured_timeline_text_structure: str, duration: float = 5.0, video: io.Video.Type | None = None) -> io.NodeOutput:
+        video_duration = video.get_duration() if video is not None else duration
+        return io.NodeOutput(*video_timeline_text(video_duration, segment_count, focus_areas, focus_one, focus_two, focus_three, timestamp_format, timeline_text_structure, structured_timeline_text_structure))
 
 
 class UC_ImageMatchPropertiesNode(io.ComfyNode):
@@ -885,13 +889,15 @@ class UC_ImageMatchPropertiesNode(io.ComfyNode):
             display_name="Image Match Properties",
             category="advanced/image",
             inputs=[
-                io.Image.Input("original_image", tooltip="Reference image whose color and lighting properties are matched."),
-                io.Image.Input("generated_image", tooltip="Image adjusted toward the reference while retaining its generated detail."),
-                io.Float.Input("overall_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Overall strength multiplying both color and lighting adjustments."),
-                io.Float.Input("color_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Strength of reference color matching before the overall weight is applied."),
-                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Strength of reference luminance matching before the overall weight is applied."),
-                io.Float.Input("texture_preservation", default=0.5, min=0.0, max=1.0, step=0.001, tooltip="Preserves edges and textures from the generated image by matching only low-frequency properties."),
-                io.Mask.Input("mask", optional=True, tooltip="Optional mask to softly blend the color/lighting changes onto the generated image."),
+                io.Image.Input("original_image", tooltip="Connect the original image. The node automatically finds where it appears inside the larger result, including when its size changed."),
+                io.Image.Input("generated_image", tooltip="Connect the outpainted image. Colors near the matched original-image edges are used to correct the whole result."),
+                io.Float.Input("overall_weight", default=1.0, min=0.0, max=3.0, step=0.001, tooltip="Strength of the complete correction. 0 keeps the generated image unchanged, 1 applies the measured correction, and values above 1 make every correction stronger."),
+                io.Float.Input("color_weight", default=1.0, min=0.0, max=3.0, step=0.001, tooltip="Matches the original image's overall color cast and balance. Values above 1 push the result farther toward those colors. It does not copy colors by pixel position."),
+                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=3.0, step=0.001, tooltip="Matches the original image's overall brightness. Values above 1 make the brightness correction stronger."),
+                io.Float.Input("texture_preservation", default=0.5, min=0.0, max=1.0, step=0.001, tooltip="Keeps fine detail from the generated image while correcting contrast. Increase it if textures become too harsh or too soft."),
+                io.Mask.Input("mask", optional=True, tooltip="Connect the outpaint mask when available. White generated areas are measured and corrected; black original areas stay unchanged. The correction feathers automatically inside the generated edge. Leave disconnected for automatic edge matching and whole-image correction."),
+                io.Float.Input("saturation_weight", optional=True, default=1.0, min=0.0, max=3.0, step=0.001, tooltip="Matches how vivid or muted the original image is. Values above 1 strengthen the saturation correction; lower it if the result becomes too colorful."),
+                io.Float.Input("contrast_weight", optional=True, default=1.0, min=0.0, max=3.0, step=0.001, tooltip="Matches the difference between dark and bright areas in the original image. Values above 1 strengthen the contrast correction; lower it if shadows or highlights become too strong."),
             ],
             outputs=[
                 io.Image.Output(display_name="image"),
@@ -908,7 +914,13 @@ class UC_ImageMatchPropertiesNode(io.ComfyNode):
         lighting_weight: float,
         texture_preservation: float,
         mask: torch.Tensor = None,
+        saturation_weight: float = 1.0,
+        contrast_weight: float = 1.0,
+        source_analysis_mask: torch.Tensor = None,
+        target_analysis_mask: torch.Tensor = None,
     ) -> io.NodeOutput:
+        if mask is None and target_analysis_mask is not None:
+            mask = target_analysis_mask
         result = match_image_properties(
             original_image,
             generated_image,
@@ -917,6 +929,8 @@ class UC_ImageMatchPropertiesNode(io.ComfyNode):
             lighting_weight,
             texture_preservation,
             mask,
+            saturation_weight,
+            contrast_weight,
         )
         return io.NodeOutput(result)
 

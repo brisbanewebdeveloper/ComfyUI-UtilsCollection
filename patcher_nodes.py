@@ -180,11 +180,12 @@ class UC_MiniMaxH3PDDAcc(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "nfe",
-                    options=["8", "6", "4"],
+                    options=["8", "7", "6", "5", "4"],
                     default="8",
                     tooltip=(
-                        "Sampling steps: 8 gives the intended quality, 6 trades some "
-                        "quality for speed, and 4 is fastest. Use this node's sigmas output."
+                        "Sampling steps: 8 gives the intended quality, 5-7 provide "
+                        "trained-envelope middle grounds, and 4 is fastest. An extra "
+                        "step can compensate when using cache. Use this node's sigmas output."
                     ),
                 ),
                 io.String.Input(
