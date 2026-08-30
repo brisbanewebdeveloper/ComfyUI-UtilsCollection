@@ -1077,6 +1077,45 @@ def test_minimax_h3_pdd_wrapper_resets_context_after_failure():
     assert state.sigma.get() is None
 
 
+def test_minimax_h3_pdd_final_forward_follows_current_core_contract():
+    state = patcher_helpers.MiniMaxH3PDDExecutionState()
+    head_bank = patcher_helpers.MiniMaxH3PDDHeadBank(
+        torch.ones(1, 3, 4),
+        torch.zeros(1, 3),
+        torch.ones(1, 2, 4),
+        torch.zeros(1, 2),
+    )
+
+    class FinalLayer:
+        def norm(self, value):
+            return value
+
+        def adaln_proj(self, _t_emb):
+            return torch.zeros(2, 4), torch.zeros(2, 4)
+
+    patched = patcher_helpers.make_pdd_final_forward(
+        FinalLayer(), head_bank, state, (1.0, 0.0), "error", 1.0
+    )
+    token = state.sigma.set(1.0)
+    try:
+        video, audio = patched(
+            torch.ones(4, 4),
+            torch.zeros(2, 4),
+            (0, 2, 0),
+            (2, 4, 1),
+            torch.tensor(1.0),
+            torch.tensor([1.0, 0.0]),
+            (12.0, 3.0),
+        )
+    finally:
+        state.sigma.reset(token)
+
+    assert video.shape == (2, 3)
+    assert audio.shape == (2, 2)
+    assert torch.equal(video, torch.full((2, 3), 4.0))
+    assert torch.equal(audio, torch.full((2, 2), 4.0))
+
+
 def test_minimax_h3_pdd_head_bank_is_core_modelpatcher_managed():
     bank = patcher_helpers.MiniMaxH3PDDHeadBank(
         torch.ones(2, 3, 4),

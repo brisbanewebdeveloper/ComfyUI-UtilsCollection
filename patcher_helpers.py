@@ -714,7 +714,9 @@ def make_pdd_diffusion_wrapper(state: MiniMaxH3PDDExecutionState):
 
 
 def make_pdd_final_forward(final_layer: Any, head_bank: MiniMaxH3PDDHeadBank, state: MiniMaxH3PDDExecutionState, bounds: tuple[float, ...], on_off_grid: str, strength: float):
-    def pdd_final_forward(self, x, t_emb, video_seg, audio_seg):
+    def pdd_final_forward(self, x, t_emb, video_seg, audio_seg, sigma_v, sample_sigmas, shifts):
+        # Keep the PDD block selection tied to the wrapper-validated sampler state;
+        # the remaining arguments are part of Core's current final-layer contract.
         sigma = state.sigma.get()
         if sigma is None:
             raise RuntimeError("MiniMax H3 PDD final layer ran outside its Core diffusion wrapper.")
