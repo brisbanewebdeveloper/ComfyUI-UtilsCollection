@@ -614,7 +614,7 @@ def split_pdd_state_dict(state_dict: dict[str, torch.Tensor], metadata: dict[str
     if not valid:
         raise ValueError(f"{filename} has invalid PDD head shapes: video {list(video_weight.shape)}, video bias {list(video_bias.shape)}, audio {list(audio_weight.shape)}, audio bias {list(audio_bias.shape)}")
     if any(key.startswith("diffusion_model.") for key in state_dict):
-        invalid = [key for key in state_dict if not (key.startswith("diffusion_model.") and key.endswith((".lora_A.weight", ".lora_B.weight", ".alpha")))]
+        invalid = [key for key in state_dict if not (key.startswith("diffusion_model.") and key.endswith((".lora_A.weight", ".lora_B.weight", ".alpha", ".diff", ".diff_b")))]
         if invalid:
             raise ValueError(f"{filename} contains unexpected converted keys: {invalid[:4]}")
         config["source_format"] = "converted"
