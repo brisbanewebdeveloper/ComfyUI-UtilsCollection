@@ -50,6 +50,7 @@ from .encoder_helpers import(
     execute_advanced_minimax_h3_image_to_video_combined,
     build_minimax_h3_media_config,
     MINIMAX_H3_MEDIA_STRUCTURE,
+    MINIMAX_H3_VIDEO_LATENT_MODES,
     execute_minimax_h3_first_frame_references,
     execute_token_fusion_visual_conditioning,
 )
@@ -3324,12 +3325,26 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         return io.Schema(
             node_id="UC_MiniMaxH3MediaConfig", display_name="MiniMax H3 Media Configurator",
             category="advanced/conditioning", is_input_list=True, is_experimental=True,
-            description="Sets optional Picture timestamp syntax and the Video sampling rate used by Qwen for the Advanced MiniMax H3 nodes.",
+            description="Sets Picture timestamp syntax, Qwen Video sampling, and Video motion-guidance memory use for the Advanced MiniMax H3 nodes.",
             inputs=[
                 io.AnyType.Input("timestamps", optional=True, tooltip="Optional sequential timestamps for existing Picture slots. Leave disconnected to keep the default Core Picture presentation."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="0.0s", tooltip="Formatting used when the Picture structure contains <<time>>."),
                 io.String.Input("structure", multiline=True, dynamic_prompts=False, default=MINIMAX_H3_MEDIA_STRUCTURE, tooltip="Picture constructor using required <<picture>> and <<visual>> tags. Default matches Core: <<picture>>: <<visual>>. Timestamped example: At <<time>>, <<picture>>: <<visual>> (from <<shot>>) is fully anchored."),
                 io.Int.Input("video_fps", default=2, min=1, max=24, step=1, tooltip="VLM presentation sampling rate for the 24 fps Video input. Latent video usage is unchanged."),
+                io.Combo.Input(
+                    "video_latent_mode",
+                    options=list(MINIMAX_H3_VIDEO_LATENT_MODES),
+                    default="even keyframes",
+                    tooltip="Controls Video motion guidance. Full Video uses the most sampling memory. Even keyframes keep spaced points from start to end with less sampling memory. Off sends Video only to Qwen.",
+                ),
+                io.Int.Input(
+                    "video_latent_keyframes",
+                    default=4,
+                    min=2,
+                    max=213,
+                    step=1,
+                    tooltip="Number of evenly spaced Video points kept from beginning through end in even keyframes mode. Lower values use less sampling memory.",
+                ),
             ],
             outputs=[MiniMaxH3MediaConfig.Output(display_name="media_config", tooltip="Runtime media configuration for the Advanced MiniMax H3 encoder nodes.")],
         )
@@ -3341,9 +3356,16 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         timestamp_format="0.0s",
         structure=MINIMAX_H3_MEDIA_STRUCTURE,
         video_fps=2,
+        video_latent_mode="even keyframes",
+        video_latent_keyframes=4,
     ):
         return io.NodeOutput(build_minimax_h3_media_config(
-            timestamps, timestamp_format, structure, video_fps
+            timestamps,
+            timestamp_format,
+            structure,
+            video_fps,
+            video_latent_mode,
+            video_latent_keyframes,
         ))
 
 
@@ -3373,7 +3395,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
             description=(
                 "Creates coordinated MiniMax H3 Qwen conditioning from independent frame, reference, and fusion "
                 "inputs together with native visual controls and the matching joint video/audio latent. Optional media "
-                    "configuration controls optional Picture timestamp syntax and Video sampling for Qwen."
+                    "configuration controls optional Picture timestamp syntax, Qwen Video sampling, and Video motion guidance."
             ),
             inputs=[
                 io.Clip.Input(
@@ -3486,9 +3508,9 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                 ),
                 MiniMaxH3MediaConfig.Input(
                     "media_config", optional=True,
-                    tooltip="Optionally formats Picture timestamps and sets the Qwen Video sampling rate. Its default Picture constructor matches Core handling.",
+                    tooltip="Optionally formats Picture timestamps, sets Qwen Video sampling, and controls Video motion guidance. Its default Picture constructor matches Core handling.",
                 ),
-                io.Image.Input("video", optional=True, tooltip="Complete Video frame batch at 24 fps. The configurator controls only how densely Qwen samples it."),
+                io.Image.Input("video", optional=True, tooltip="Complete Video frame batch at 24 fps. The configurator controls Qwen sampling and full, spaced, or disabled VAE motion guidance."),
                 io.Audio.Input("audio", optional=True, tooltip="Optional H3 reference audio."),
                 io.Vae.Input("audio_vae", optional=True, tooltip="Required with audio. Resamples and encodes the reference audio."),
             ],
@@ -3558,7 +3580,7 @@ class UC_AdvancedMiniMaxH3ImageToVideoCombined(
             "Extends the Advanced MiniMax H3 encoder with reference-derived first/final "
             "VAE keyframes and native references. Connect the returned model to the same "
             "sampling branch as the positive conditioning and latent. The inherited media "
-            "configuration adds Qwen-only Video blocks and optional native audio conditioning."
+            "configuration controls Qwen Video presentation, Video motion guidance, and optional native audio conditioning."
         )
         schema.inputs.insert(
             0,

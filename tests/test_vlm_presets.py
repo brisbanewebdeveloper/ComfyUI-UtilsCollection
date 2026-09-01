@@ -85,6 +85,52 @@ H3_FULL_REFERENCE_PRESETS = (
     ),
 )
 
+REAL_LIFE_PHOTO_PRESETS = (
+    "photo_system_instruction",
+    "photo_system_instruction_qwen",
+    "photo_system_instruction_crude",
+)
+REAL_WORLD_PHYSICAL_PRESETS = (
+    "ideogram_4_json_instruction",
+    "ideogram_4_json_instruction_short",
+    "ideogram_4_json_instruction_style",
+    "ideogram_4_json_instruction_color",
+)
+REAL_LIFE_VIDEO_PRESETS = (
+    "video_basic_system_instruction",
+    "video_8sec_system_instruction",
+    "video_struct_system_instruction",
+    "video_8part_struct_system_instruction",
+    "video_timeline_system_instruction",
+    "video_timeline_system_instruction_old",
+    "video_timeline_system_instruction_crude",
+    "video_timeline_minimax_h3_base_system_instruction",
+    "video_timeline_minimax_h3_t2va_system_instruction",
+    "video_timeline_minimax_h3_reference_system_instruction",
+    "video_timeline_minimax_h3_reference_alt_system_instruction",
+    "video_timeline_minimax_h3_mixed_system_instruction",
+    "video_timeline_minimax_h3_reference_system_instruction_new",
+    "video_timeline_minimax_h3_reference_alt_system_instruction_new",
+    "video_timeline_minimax_h3_mixed_system_instruction_new",
+)
+REAL_LIFE_PROHIBITION_PRESETS = (
+    "photo_system_instruction",
+    "toon_system_instruction",
+    "photo_system_instruction_qwen",
+    "toon_system_instruction_qwen",
+    "photo_system_instruction_crude",
+    "toon_system_instruction_crude",
+)
+REAL_LIFE_CHANGED_PRESETS = tuple(
+    dict.fromkeys(
+        REAL_LIFE_PHOTO_PRESETS
+        + REAL_WORLD_PHYSICAL_PRESETS
+        + ("cinematic_dumb_intelligent",)
+        + REAL_LIFE_VIDEO_PRESETS
+        + REAL_LIFE_PROHIBITION_PRESETS
+    )
+)
+
 
 def _normalize_instruction(value):
     return value.replace("\r\n", "\n").rstrip("\n")
@@ -153,6 +199,75 @@ def test_qwen_system_instruction_variants_preserve_original_presets():
             "headings, rule names, analysis, variables, or formatting examples. "
             "Begin directly with the visual description."
         )
+
+
+def test_real_life_targets_replace_positive_realism_guidance():
+    for name in REAL_LIFE_PHOTO_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[name]
+        assert "Description Framed as Real Life Photography" in instruction
+        assert "Real Life Photographic Description" in instruction
+        assert "goal of detailed real life photography" in instruction
+
+    for name in REAL_WORLD_PHYSICAL_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[name]
+        assert "Real World Physical Accuracy and Consistency" in instruction
+
+    cinematic = vlm_presets.system_instructions_vlm["cinematic_dumb_intelligent"]
+    for required in (
+        "direct clinical precision based in reality",
+        "average natural human proportions",
+        "visible real world surface detail",
+        "Live Action Photography",
+        "ANIME→LIVE ACTION",
+    ):
+        assert required in cinematic
+
+    for name in REAL_LIFE_VIDEO_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[name]
+        assert "live action film, real life video, and CGI based in reality" in instruction
+        assert "dynamic live action video clip based in reality" in instruction
+        assert "photorealistic CGI" not in instruction
+        assert "photorealistic video clip" not in instruction
+
+    for name in REAL_LIFE_PROHIBITION_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[name]
+        assert "photorealistic" in instruction
+        assert "hyper realistic" in instruction
+        assert "when describing real life content" in instruction
+        assert "visible camera, lighting, material, texture, motion, and physical details" in instruction
+
+
+def test_real_life_constraint_survives_assembled_context_without_competing_targets():
+    system_query = (
+        "Never use realistic, photorealistic, hyper realistic, or any term derived "
+        "from realistic or realism when describing real life content."
+    )
+    user_query = "Describe the supplied real life content as a scene based in reality."
+    prohibited_positive_phrases = (
+        "Description Framed as Photographic Realism",
+        "Translating Visual Style to Realistic Description",
+        "goal of photographic realism",
+        "Physical Realism and Consistency",
+        "photorealistic clinical precision",
+        "average realistic proportions",
+        "tactile realism",
+        "compelling, dynamic, and photorealistic video clip",
+    )
+
+    for name in REAL_LIFE_CHANGED_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[name]
+        assembled = vlm_nodes.UC_VLMSysInstrAdvPresets.execute(
+            name,
+            False,
+            system_query,
+            user_query,
+        ).args[0]
+        assert assembled.startswith(instruction)
+        assert system_query in assembled
+        assert assembled.count(user_query) == 1
+        assert assembled.index(system_query) < assembled.index(user_query)
+        for phrase in prohibited_positive_phrases:
+            assert phrase not in instruction
 
 
 def test_qwen_query_variants_use_plain_request_delimiters():
@@ -1298,28 +1413,28 @@ def test_minimax_h3_full_reference_protected_prefixes_are_unchanged():
     )
     protected = {
         "video_timeline_minimax_h3_reference_system_instruction": (
-            6523,
-            "b1c477e6debdc33b64eef5c1c3ebe10c137514d8ff35ac6a888e64637c2d8d9a",
+            6556,
+            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction": (
-            6523,
-            "b1c477e6debdc33b64eef5c1c3ebe10c137514d8ff35ac6a888e64637c2d8d9a",
+            6556,
+            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction": (
-            6724,
-            "7320a9f1453318a24bb58465bbded5a51981dda45fd351c5a8d59b2949993e29",
+            6757,
+            "fd50f55ba004c410cb50eb97dd0b9ce75489d8fb8c3c13a48eb148b2dd4b6faa",
         ),
         "video_timeline_minimax_h3_reference_system_instruction_new": (
-            6523,
-            "b1c477e6debdc33b64eef5c1c3ebe10c137514d8ff35ac6a888e64637c2d8d9a",
+            6556,
+            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction_new": (
-            6523,
-            "b1c477e6debdc33b64eef5c1c3ebe10c137514d8ff35ac6a888e64637c2d8d9a",
+            6556,
+            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction_new": (
-            6763,
-            "cedb6c8036341e6c0a794bdb66d2dee722b70f3e5dc7bc542cad542c5907dee5",
+            6796,
+            "4feb104eacb1c4848dd35d2704ebcecc85d833239ae20675f2435183c55552e5",
         ),
     }
 

@@ -45,6 +45,11 @@ _MINIMAX_H3_REFERENCE_KEYFRAME_MODES = {
     "first + last + max": ("first_last", "max"),
 }
 MINIMAX_H3_MEDIA_STRUCTURE = "<<picture>>: <<visual>>"
+MINIMAX_H3_VIDEO_LATENT_MODES = (
+    "full video",
+    "even keyframes",
+    "off",
+)
 _MINIMAX_H3_MEDIA_KEYWORDS = {"time", "picture", "visual", "shot"}
 _MINIMAX_H3_REQUIRED_MEDIA_KEYWORDS = {"picture", "visual"}
 
@@ -391,7 +396,14 @@ def tokenize_minimax_h3_media_prompt(
     audio=False, default_single_visual=False, default_video_frames=None,
     default_video_timestamps=(),
 ):
-    if default_single_visual and pictures and len(pictures) != 1:
+    configured_video_frames = () if video_frames is None else video_frames
+    if (
+        default_single_visual
+        and pictures
+        and len(pictures) != 1
+        and not configured_video_frames
+        and default_video_frames is None
+    ):
         raise ValueError(
             "MiniMax H3 default media config requires exactly one visual source."
         )
@@ -403,7 +415,6 @@ def tokenize_minimax_h3_media_prompt(
             f"MiniMax H3 media config received {len(effective_picture_timestamps)} timestamps "
             f"for {len(pictures)} available Pictures."
         )
-    configured_video_frames = () if video_frames is None else video_frames
     if len(configured_video_frames) != len(video_timestamps):
         raise ValueError(
             "MiniMax H3 configured video frame and timestamp counts must match."
@@ -424,7 +435,7 @@ def tokenize_minimax_h3_media_prompt(
         before, after = expanded.split("<<visual>>")
         entries.extend(_minimax_h3_text_entries(clip, before))
         entries.extend(visual)
-        entries.extend(_minimax_h3_text_entries(clip, after + "\n"))
+        entries.extend(_minimax_h3_text_entries(clip, after))
     if configured_video_frames:
         frames = torch.cat(tuple(configured_video_frames), dim=0)
         entries.extend(_minimax_h3_timestamped_video_entries(
@@ -445,7 +456,8 @@ def tokenize_minimax_h3_media_prompt(
 
 def build_minimax_h3_media_config(
     timestamps, timestamp_format="0.0s", structure=MINIMAX_H3_MEDIA_STRUCTURE,
-    video_fps=2,
+    video_fps=2, video_latent_mode="even keyframes",
+    video_latent_keyframes=4,
 ):
     if isinstance(timestamp_format, list):
         timestamp_format = timestamp_format[0] if timestamp_format else "0.0s"
@@ -460,6 +472,17 @@ def build_minimax_h3_media_config(
     video_fps = int(video_fps)
     if not 1 <= video_fps <= 24:
         raise ValueError("MiniMax H3 video_fps must be an integer from 1 to 24.")
+    if isinstance(video_latent_mode, list):
+        video_latent_mode = video_latent_mode[0] if video_latent_mode else "even keyframes"
+    if video_latent_mode not in MINIMAX_H3_VIDEO_LATENT_MODES:
+        raise ValueError("Unsupported MiniMax H3 video latent mode.")
+    if isinstance(video_latent_keyframes, list):
+        video_latent_keyframes = video_latent_keyframes[0] if video_latent_keyframes else 4
+    if isinstance(video_latent_keyframes, bool) or not isinstance(video_latent_keyframes, numbers.Integral):
+        raise ValueError("MiniMax H3 video latent keyframes must be an integer from 2 to 213.")
+    video_latent_keyframes = int(video_latent_keyframes)
+    if not 2 <= video_latent_keyframes <= 213:
+        raise ValueError("MiniMax H3 video latent keyframes must be an integer from 2 to 213.")
     if timestamp_format not in VIDEO_FRAME_TIMESTAMP_FORMATS:
         raise ValueError(f"Unsupported video timestamp format: {timestamp_format}")
     structure = _validate_minimax_h3_media_structure(structure)
@@ -470,6 +493,8 @@ def build_minimax_h3_media_config(
         "structure": structure,
         "default_single_visual": default_single_visual,
         "video_fps": video_fps,
+        "video_latent_mode": video_latent_mode,
+        "video_latent_keyframes": video_latent_keyframes,
     }
 
 
@@ -494,6 +519,16 @@ def _validate_minimax_h3_media_config(media_config, output_frame_count):
         or not 1 <= video_fps <= 24
     ):
         raise ValueError("MiniMax H3 media config requires video_fps from 1 to 24.")
+    video_latent_mode = media_config.get("video_latent_mode", "even keyframes")
+    if video_latent_mode not in MINIMAX_H3_VIDEO_LATENT_MODES:
+        raise ValueError("MiniMax H3 media config has an unsupported video latent mode.")
+    video_latent_keyframes = media_config.get("video_latent_keyframes", 4)
+    if (
+        isinstance(video_latent_keyframes, bool)
+        or not isinstance(video_latent_keyframes, numbers.Integral)
+        or not 2 <= video_latent_keyframes <= 213
+    ):
+        raise ValueError("MiniMax H3 media config requires video_latent_keyframes from 2 to 213.")
     timestamp_format = media_config.get("timestamp_format")
     if timestamp_format not in VIDEO_FRAME_TIMESTAMP_FORMATS:
         raise ValueError("MiniMax H3 media config has an unsupported timestamp format.")
@@ -504,6 +539,8 @@ def _validate_minimax_h3_media_config(media_config, output_frame_count):
         structure,
         bool(media_config.get("default_single_visual", False)),
         int(video_fps),
+        video_latent_mode,
+        int(video_latent_keyframes),
     )
 
 
@@ -637,13 +674,9 @@ def prepare_minimax_h3_reference_image(
     )
 
 
-def prepare_minimax_h3_reference_video(
-    video: torch.Tensor,
-    vae,
-    maximum_frames: int,
-    encode_reference: bool = True,
-) -> tuple[torch.Tensor, dict | None]:
-    """Prepare one 24-fps H3 reference video using Core's ref2va contract."""
+def _minimax_h3_reference_video_frame_count(
+    video: torch.Tensor, maximum_frames: int
+) -> int:
     if (
         not torch.is_tensor(video)
         or video.ndim != 4
@@ -656,6 +689,24 @@ def prepare_minimax_h3_reference_video(
         raise ValueError(
             "MiniMax H3 video must be a finite BHWC frame batch with at least three channels."
         )
+    frame_count = min(video.shape[0], int(maximum_frames))
+    if frame_count < 5:
+        raise ValueError(
+            "MiniMax H3 reference video needs at least 5 frames (~0.2s at 24 fps)."
+        )
+    while frame_count % 17 != 5:
+        frame_count -= 1
+    return frame_count
+
+
+def prepare_minimax_h3_reference_video(
+    video: torch.Tensor,
+    vae,
+    maximum_frames: int,
+    encode_reference: bool = True,
+) -> tuple[torch.Tensor, dict | None]:
+    """Prepare one 24-fps H3 reference video using Core's ref2va contract."""
+    frame_count = _minimax_h3_reference_video_frame_count(video, maximum_frames)
     if encode_reference and vae is None:
         raise ValueError("MiniMax H3 video requires the video VAE input.")
     source_height, source_width = video.shape[1:3]
@@ -673,13 +724,6 @@ def prepare_minimax_h3_reference_video(
     if source_width * source_height < target_width * target_height:
         target_width = max(32, round(source_width / 32) * 32)
         target_height = max(32, round(source_height / 32) * 32)
-    frame_count = min(video.shape[0], int(maximum_frames))
-    if frame_count < 5:
-        raise ValueError(
-            "MiniMax H3 reference video needs at least 5 frames (~0.2s at 24 fps)."
-        )
-    while frame_count % 17 != 5:
-        frame_count -= 1
     samples = video[:frame_count, ..., :3].movedim(-1, 1)
     samples = comfy.utils.common_upscale(
         samples, target_width, target_height, "lanczos", "disabled"
@@ -699,6 +743,60 @@ def prepare_minimax_h3_reference_video(
         "latent": latent,
         "audio_latent": None,
     }
+
+
+def prepare_minimax_h3_positioned_video_keyframes(
+    video: torch.Tensor,
+    vae,
+    maximum_frames: int,
+    width: int,
+    height: int,
+    keyframe_count: int,
+) -> list[dict]:
+    """Encode one complete H3 video and retain evenly positioned temporal chunks."""
+    frame_count = _minimax_h3_reference_video_frame_count(video, maximum_frames)
+    if vae is None:
+        raise ValueError("MiniMax H3 even Video keyframes require the video VAE input.")
+    samples = video[:frame_count, ..., :3].movedim(-1, 1)
+    samples = comfy.utils.common_upscale(
+        samples, int(width), int(height), "lanczos", "center"
+    )
+    latent = vae.encode(samples.movedim(1, -1))
+    if not torch.is_tensor(latent) or latent.ndim < 5:
+        raise ValueError("MiniMax H3 video VAE returned an invalid latent.")
+    full_chunk_count = (frame_count - 5) // 17
+    expected_latent_t = full_chunk_count * 5 + 2
+    if latent.shape[2] != expected_latent_t:
+        raise ValueError(
+            "MiniMax H3 video VAE returned an unexpected temporal length: "
+            f"expected {expected_latent_t}, received {latent.shape[2]}."
+        )
+    expected_spatial = (int(height) // 16, int(width) // 16)
+    if latent.shape[3:5] != expected_spatial:
+        raise ValueError(
+            "MiniMax H3 video VAE returned an unexpected spatial shape: "
+            f"expected {expected_spatial}, received {tuple(latent.shape[3:5])}."
+        )
+    available = full_chunk_count + 1
+    selected = min(int(keyframe_count), available)
+    if available == 1:
+        chunk_indices = [0]
+    else:
+        chunk_indices = [
+            (index * (available - 1) + (selected - 1) // 2) // (selected - 1)
+            for index in range(selected)
+        ]
+    if len(set(chunk_indices)) != len(chunk_indices):
+        raise ValueError("MiniMax H3 even Video keyframe selection produced duplicate points.")
+    keyframes = []
+    for chunk_index in chunk_indices:
+        latent_start = chunk_index * 5
+        latent_stop = latent_start + (2 if chunk_index == full_chunk_count else 5)
+        keyframes.append({
+            "resolved_frame_index": chunk_index * 17,
+            "latent": latent[:, :, latent_start:latent_stop].clone(),
+        })
+    return keyframes
 
 
 def minimax_h3_video_sample_indices(frame_count: int, video_fps: int) -> list[int]:
@@ -3332,6 +3430,8 @@ def _execute_advanced_minimax_h3_image_to_video(
     picture_structure = None
     default_single_visual = False
     video_fps = 2
+    video_latent_mode = None
+    video_latent_keyframes = 4
     if media_config is not None:
         (
             picture_timestamps,
@@ -3339,16 +3439,43 @@ def _execute_advanced_minimax_h3_image_to_video(
             picture_structure,
             default_single_visual,
             video_fps,
+            video_latent_mode,
+            video_latent_keyframes,
         ) = _validate_minimax_h3_media_config(
             media_config,
             frame_count,
         )
     video_frames = None
     video_reference = None
+    positioned_video_keyframes = []
     if video is not None:
+        resolved_video_latent_mode = video_latent_mode
+        if resolved_video_latent_mode is None:
+            resolved_video_latent_mode = "full video" if frame_vae_enabled else "off"
+        if (
+            resolved_video_latent_mode == "even keyframes"
+            and frame_vae_enabled
+            and native_reference_images
+            and not allow_combined_reference_routing
+        ):
+            raise ValueError(
+                "MiniMax H3 even Video keyframes with native reference images require the Combined node or ref_image_size none."
+            )
         video_frames, video_reference = prepare_minimax_h3_reference_video(
-            video, vae, frame_count, encode_reference=frame_vae_enabled
+            video,
+            vae,
+            frame_count,
+            encode_reference=resolved_video_latent_mode == "full video",
         )
+        if resolved_video_latent_mode == "even keyframes":
+            positioned_video_keyframes = prepare_minimax_h3_positioned_video_keyframes(
+                video,
+                vae,
+                frame_count,
+                width,
+                height,
+                video_latent_keyframes,
+            )
     audio_reference = _encode_minimax_h3_audio_reference(audio, audio_vae)
     prepared_first = (
         prepare_minimax_h3_frame(keyframe_first_image, width, height, "disabled")
@@ -3400,10 +3527,11 @@ def _execute_advanced_minimax_h3_image_to_video(
     visual_encoder_path = config.get("visual_encoder_path", "grid-deepstack")
     def tokenize_presentation(text, images):
         if media_config is not None:
+            collapse_default_picture = default_single_visual and video_frames is None
             presentation_images = (
                 [default_media_image]
-                if default_single_visual and default_media_image is not None
-                else ([] if default_single_visual else images)
+                if collapse_default_picture and default_media_image is not None
+                else ([] if collapse_default_picture else images)
             )
             default_video_frames = None
             default_video_timestamps = []
@@ -3661,6 +3789,9 @@ def _execute_advanced_minimax_h3_image_to_video(
         references.append(video_reference)
     if audio_reference is not None:
         references.append(audio_reference)
+    if positioned_video_keyframes:
+        keyframes.extend(positioned_video_keyframes)
+        keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
     metadata = {}
     if keyframes:
         metadata["minimax_keyframes"] = keyframes
