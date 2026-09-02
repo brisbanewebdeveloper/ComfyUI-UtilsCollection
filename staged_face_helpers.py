@@ -8,8 +8,10 @@ from .model_assets import require_huggingface_model
 from .background_replace_helpers import _expanded_box, _ordered_ring, _polygon_mask
 from .composite_helpers import (
     _expand_mask,
+    _feather_mask,
     _ordered_single_foregrounds,
     _resize_composite_mask,
+    background_removal_with_alpha,
 )
 from .staged_compositor_helpers import bounded_editor_preview, _stage_layered_foregrounds
 
@@ -154,6 +156,105 @@ def detect_or_warn(model, image_uint8, maximum_faces, threshold, socket):
         model, [(socket, image_uint8)], maximum_faces, threshold
     )
     return results[socket], socket in failed
+
+
+def face_removal_with_alpha(
+    image,
+    background_removal_model,
+    face_detection_model,
+    background_options,
+    face_options,
+):
+    """Return padded straight-RGBA face crops and their exact alpha masks."""
+    rgba, foreground_alpha = background_removal_with_alpha(
+        image, background_removal_model, background_options
+    )
+    rgb = rgba[..., :3]
+    processing_resolution = max(
+        0, int(background_options.get("mask_processing_resolution", 0) or 0)
+    )
+    detection_inputs = []
+    detection_shapes = []
+    for image_index, source in enumerate(rgb):
+        detection_rgb = bounded_editor_preview(
+            source.unsqueeze(0), processing_resolution
+        )
+        detection_shapes.append(detection_rgb.shape[1:3])
+        detection_inputs.append(
+            (
+                str(image_index),
+                detection_rgb.mul(255)
+                .add(0.5)
+                .clamp(0, 255)
+                .to(torch.uint8)
+                .cpu()
+                .numpy()[0],
+            )
+        )
+    detected_by_image, failed_images = detect_many_or_warn(
+        face_detection_model,
+        detection_inputs,
+        face_options["maximum_faces"],
+        face_options["detection_threshold"],
+    )
+
+    ring = _ordered_ring(face_detection_model.connection_sets["face_oval"])
+    crops = []
+    for image_index, source in enumerate(rgb):
+        key = str(image_index)
+        if key in failed_images:
+            continue
+        source_height, source_width = source.shape[:2]
+        detection_height, detection_width = detection_shapes[image_index]
+        scale_x = source_width / detection_width
+        scale_y = source_height / detection_height
+        for face in detected_by_image[key]:
+            scaled_box = np.asarray(face["bbox_xyxy"], dtype=np.float32) * np.asarray(
+                [scale_x, scale_y, scale_x, scale_y], dtype=np.float32
+            )
+            x1, y1, x2, y2 = _expanded_box(
+                scaled_box,
+                face_options["bbox_expansion"],
+                source_width,
+                source_height,
+            )
+            landmarks = face["landmarks_xy"] * np.asarray(
+                [scale_x, scale_y], dtype=np.float32
+            )
+            points = landmarks[ring] - np.asarray([x1, y1], dtype=np.float32)
+            face_alpha = _polygon_mask(
+                y2 - y1, x2 - x1, points, source.device, source.dtype
+            )
+            face_alpha = face_alpha * foreground_alpha[
+                image_index, y1:y2, x1:x2
+            ].to(face_alpha)
+            face_alpha = _expand_mask(
+                face_alpha, face_options["mask_expansion"]
+            ).clamp(0, 1)
+            feather_radius = max(0, int(face_options["face_feather_radius"]))
+            if feather_radius:
+                face_alpha = _feather_mask(face_alpha, -feather_radius)
+            if torch.any(face_alpha > 0):
+                crops.append((source[y1:y2, x1:x2], face_alpha))
+
+    if not crops:
+        raise ValueError("No face was detected in the input image batch.")
+
+    output_height = max(crop.shape[0] for crop, _ in crops)
+    output_width = max(crop.shape[1] for crop, _ in crops)
+    output_rgba = []
+    output_masks = []
+    for crop, alpha in crops:
+        height, width = crop.shape[:2]
+        top = (output_height - height) // 2
+        left = (output_width - width) // 2
+        padded_rgb = crop.new_zeros((output_height, output_width, 3))
+        padded_alpha = alpha.new_zeros((output_height, output_width))
+        padded_rgb[top : top + height, left : left + width] = crop
+        padded_alpha[top : top + height, left : left + width] = alpha
+        output_rgba.append(torch.cat((padded_rgb, padded_alpha.unsqueeze(-1)), -1))
+        output_masks.append(padded_alpha)
+    return torch.stack(output_rgba), torch.stack(output_masks)
 
 
 def _stage_face_foregrounds(

@@ -1480,7 +1480,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `maximum_faces=16`\n"
                 "- `bbox_expansion=64`\n"
                 "- `mask_expansion=0`\n"
-                "- `face_feather_radius=8`\n"
+                "- `face_feather_radius=0`\n"
                 "- `initial_face_scale=0.25`\n"
                 "- `face_blend=1.0`\n\n"
                 "Detections are ordered deterministically by vertical and then horizontal center. Overlapping detections are merged by the implemented overlap grouping. A per-image detection failure or empty result leaves the ordinary foreground available. The node outputs IMAGE, MASK, final transformed bounding boxes, and final transformed layer masks."

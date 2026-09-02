@@ -2942,6 +2942,70 @@ def test_background_removal_preserve_alpha_bypasses_model_for_rgba():
     assert torch.equal(alpha, image[..., 3])
 
 
+def test_face_removal_preserves_expanded_crops_and_matching_alpha(monkeypatch):
+    image = torch.zeros((1, 6, 8, 4), dtype=torch.float32)
+    image[..., 0] = torch.arange(8, dtype=torch.float32)[None, None, :] / 8
+    image[..., 3] = 1
+    faces = [
+        {
+            "bbox_xyxy": np.asarray([1, 1, 3, 3], dtype=np.float32),
+            "landmarks_xy": np.zeros((1, 2), dtype=np.float32),
+        },
+        {
+            "bbox_xyxy": np.asarray([4, 2, 8, 5], dtype=np.float32),
+            "landmarks_xy": np.zeros((1, 2), dtype=np.float32),
+        },
+    ]
+    monkeypatch.setattr(
+        staged_face_helpers,
+        "detect_many_or_warn",
+        lambda *_args, **_kwargs: ({"0": faces}, set()),
+    )
+    monkeypatch.setattr(
+        staged_face_helpers,
+        "_polygon_mask",
+        lambda height, width, *_args: torch.ones((height, width)),
+    )
+    face_model = types.SimpleNamespace(connection_sets={"face_oval": [(0, 0)]})
+    background_options = {
+        "mask_processing_resolution": 0,
+    }
+    face_options = {
+        "maximum_faces": 2,
+        "detection_threshold": 0.5,
+        "bbox_expansion": 0,
+        "mask_expansion": 0,
+        "face_feather_radius": 0,
+    }
+
+    rgba, alpha = staged_face_helpers.face_removal_with_alpha(
+        image, None, face_model, background_options, face_options
+    )
+
+    assert rgba.shape == (2, 3, 4, 4)
+    assert alpha.shape == (2, 3, 4)
+    assert torch.equal(rgba[..., 3], alpha)
+    assert torch.equal(alpha[0, 0], torch.tensor([0.0, 1.0, 1.0, 0.0]))
+    assert torch.equal(alpha[0, 1], torch.tensor([0.0, 1.0, 1.0, 0.0]))
+    assert torch.equal(alpha[0, 2], torch.zeros(4))
+    assert torch.equal(alpha[1], torch.ones((3, 4)))
+    assert torch.equal(rgba[1, ..., 0], image[0, 2:5, 4:8, 0])
+
+
+def test_face_removal_node_exposes_shared_options_and_lazy_rgba_bypass():
+    schema = composite_nodes.UC_FaceRemovalPreserveAlpha.define_schema()
+
+    assert schema.display_name == "Face Removal (Preserve Alpha)"
+    assert [output.display_name for output in schema.outputs] == [
+        "RGBA Face",
+        "Face Alpha Mask",
+    ]
+    assert composite_nodes.UC_FaceRemovalPreserveAlpha.check_lazy_status(
+        torch.zeros((1, 2, 2, 4)),
+        background_removal_model=(None, "model_socket"),
+    ) == []
+
+
 def test_background_removal_options_control_processing_and_refinement(monkeypatch):
     image = torch.rand(1, 8, 12, 3)
     captured = {}

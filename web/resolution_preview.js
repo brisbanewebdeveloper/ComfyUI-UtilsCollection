@@ -1,4 +1,8 @@
 import { app } from "../../scripts/app.js";
+import {
+  clampResolutionPreviewSize,
+  resolutionPreviewMinimumSize,
+} from "./resolution_preview_layout.js";
 
 const VIDEO_MIDDLE_BAND_RESOLUTIONS = {
   "21:9": [[896, 384], [1120, 480]],
@@ -127,12 +131,28 @@ app.registerExtension({
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector"].includes(nodeData.name)) return;
 
+    const computeSize = nodeType.prototype.computeSize;
+    nodeType.prototype.computeSize = function (out) {
+      const baseSize = computeSize?.call(this, out ? [...out] : undefined) || [...(out || this.size || [0, 0])];
+      return resolutionPreviewMinimumSize(baseSize);
+    };
+
+    const onResize = nodeType.prototype.onResize;
+    nodeType.prototype.onResize = function (size) {
+      clampResolutionPreviewSize(size, this.computeSize(), this.flags?.collapsed);
+      return onResize?.apply(this, arguments);
+    };
+
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated?.apply(this, arguments);
       this.__ucVideoResolutionSelector = nodeData.name === "UC_VideoResolutionSelector";
       this.__ucResolutionPreview = "";
-      this.setSize([Math.max(this.size[0], 220), this.size[1] + 26]);
+      const minimum = this.computeSize();
+      this.setSize([
+        Math.max(this.size[0], minimum[0]),
+        Math.max(this.size[1], minimum[1]),
+      ]);
       updatePreview(this);
       return result;
     };

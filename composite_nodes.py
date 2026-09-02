@@ -6,7 +6,11 @@ import torch
 
 from comfy_api.latest import io
 from nodes import MAX_RESOLUTION
-from .staged_face_helpers import _stage_face_foregrounds, load_face_model
+from .staged_face_helpers import (
+    _stage_face_foregrounds,
+    face_removal_with_alpha,
+    load_face_model,
+)
 from .composite_helpers import (
     _COMPOSITE_RESIZE_METHODS,
     _DEFAULT_LAYER_PLACEMENT,
@@ -436,6 +440,100 @@ class UC_BackgroundRemovalPreserveAlpha(io.ComfyNode):
         )
 
 
+class UC_FaceRemovalPreserveAlpha(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_FaceRemovalPreserveAlpha",
+            display_name="Face Removal (Preserve Alpha)",
+            category="utils/image",
+            description=(
+                "Keeps detected faces as expanded straight-RGBA crops and returns "
+                "their matching alpha masks. Differently sized crops are centered "
+                "on transparent batch padding."
+            ),
+            inputs=[
+                io.BackgroundRemoval.Input(
+                    "background_removal_model",
+                    display_name="background_removal_model_opt",
+                    optional=True,
+                    lazy=True,
+                    tooltip=(
+                        "Optional Core background-removal model. When connected it "
+                        "overrides the internal BiRefNet/Lucida selector."
+                    ),
+                ),
+                io.Image.Input("image"),
+                io.Combo.Input(
+                    "background_removal_model_name",
+                    options=["birefnet", "lucida"],
+                    default="birefnet",
+                    tooltip=(
+                        "Internal model used when background_removal_model_opt is disconnected."
+                    ),
+                ),
+                StagedBackgroundOptionsType.Input(
+                    "background_options",
+                    display_name="Background Options",
+                    optional=True,
+                ),
+                StagedFaceOptionsType.Input(
+                    "face_options",
+                    display_name="Face Options",
+                    optional=True,
+                ),
+            ],
+            outputs=[
+                io.Image.Output("image", display_name="RGBA Face"),
+                io.Mask.Output("mask", display_name="Face Alpha Mask"),
+            ],
+        )
+
+    @classmethod
+    def check_lazy_status(cls, image, background_removal_model=_MISSING, **kwargs):
+        if torch.is_tensor(image) and image.ndim == 4 and image.shape[-1] >= 4:
+            return []
+        if (
+            isinstance(background_removal_model, tuple)
+            and len(background_removal_model) == 2
+            and background_removal_model[0] is None
+            and background_removal_model[1]
+        ):
+            return [background_removal_model[1]]
+        return []
+
+    @classmethod
+    def execute(
+        cls,
+        image,
+        background_removal_model_name="birefnet",
+        background_removal_model=None,
+        background_options=None,
+        face_options=None,
+    ):
+        if not torch.is_tensor(image) or image.ndim != 4:
+            raise ValueError("Face Removal (Preserve Alpha) requires a batched IMAGE.")
+        if image.shape[-1] < 4:
+            background_removal_model = background_removal_model or (
+                _load_internal_background_removal_model(
+                    background_removal_model_name
+                )
+            )
+        background_options = UC_StagedLayeredBackgroundCompositeOptions.DEFAULTS | (
+            background_options or {}
+        )
+        face_options = UC_StagedMediaPipeFaceOptions.DEFAULTS | (face_options or {})
+        return io.NodeOutput(
+            *face_removal_with_alpha(
+                image,
+                background_removal_model,
+                load_face_model(),
+                background_options,
+                face_options,
+            )
+        )
+
+
 class UC_UnifiedBackgroundReplace(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -811,7 +909,7 @@ class UC_StagedMediaPipeFaceOptions(io.ComfyNode):
         "maximum_faces": 16,
         "bbox_expansion": 64,
         "mask_expansion": 0,
-        "face_feather_radius": 8,
+        "face_feather_radius": 0,
         "initial_face_scale": 0.25,
         "face_blend": 1.0,
     }
@@ -831,7 +929,7 @@ class UC_StagedMediaPipeFaceOptions(io.ComfyNode):
                 io.Int.Input(
                     "mask_expansion", default=0, min=-MAX_RESOLUTION, max=MAX_RESOLUTION, tooltip="Pixels used to grow the face mask; negative values shrink it."
                 ),
-                io.Int.Input("face_feather_radius", default=8, min=0, max=512, tooltip="Inward softness applied to the extracted face-mask edge."),
+                io.Int.Input("face_feather_radius", default=0, min=0, max=512, tooltip="Optional inward softness applied to the extracted face-mask edge; 0 preserves the expanded mask boundary."),
                 io.Float.Input(
                     "initial_face_scale", default=0.25, min=0.05, max=10, step=0.01, tooltip="Initial face-layer size relative to the background's shortest side."
                 ),

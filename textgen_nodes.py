@@ -4,11 +4,16 @@ import torch
 from contextlib import nullcontext
 from enum import Enum
 
-from comfy_api.latest import ComfyExtension, io
+from comfy_api.latest import io
 from comfy import model_management
 from comfy.text_encoders.qwen_vl import qwen2vl_mrope_position_ids
 
 from .encoder_helpers import evaluate_tensor_expression, fuse_visual_token_sources, fuse_deepstack_layers, prepare_vlm_image
+from .textgen_helpers import (
+    generate_qwen3vl_video,
+    prepare_qwen3vl_video_frames,
+    qwen3vl_video_prompt,
+)
 
 VisualFusionConfig = io.Custom("VISUAL_FUSION_CONFIG")
 
@@ -286,6 +291,7 @@ class UC_TextGenerate(io.ComfyNode):
     """
     Advanced text generation node that implements:
     - Multiple image handling via dynamic autogrow input.
+    - Timestamped Qwen3-VL video handling from chronological image batches.
     - Image rescaling limits to optimize performance and prevent out-of-memory.
     - Safe system prompt template selection for different standard formats.
     - Safe manual concatenation to prevent formatting errors with user characters.
@@ -351,6 +357,14 @@ class UC_TextGenerate(io.ComfyNode):
                     step=32,
                     tooltip="Image analysis size. Larger values retain more detail but use more memory."
                 ),
+                io.Int.Input(
+                    "vlm_video_resolution",
+                    default=384,
+                    min=0,
+                    max=4096,
+                    step=32,
+                    tooltip="Qwen3-VL resolution for video frames. Higher values use more visual tokens.",
+                ),
                 io.Int.Input("max_length", default=512, min=1, max=32768, tooltip="Maximum response length."),
                 io.String.Input(
                     "formula",
@@ -367,6 +381,27 @@ class UC_TextGenerate(io.ComfyNode):
                 ),
                 VisualFusionConfig.Input("visual_fusion_config", display_name="Fusion Config", optional=True, tooltip="Optional settings for combining images before generation."),
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode", tooltip="On varies results using the seed. Off gives repeatable results."),
+                io.Image.Input(
+                    "video",
+                    optional=True,
+                    tooltip="Chronological frame batch from Get Video Components.",
+                ),
+                io.Float.Input(
+                    "video_fps",
+                    default=24.0,
+                    min=0.01,
+                    max=1000.0,
+                    step=0.01,
+                    tooltip="Source frame rate from Get Video Components.",
+                ),
+                io.Float.Input(
+                    "sample_fps",
+                    default=2.0,
+                    min=0.01,
+                    max=1000.0,
+                    step=0.01,
+                    tooltip="Frames per second presented to Qwen3-VL.",
+                ),
                 io.Autogrow.Input("image_inputs", template=autogrow_template, tooltip="Add images in order. Each image in a batch is added in order."),
             ],
             outputs=[
@@ -376,7 +411,24 @@ class UC_TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, system_prompt, vlm_resolution, max_length, sampling_mode, formula="", thinking=False, escape_parentheses=False, image_inputs=None, visual_fusion_config=None) -> io.NodeOutput:
+    def execute(
+        cls,
+        clip,
+        prompt,
+        system_prompt,
+        vlm_resolution,
+        max_length,
+        sampling_mode,
+        formula="",
+        thinking=False,
+        escape_parentheses=False,
+        image_inputs=None,
+        visual_fusion_config=None,
+        video=None,
+        video_fps=24.0,
+        sample_fps=2.0,
+        vlm_video_resolution=384,
+    ) -> io.NodeOutput:
         if clip is None:
             raise RuntimeError("ERROR: CLIP/TextEncoder input is invalid: None")
 
@@ -422,9 +474,16 @@ class UC_TextGenerate(io.ComfyNode):
 
         # 3. Parse and Evaluate Math Formulas inside |pipes|
         images_vl = []
+        resolved_visuals = {}
+        visual_marker_pattern = re.compile(r"__UC_TEXTGEN_VISUAL_(\d+)__")
         math_pattern = re.compile(r"\|([^|]+)\|")
         temp = MODEL_TEMPLATES[template_name]
         v_token = temp["visual_token"]
+
+        def register_visual(image):
+            index = len(resolved_visuals)
+            resolved_visuals[index] = image
+            return f"__UC_TEXTGEN_VISUAL_{index}__"
 
         def replace_formula(match):
             expression = match.group(1).strip()
@@ -439,8 +498,7 @@ class UC_TextGenerate(io.ComfyNode):
 
             try:
                 result_tensor = evaluate_formula(expression, _aligned_image_values(processed_images))
-                images_vl.append(result_tensor)
-                return v_token
+                return register_visual(result_tensor)
             except Exception:
                 # Fallback to preserving the original text in case of evaluation error
                 return match.group(0)
@@ -449,7 +507,7 @@ class UC_TextGenerate(io.ComfyNode):
 
         # 4. Check for keyword references like 'image_input_1'
         pattern = re.compile(r'image_input_(\d+)', re.IGNORECASE)
-        has_keywords = bool(pattern.search(modified_prompt)) or len(images_vl) > 0
+        has_keywords = bool(pattern.search(modified_prompt)) or bool(resolved_visuals)
 
         if has_keywords:
             def replace_keyword(match):
@@ -459,23 +517,41 @@ class UC_TextGenerate(io.ComfyNode):
                     img = raw_images[dict_key]
                     display_name = ImageInputMapping.get_display_name(dict_key, is_zero_indexed)
                     processed_img = processed_images.get(display_name, prepare_vlm_image(img, vlm_resolution))
-                    images_vl.append(processed_img)
-                    return v_token
+                    return register_visual(processed_img)
                 return ""
             modified_prompt = pattern.sub(replace_keyword, modified_prompt)
+
+            def resolve_visual(match):
+                image = resolved_visuals[int(match.group(1))]
+                tokens = []
+                for index in range(image.shape[0]):
+                    images_vl.append(image[index:index + 1])
+                    tokens.append(v_token)
+                return "".join(tokens)
+
+            modified_prompt = visual_marker_pattern.sub(resolve_visual, modified_prompt)
         else:
             # Fallback behavior: prepend all connected images in index-sorted order
             image_prompt_prefix = ""
             for num in sorted(raw_images.keys()):
                 display_name = ImageInputMapping.get_display_name(num, is_zero_indexed)
                 processed_img = processed_images[display_name]
-                images_vl.append(processed_img)
-                image_prompt_prefix += v_token
+                for index in range(processed_img.shape[0]):
+                    images_vl.append(processed_img[index:index + 1])
+                    image_prompt_prefix += v_token
             modified_prompt = image_prompt_prefix + modified_prompt
 
-        # A batch is a sequence of independent visual fusion sources.
-        if images_vl:
-            images_vl = [item[i:i + 1] for item in images_vl for i in range(item.shape[0])]
+        video_frames = None
+        if video is not None:
+            if template_name != "qwen3vl":
+                raise ValueError("Video input is supported only by Core Qwen3-VL 4B, 8B, and 32B models.")
+            video_frames, sampled_indices = prepare_qwen3vl_video_frames(
+                video,
+                vlm_video_resolution,
+                video_fps,
+                sample_fps,
+            )
+            modified_prompt = qwen3vl_video_prompt(sampled_indices, video_fps) + modified_prompt
 
         if fusion_active:
             if template_name not in {"qwen3vl", "qwen35"}:
@@ -486,6 +562,16 @@ class UC_TextGenerate(io.ComfyNode):
             if first < 0:
                 raise ValueError("Active visual fusion could not locate the resolved visual marker in the prompt.")
             modified_prompt = modified_prompt[:first] + v_token + modified_prompt[first + len(v_token):].replace(v_token, "")
+
+        if template_name in {"qwen3vl", "qwen35"}:
+            picture_number = 0
+
+            def add_picture_id(_match):
+                nonlocal picture_number
+                picture_number += 1
+                return f"Picture {picture_number}: {v_token}"
+
+            modified_prompt = re.sub(re.escape(v_token), add_picture_id, modified_prompt)
 
         # 5. Build Safe Non-Formatting Chat Template
         # We completely avoid standard formatting or f-strings which fail if prompts contain { } braces.
@@ -514,7 +600,7 @@ class UC_TextGenerate(io.ComfyNode):
 
         # Use skip_template=True because we have assembled perfect, model-specific delimiters ourselves.
         tokens = None
-        if not fusion_active:
+        if not fusion_active and video_frames is None:
             tokens = clip.tokenize(
                 full_prompt,
                 skip_template=True,
@@ -554,7 +640,17 @@ class UC_TextGenerate(io.ComfyNode):
                 used_seed = (int(seed) + attempt) & 0xffffffffffffffff
                 generation_args["seed"] = used_seed
 
-            if fusion_active:
+            if video_frames is not None:
+                generated_ids = generate_qwen3vl_video(
+                    clip,
+                    full_prompt,
+                    images_vl,
+                    video_frames,
+                    visual_fusion_config if fusion_active else None,
+                    generation_args,
+                    thinking,
+                )
+            elif fusion_active:
                 if template_name == "qwen3vl":
                     generated_ids = generate_fused_qwen3vl(clip, full_prompt, images_vl, visual_fusion_config, generation_args, thinking)
                 else:

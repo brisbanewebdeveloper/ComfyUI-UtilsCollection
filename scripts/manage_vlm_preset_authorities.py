@@ -161,9 +161,26 @@ def crlf_bytes(source: str) -> bytes:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bootstrap", action="store_true")
-    parser.add_argument("--apply", action="store_true")
+    parser = argparse.ArgumentParser(
+        description="Synchronize readable *_vars.py files and runtime VLM presets."
+    )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help=(
+            "Reverse the normal direction: restore the readable *_vars.py files "
+            "from the runtime presets."
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Update runtime presets from the readable *_vars.py files. With "
+            "--bootstrap, restore the readable files instead. Without this option, "
+            "only show what would change."
+        ),
+    )
     args = parser.parse_args(argv)
 
     reports = []

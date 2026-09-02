@@ -50,7 +50,7 @@ python_tests = ["tests/test_patcher_nodes.py"]
 frontend_tests = []
 
 [groups.textgen]
-paths = ["textgen_nodes.py", "text_nodes.py", "text_helpers.py"]
+paths = ["textgen_nodes.py", "textgen_helpers.py", "text_nodes.py", "text_helpers.py"]
 python_tests = ["tests/test_textgen_formula.py", "tests/test_text_nodes.py"]
 frontend_tests = []
 
@@ -113,9 +113,9 @@ python_tests = ["tests/test_logic_math_nodes.py"]
 frontend_tests = []
 
 [groups.parameters]
-paths = ["parameter_nodes.py", "parameter_helpers.py", "web/resolution_preview.js"]
+paths = ["parameter_nodes.py", "parameter_helpers.py", "web/resolution_preview.js", "web/resolution_preview_layout.js"]
 python_tests = ["tests/test_parameter_nodes.py", "tests/test_primitive_nodes.py"]
-frontend_tests = []
+frontend_tests = ["tests/test_resolution_preview.mjs"]
 
 [groups.presets]
 paths = ["preset_nodes.py", "presets_collection.py"]

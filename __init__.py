@@ -75,6 +75,7 @@ class SamplingUtils(ComfyExtension):
             UC_ImageAndMaskResize,
             UC_ResizeMask,
             UC_BackgroundRemovalPreserveAlpha,
+            UC_FaceRemovalPreserveAlpha,
             UC_UnifiedBackgroundReplace,
             UC_StagedLayeredBackgroundComposite,
             UC_StagedIndividualComposites,

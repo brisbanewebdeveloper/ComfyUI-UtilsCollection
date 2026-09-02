@@ -110,6 +110,8 @@ def test_resolution_preview_frontend_is_display_only_and_live():
 
     assert "onDrawForeground" in frontend
     assert "onWidgetChanged" in frontend
+    assert "prototype.computeSize" in frontend
+    assert "prototype.onResize" in frontend
     assert "addWidget" not in frontend
 
 

@@ -163,8 +163,20 @@ def validate_rendered(source: str, values: dict[str, str]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--apply", action="store_true")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Check the MiniMax H3 reference-expansion presets and prepare updates "
+            "to vlm_presets_vars.py."
+        )
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "Update vlm_presets_vars.py. Without this option, show whether it needs "
+            "changes without editing it."
+        ),
+    )
     args = parser.parse_args()
 
     values = audit_presets()

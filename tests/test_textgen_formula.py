@@ -20,7 +20,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_textgen_test import textgen_nodes
+    from utils_collection_textgen_test import textgen_helpers, textgen_nodes
 finally:
     cli_args.cpu = prior_cpu
 
@@ -144,15 +144,22 @@ def test_text_generate_schema_has_no_obsolete_blend_config():
 
 
 def test_text_generate_schema_uses_shared_numeric_vlm_resolution_contract():
-    resolution = {
+    inputs = {
         value.id: value for value in textgen_nodes.UC_TextGenerate.define_schema().inputs
-    }["vlm_resolution"]
+    }
+    resolution = inputs["vlm_resolution"]
+    video_resolution = inputs["vlm_video_resolution"]
 
     assert resolution.io_type == "INT"
     assert resolution.default == 384
     assert resolution.min == 0
     assert resolution.max == 4096
     assert resolution.step == 32
+    assert video_resolution.io_type == "INT"
+    assert video_resolution.default == 384
+    assert video_resolution.min == 0
+    assert video_resolution.max == 4096
+    assert video_resolution.step == 32
 
 
 def test_text_generate_appends_optional_visual_fusion_config():
@@ -169,6 +176,374 @@ def test_text_generate_schema_exposes_token_fusion_capability():
         "generated_text",
         "seed",
     ]
+
+
+def test_text_generate_schema_accepts_video_components_outputs():
+    schema_inputs = textgen_nodes.UC_TextGenerate.define_schema().inputs
+    inputs = {value.id: value for value in schema_inputs}
+
+    assert inputs["video"].io_type == "IMAGE"
+    assert inputs["video"].optional is True
+    assert inputs["video_fps"].io_type == "FLOAT"
+    assert inputs["video_fps"].default == 24.0
+    assert inputs["sample_fps"].io_type == "FLOAT"
+    assert inputs["sample_fps"].default == 2.0
+    assert inputs["sample_fps"].max == 1000.0
+    signature = inspect.signature(textgen_nodes.UC_TextGenerate.execute).parameters
+    assert {"video", "video_fps", "sample_fps"} <= set(signature)
+    assert schema_inputs[-1].id == "image_inputs"
+
+
+def test_qwen3vl_video_sampling_uses_source_fps_and_target_sample_fps(monkeypatch):
+    video = torch.arange(24, dtype=torch.float32).view(24, 1, 1, 1).expand(24, 2, 2, 3)
+    prepared = []
+
+    def prepare(frame, resolution):
+        prepared.append((int(frame[0, 0, 0, 0]), resolution))
+        return frame
+
+    monkeypatch.setattr(textgen_helpers, "prepare_vlm_image", prepare)
+    frames, indices = textgen_helpers.prepare_qwen3vl_video_frames(
+        video, 384, video_fps=24.0, sample_fps=2.0
+    )
+
+    assert indices == [0, 12]
+    assert prepared == [(0, 384), (12, 384)]
+    assert frames.shape == (2, 2, 2, 3)
+
+
+def test_qwen3vl_video_sampling_repeat_pads_odd_sample_count(monkeypatch):
+    video = torch.arange(24, dtype=torch.float32).view(24, 1, 1, 1).expand(24, 2, 2, 3)
+    monkeypatch.setattr(textgen_helpers, "prepare_vlm_image", lambda frame, _resolution: frame)
+
+    frames, indices = textgen_helpers.prepare_qwen3vl_video_frames(
+        video, 0, video_fps=24.0, sample_fps=5.0
+    )
+
+    assert indices == [0, 5, 10, 14, 19, 19]
+    assert frames.shape[0] == 6
+    assert torch.equal(frames[-1], frames[-2])
+
+
+def test_qwen3vl_video_sampling_repeat_pads_single_frame(monkeypatch):
+    video = torch.ones((1, 2, 2, 3))
+    monkeypatch.setattr(textgen_helpers, "prepare_vlm_image", lambda frame, _resolution: frame)
+
+    frames, indices = textgen_helpers.prepare_qwen3vl_video_frames(
+        video, 0, video_fps=24.0, sample_fps=2.0
+    )
+
+    assert indices == [0, 0]
+    assert frames.shape[0] == 2
+    assert torch.equal(frames[0], frames[1])
+
+
+def test_qwen3vl_video_sampling_flattens_image_tensor_lists_in_order(monkeypatch):
+    first = torch.tensor([0.0, 1.0]).view(2, 1, 1, 1).expand(2, 2, 2, 3)
+    second = torch.tensor([2.0]).view(1, 1, 1, 1).expand(1, 2, 2, 3)
+    monkeypatch.setattr(textgen_helpers, "prepare_vlm_image", lambda frame, _resolution: frame)
+
+    frames, indices = textgen_helpers.prepare_qwen3vl_video_frames(
+        [first, second], 0, video_fps=3.0, sample_fps=3.0
+    )
+
+    assert indices == [0, 1, 2, 2]
+    assert frames[:, 0, 0, 0].tolist() == [0.0, 1.0, 2.0, 2.0]
+
+
+@pytest.mark.parametrize(
+    "video_fps,sample_fps",
+    [(0.0, 2.0), (24.0, 0.0), (float("nan"), 2.0), (24.0, True)],
+)
+def test_qwen3vl_video_sampling_rejects_invalid_rates(video_fps, sample_fps):
+    with pytest.raises(ValueError, match="finite value greater than zero"):
+        textgen_helpers.prepare_qwen3vl_video_frames(
+            torch.zeros((4, 2, 2, 3)),
+            0,
+            video_fps=video_fps,
+            sample_fps=sample_fps,
+        )
+
+
+@pytest.mark.parametrize(
+    "video",
+    [[], torch.zeros((0, 2, 2, 3)), torch.zeros((2, 2, 2, 4))],
+)
+def test_qwen3vl_video_sampling_rejects_invalid_frame_batches(video):
+    with pytest.raises(ValueError, match="video requires"):
+        textgen_helpers.prepare_qwen3vl_video_frames(
+            video,
+            0,
+            video_fps=24.0,
+            sample_fps=2.0,
+        )
+
+
+def test_qwen3vl_video_prompt_matches_timestamped_video_token_contract():
+    prompt = textgen_helpers.qwen3vl_video_prompt([0, 12, 19, 19], video_fps=24.0)
+
+    assert prompt == (
+        "Video 1: <0.2 seconds><|vision_start|><|video_pad|><|vision_end|>"
+        "<0.8 seconds><|vision_start|><|video_pad|><|vision_end|>"
+    )
+    assert "\n" not in prompt
+    assert "<Video" not in prompt
+
+
+def test_qwen3vl_video_preprocessing_bounds_vram_to_one_temporal_pair():
+    calls = []
+
+    class Transformer:
+        @staticmethod
+        def visual(_flatten, grid):
+            calls.append(grid.clone())
+            token_count = int(grid[0, 0] * grid[0, 1] * grid[0, 2] // 4)
+            values = torch.arange(token_count, dtype=torch.float32).view(token_count, 1)
+            return values, [values + 100]
+
+    model = types.SimpleNamespace(transformer=Transformer())
+    frames = torch.zeros((4, 32, 32, 3))
+    blocks = [
+        textgen_helpers._preprocess_qwen3vl_video_pair(
+            model, torch.device("cpu"), frames[index:index + 2]
+        )
+        for index in range(0, frames.shape[0], 2)
+    ]
+
+    assert len(calls) == 2
+    assert [grid.tolist() for grid in calls] == [[[1, 4, 4]], [[1, 4, 4]]]
+    assert len(blocks) == 2
+
+
+def test_text_generate_routes_video_and_images_through_qwen3vl_video_generation(monkeypatch):
+    captured = {}
+    frames = torch.zeros((2, 4, 4, 3))
+    image = torch.ones((1, 4, 4, 3))
+
+    def prepare_video(video, resolution, video_fps, sample_fps):
+        captured["video_resolution"] = resolution
+        return frames, [0, 12]
+
+    monkeypatch.setattr(textgen_nodes, "prepare_qwen3vl_video_frames", prepare_video)
+    monkeypatch.setattr(textgen_nodes, "qwen3vl_video_prompt", lambda indices, fps: "VIDEO_BLOCK")
+
+    def generate(clip, full_prompt, images, video_frames, fusion_config, generation_args, thinking=False):
+        captured.update(
+            prompt=full_prompt,
+            images=images,
+            frames=video_frames,
+            fusion=fusion_config,
+            generation_args=generation_args,
+        )
+        return [7]
+
+    monkeypatch.setattr(textgen_nodes, "generate_qwen3vl_video", generate)
+    result = textgen_nodes.UC_TextGenerate.execute(
+        _GenerateClip("qwen3vl_8b"),
+        "describe image_input_1",
+        "",
+        384,
+        12,
+        {"sampling_mode": "off"},
+        image_inputs={"image1": image},
+        video=torch.zeros((24, 4, 4, 3)),
+        video_fps=24.0,
+        sample_fps=2.0,
+        vlm_video_resolution=256,
+    )
+
+    assert result.args == ("decoded", 0)
+    assert captured["prompt"].startswith("<|im_start|>user\nVIDEO_BLOCK")
+    assert textgen_nodes.MODEL_TEMPLATES["qwen3vl"]["visual_token"] in captured["prompt"]
+    assert len(captured["images"]) == 1
+    assert torch.equal(captured["frames"], frames)
+    assert captured["fusion"] is None
+    assert captured["video_resolution"] == 256
+
+
+def test_text_generate_labels_and_expands_batched_qwen_images_in_prompt_order():
+    clip = _GenerateClip("qwen3vl_8b")
+    batch = torch.stack([torch.zeros((2, 2, 3)), torch.ones((2, 2, 3))])
+
+    textgen_nodes.UC_TextGenerate.execute(
+        clip,
+        "describe image_input_1",
+        "",
+        0,
+        12,
+        {"sampling_mode": "off"},
+        image_inputs={"image1": batch},
+    )
+
+    prompt, kwargs = clip.tokenize_calls[0]
+    visual_token = textgen_nodes.MODEL_TEMPLATES["qwen3vl"]["visual_token"]
+    assert f"Picture 1: {visual_token}Picture 2: {visual_token}" in prompt
+    assert len(kwargs["images"]) == 2
+    assert torch.equal(kwargs["images"][0], batch[0:1])
+    assert torch.equal(kwargs["images"][1], batch[1:2])
+
+
+def test_text_generate_fuses_images_but_keeps_video_on_mixed_generation_path(monkeypatch):
+    captured = {}
+    image_a = torch.zeros((1, 4, 4, 3))
+    image_b = torch.ones((1, 4, 4, 3))
+    config = {"visual_fusion_method": "linear"}
+
+    monkeypatch.setattr(
+        textgen_nodes,
+        "prepare_qwen3vl_video_frames",
+        lambda video, resolution, video_fps, sample_fps: (video[:2], [0, 12]),
+    )
+    monkeypatch.setattr(textgen_nodes, "qwen3vl_video_prompt", lambda indices, fps: "VIDEO_BLOCK")
+
+    def generate(clip, full_prompt, images, video_frames, fusion_config, generation_args, thinking=False):
+        captured.update(prompt=full_prompt, images=images, fusion=fusion_config)
+        return [7]
+
+    monkeypatch.setattr(textgen_nodes, "generate_qwen3vl_video", generate)
+    textgen_nodes.UC_TextGenerate.execute(
+        _GenerateClip("qwen3vl_32b"),
+        "describe",
+        "",
+        384,
+        12,
+        {"sampling_mode": "off"},
+        image_inputs={"image1": image_a, "image2": image_b},
+        visual_fusion_config=config,
+        video=torch.zeros((24, 4, 4, 3)),
+        video_fps=24.0,
+        sample_fps=2.0,
+    )
+
+    assert captured["fusion"] is config
+    assert len(captured["images"]) == 2
+    assert captured["prompt"].count(textgen_nodes.MODEL_TEMPLATES["qwen3vl"]["visual_token"]) == 1
+    assert "VIDEO_BLOCK" in captured["prompt"]
+
+
+def test_text_generate_rejects_video_for_non_qwen3vl_model():
+    with pytest.raises(ValueError, match="only by Core Qwen3-VL 4B, 8B, and 32B"):
+        textgen_nodes.UC_TextGenerate.execute(
+            _GenerateClip("gemma3_12b"),
+            "describe",
+            "",
+            384,
+            12,
+            {"sampling_mode": "off"},
+            video=torch.zeros((4, 4, 4, 3)),
+        )
+
+
+def test_qwen3vl_video_generation_inserts_temporal_and_image_blocks_in_prompt_order():
+    class Transformer:
+        def __init__(self):
+            self.generated = None
+            self.built_info = None
+
+        @staticmethod
+        def preprocess_embed(_entry, device):
+            return (
+                torch.full((1, 4, 3), 2.0, device=device),
+                {
+                    "grid": torch.tensor([[1, 4, 4]], device=device),
+                    "deepstack": [torch.full((4, 3), 20.0, device=device)],
+                },
+            )
+
+        @staticmethod
+        def visual(_flatten, grid):
+            size = int(grid[0, 0] * grid[0, 1] * grid[0, 2] // 4)
+            return torch.full((1, size, 3), 3.0), [torch.full((size, 3), 30.0)]
+
+        def build_image_inputs(self, embeds, embeds_info):
+            self.built_info = embeds_info
+            visual_mask = torch.zeros((1, embeds.shape[1]), dtype=torch.bool)
+            deepstack = [torch.cat([entry["extra"]["deepstack"][0] for entry in embeds_info])]
+            return torch.zeros((3, embeds.shape[1])), visual_mask, deepstack
+
+        def generate(self, embeds, **kwargs):
+            self.generated = (embeds, kwargs)
+            return [9]
+
+    class Model:
+        def __init__(self):
+            self.transformer = Transformer()
+            self.execution_device = torch.device("cpu")
+
+        def reset_clip_options(self):
+            pass
+
+        def set_clip_options(self, options):
+            self.execution_device = options["execution_device"]
+
+        def process_tokens(self, rows, device):
+            chunks = []
+            info = []
+            cursor = 0
+            for value in rows[0]:
+                if isinstance(value, dict):
+                    block = value["data"].reshape(-1, value["data"].shape[-1]).to(device)
+                    chunks.append(block)
+                    info.append({"type": "embedding", "index": cursor, "size": block.shape[0], "extra": None})
+                    cursor += block.shape[0]
+                else:
+                    chunks.append(torch.zeros((1, 3), device=device))
+                    cursor += 1
+            return torch.cat(chunks).unsqueeze(0), None, None, info
+
+    model = Model()
+    stage = types.SimpleNamespace(clip="qwen3vl_8b", qwen3vl_8b=model)
+
+    class Clip:
+        cond_stage_model = stage
+        patcher = types.SimpleNamespace(load_device=torch.device("cpu"))
+
+        @staticmethod
+        def load_model():
+            pass
+
+        @staticmethod
+        def tokenize(_prompt, **_kwargs):
+            return {
+                "qwen3vl_8b": [[
+                    (151652, 1.0),
+                    (textgen_helpers.QWEN_VIDEO_PAD_ID, 1.0),
+                    (151653, 1.0),
+                    (151652, 1.0),
+                    (textgen_helpers.QWEN_IMAGE_PAD_ID, 1.0),
+                    (151653, 1.0),
+                ]]
+            }
+
+    result = textgen_helpers.generate_qwen3vl_video(
+        Clip(),
+        "prompt",
+        [torch.ones((1, 32, 32, 3))],
+        torch.zeros((2, 32, 32, 3)),
+        None,
+        {
+            "do_sample": False,
+            "max_length": 12,
+            "temperature": 1.0,
+            "top_k": 50,
+            "top_p": 1.0,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+            "presence_penalty": 0.0,
+            "seed": None,
+        },
+    )
+
+    assert result == [9]
+    assert [entry["type"] for entry in model.transformer.built_info] == ["image", "image"]
+    assert model.transformer.built_info[0]["extra"]["grid"].tolist() == [[1, 4, 4]]
+    assert model.transformer.built_info[1]["extra"]["grid"].tolist() == [[1, 4, 4]]
+    assert model.transformer.built_info[0]["extra"]["deepstack"][0][0, 0] == 30.0
+    assert model.transformer.built_info[1]["extra"]["deepstack"][0][0, 0] == 20.0
+    embeds, forwarded = model.transformer.generated
+    assert embeds.shape[1] == 12
+    assert forwarded["max_length"] == 12
+    assert forwarded["deepstack_embeds"][0].shape[0] == 8
 
 
 def test_text_generate_parenthesis_escaping_is_optional_and_final():
@@ -408,6 +783,7 @@ def test_qwen35_fused_generation_uses_primary_visual_block_and_mrope():
     ("qwen35_2b", "qwen35"),
     ("qwen3vl_4b", "qwen3vl"),
     ("qwen3vl_8b", "qwen3vl"),
+    ("qwen3vl_32b", "qwen3vl"),
     ("gemma3_12b", "gemma"),
     ("llama", "llama3"),
 ])
