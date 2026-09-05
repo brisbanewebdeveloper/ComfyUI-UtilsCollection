@@ -138,6 +138,7 @@ class SamplingUtils(ComfyExtension):
             UC_TextConsensusBlendConfig,
             UC_VisualFusionConfig,
             # UC_MiniMaxH3RadialAttentionConfig,
+            UC_MiniMaxH3SlaAttentionConfig,
             UC_UnifiedAttentionPatcher,
             UC_Ideogram4DebannerPatch,
             UC_MiniMaxH3ClipProjectionPatcher,

@@ -225,6 +225,7 @@ the base-resolution conditioning fusion.
 - `UC_FromList`
 - `UC_GetJsonValue`
 - `UC_MiniMaxH3Cache`
+- `UC_MiniMaxH3SlaAttentionConfig`
 - `UC_MiniMaxH3Spectrum`
 - `UC_MiniMaxH3PDDAcc`
 - `UC_UnifiedAttentionPatcher`
@@ -249,6 +250,73 @@ Download the PDD Acc file matching the MiniMax H3 diffusion model:
 Place the downloaded `.safetensors` file in `ComfyUI/models/loras`, or in the
 configured external directory used by ComfyUI's `loras` model category. Restart
 ComfyUI or refresh model files, then select it in `UC_MiniMaxH3PDDAcc`.
+
+### Unified Attention Patcher
+
+`UC_UnifiedAttentionPatcher` returns a cloned model with one selected attention
+backend. Connect its `model` output in place of the original model. The
+`disabled` mode returns the input model unchanged.
+
+| Attention mode | Applies to | Optional runtime requirement | Behavior |
+| --- | --- | --- | --- |
+| `FlashAttention` | Attention calls without a mask | A compatible package providing `flash_attn` or `flash_attn_interface` | Uses FlashAttention. `allow_compile` permits compilation after the initial run. |
+| `SageAttention` | General model attention | `sageattention`; `sageattn3` or `sageattn3_per_block_mean` additionally need `sageattn3` | Select a Sage kernel from `sage_mode`. `allow_compile` permits compilation after the initial run. |
+| `Sparse / MiniMax H3 SLA` | MiniMax H3 self-attention only | CUDA and Triton | Routes each H3 attention block to selected key blocks while retaining dense attention where sparse routing is unsuitable. |
+
+SLA uses its selected `dense_backend` for deliberate dense steps and sparse
+fallbacks. `auto` retains the incoming ComfyUI-selected attention callable. No
+attention package, model checkpoint, or LoRA is downloaded by this node.
+
+#### SageAttention MiniMax H3 memory option
+
+`h3_memory_optimizations` is available only inside the `SageAttention` mode. It
+requires a CUDA MiniMax H3 model and a compatible SageAttention installation.
+It reduces the H3 attention path's peak memory use; selecting it for another
+model raises an error rather than silently applying a different patch.
+
+#### MiniMax H3 SLA controls
+
+SLA is experimental and only patches MiniMax H3 models with 128-dimensional
+attention heads. It does not modify ComfyUI Core files or model weights. The
+`minimax_h3_sla_config` input on `UC_UnifiedAttentionPatcher` is optional.
+Connect `UC_MiniMaxH3SlaAttentionConfig` to configure its documented controls;
+omitting it uses their defaults.
+
+- Main SLA controls:
+  - `sparsity`: fraction of ordinary key blocks skipped. Start with the
+  default `0.90`; compare output and speed against dense attention for each
+  model, resolution, duration, and sampler.
+  - `block_size`: routing granularity. Smaller blocks retain finer temporal
+  and audio detail at additional routing cost.
+  - `dense_tail_steps`: final sampler steps retained on dense attention for
+  detail recovery. Set `0` to allow sparse routing at every eligible step.
+  - `protect_reference_media`: `Off` adds no visual-reference quota; `Light`
+  retains the best-scoring 15% of each reference block range; `Heavy
+  Enforcement` retains every reference block.
+  - `dense_backend`: `comfy_kitchen`, `auto`, `pytorch`, or a value from
+  `CUSTOM_SAGE_MODES`. A selected unavailable backend raises an actionable
+  error before sampling.
+- `UC_MiniMaxH3SlaAttentionConfig` controls:
+  - `minimum_sequence_length`: sequences below this threshold stay on the
+  selected dense attention path.
+  - `dense_steps`: comma-separated zero-based steps or inclusive ranges kept
+  dense, such as `0,3-5`. Default `0` preserves the first sampling step.
+  - `protect_audio`: preserves text and audio ranges in every sparse key
+  selection.
+  - `disable_fp16_accumulation`: disables FP16/BF16 reduced-precision matmul
+  accumulation for this SLA sampling run, then restores prior settings.
+  - `stabilize_routing`: biases near-cutoff block selection toward the prior
+  sampling step. Use it only when motion detail is unstable; it retains a
+  bounded routing history while sampling.
+
+SLA calls stay dense when the call is masked, not MiniMax H3 packed
+self-attention, uses an unsupported dtype/device, falls below the minimum
+sequence length, falls in `dense_steps` or the configured dense tail, lacks
+MiniMax H3 layout metadata, or when the sparse kernel fails. Each reason is
+reported once in the ComfyUI console for that sampling run. A sparse-kernel
+failure also disables further sparse attempts for the remainder of that run.
+This preserves a usable model path when SLA cannot apply, but it also means a
+run may receive less acceleration than its selected sparsity suggests.
 
 ### Scheduler presets
 

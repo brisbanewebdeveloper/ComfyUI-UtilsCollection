@@ -5,8 +5,10 @@ from comfy_api.latest import io
 
 from .patcher_helpers import (
     CUSTOM_SAGE_MODES,
-    UNIFIED_ATTENTION_MODES,
     MiniMaxH3RadialAttentionConfig,
+    MiniMaxH3SlaAttentionConfig,
+    SLA_DENSE_BACKENDS,
+    SLA_REFERENCE_PROTECTION_MODES,
     SpectrumH3Config,
     effective_bootstrap_first_forecast,
     list_minimax_h3_projections,
@@ -20,6 +22,7 @@ from .patcher_helpers import (
 
 
 MiniMaxH3RadialAttentionConfigType = io.Custom("MINIMAX_H3_RADIAL_ATTENTION_CONFIG")
+MiniMaxH3SlaAttentionConfigType = io.Custom("MINIMAX_H3_SLA_ATTENTION_CONFIG")
 
 
 class UC_MiniMaxH3RadialAttentionConfig(io.ComfyNode):
@@ -51,6 +54,36 @@ class UC_MiniMaxH3RadialAttentionConfig(io.ComfyNode):
             block_size=block_size,
             decay_factor=decay_factor,
             allow_compile=allow_compile,
+        ).validate())
+
+
+class UC_MiniMaxH3SlaAttentionConfig(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3SlaAttentionConfig",
+            display_name="MiniMax H3 SLA Attention Config",
+            category="advanced/model/patches",
+            description="Configures block-selected sparse attention for MiniMax H3.",
+            inputs=[
+                io.Int.Input("minimum_sequence_length", default=8192, min=0, max=1000000, step=1024, tooltip="Sequences below this length keep the existing dense attention path."),
+                io.String.Input("dense_steps", default="0", multiline=False, tooltip="Comma-separated zero-based sampling steps or inclusive ranges kept dense, for example 0,3-5."),
+                io.Boolean.Input("protect_audio", default=True, tooltip="Keep text and audio token ranges in every sparse attention selection."),
+                io.Boolean.Input("disable_fp16_accumulation", default=True, tooltip="Disable FP16 and BF16 reduced-precision matmul accumulation for this SLA sampling run."),
+                io.Boolean.Input("stabilize_routing", default=False, tooltip="Bias near-cutoff routing toward the prior sampling step to reduce unstable motion detail."),
+            ],
+            outputs=[MiniMaxH3SlaAttentionConfigType.Output("minimax_h3_sla_config", display_name="SLA Config", tooltip="Connect to Unified Attention Patcher when using Sparse / MiniMax H3 SLA.")],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, minimum_sequence_length, dense_steps, protect_audio, disable_fp16_accumulation, stabilize_routing) -> io.NodeOutput:
+        return io.NodeOutput(MiniMaxH3SlaAttentionConfig(
+            minimum_sequence_length=minimum_sequence_length,
+            dense_steps=dense_steps,
+            protect_audio=protect_audio,
+            disable_fp16_accumulation=disable_fp16_accumulation,
+            stabilize_routing=stabilize_routing,
         ).validate())
 
 
@@ -99,6 +132,17 @@ class UC_UnifiedAttentionPatcher(io.ComfyNode):
                     io.Combo.Input("sage_mode", options=list(CUSTOM_SAGE_MODES), default="auto", tooltip="SageAttention version to use. Auto is the normal choice; select another only when your GPU or installed SageAttention version needs it."),
                     io.Boolean.Input("allow_compile", default=False, tooltip="May speed up later runs after a slower first run. Leave off if compilation causes problems."),
                     io.Boolean.Input("h3_memory_optimizations", default=False, tooltip="MiniMax H3 only. Reduces peak VRAM use during attention. Requires CUDA and a compatible SageAttention install."),
+                ],
+            ),
+            io.DynamicCombo.Option(
+                key="Sparse / MiniMax H3 SLA",
+                inputs=[
+                    io.Float.Input("sparsity", default=0.9, min=0.0, max=0.95, step=0.05, tooltip="Fraction of ordinary key blocks skipped after protected media is retained."),
+                    io.Combo.Input("block_size", options=[32, 64, 128], default=32, tooltip="Tokens represented by each SLA routing block. 128 uses 128-token query blocks and 64-token key blocks."),
+                    io.Int.Input("dense_tail_steps", default=1, min=0, max=8, tooltip="Final sampler steps that keep dense attention for detail recovery."),
+                    io.Combo.Input("protect_reference_media", options=list(SLA_REFERENCE_PROTECTION_MODES), default="Light", tooltip="Off keeps no visual-reference quota; Light keeps the reference SLA quota; Heavy Enforcement keeps every reference block."),
+                    io.Combo.Input("dense_backend", options=list(SLA_DENSE_BACKENDS), default="comfy_kitchen", tooltip="Dense attention backend used for deliberate dense steps and SLA fallbacks."),
+                    MiniMaxH3SlaAttentionConfigType.Input("minimax_h3_sla_config", display_name="SLA Config", tooltip="Connect MiniMax H3 SLA Attention Config to override the documented defaults.", optional=True),
                 ],
             ),
             # io.DynamicCombo.Option(
