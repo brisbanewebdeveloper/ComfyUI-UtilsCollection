@@ -687,10 +687,12 @@ def rebase_pdd_for_pruned_model(model: Any, lora_state: dict[str, torch.Tensor])
 class MiniMaxH3PDDHeadBank(torch.nn.Module):
     def __init__(self, video_weight: torch.Tensor, video_bias: torch.Tensor, audio_weight: torch.Tensor, audio_bias: torch.Tensor) -> None:
         super().__init__()
-        self.register_buffer("video_weight", video_weight)
-        self.register_buffer("video_bias", video_bias)
-        self.register_buffer("audio_weight", audio_weight)
-        self.register_buffer("audio_bias", audio_bias)
+        # Core's ModelPatcher loads parameter-backed modules; buffer-only modules
+        # are omitted from its load list and remain on the offload device.
+        self.register_parameter("video_weight", torch.nn.Parameter(video_weight, requires_grad=False))
+        self.register_parameter("video_bias", torch.nn.Parameter(video_bias, requires_grad=False))
+        self.register_parameter("audio_weight", torch.nn.Parameter(audio_weight, requires_grad=False))
+        self.register_parameter("audio_bias", torch.nn.Parameter(audio_bias, requires_grad=False))
 
     def project(self, video: torch.Tensor, audio: torch.Tensor, block: int) -> tuple[torch.Tensor, torch.Tensor]:
         if self.video_weight.device != video.device or self.audio_weight.device != audio.device:
