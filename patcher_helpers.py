@@ -33,6 +33,7 @@ import comfy.ldm.modules.attention
 import comfy.model_management
 import comfy.model_patcher
 import comfy.model_prefetch
+import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
 import folder_paths
@@ -695,9 +696,11 @@ class MiniMaxH3PDDHeadBank(torch.nn.Module):
         self.register_parameter("audio_bias", torch.nn.Parameter(audio_bias, requires_grad=False))
 
     def project(self, video: torch.Tensor, audio: torch.Tensor, block: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.video_weight.device != video.device or self.audio_weight.device != audio.device:
-            raise RuntimeError("MiniMax H3 PDD head bank was not loaded beside the diffusion model by Core.")
-        return F.linear(video, self.video_weight[block], self.video_bias[block]), F.linear(audio, self.audio_weight[block], self.audio_bias[block])
+        video_weight = comfy.ops.cast_to_input(self.video_weight[block], video, copy=False)
+        video_bias = comfy.ops.cast_to_input(self.video_bias[block], video, copy=False)
+        audio_weight = comfy.ops.cast_to_input(self.audio_weight[block], audio, copy=False)
+        audio_bias = comfy.ops.cast_to_input(self.audio_bias[block], audio, copy=False)
+        return F.linear(video, video_weight, video_bias), F.linear(audio, audio_weight, audio_bias)
 
 
 class MiniMaxH3PDDExecutionState:

@@ -1554,3 +1554,44 @@ def test_minimax_h3_pdd_head_bank_is_core_modelpatcher_managed():
     assert patcher.model_size() == sum(tensor.nbytes for tensor in bank.state_dict().values())
     assert video.shape == (1, 3)
     assert audio.shape == (1, 2)
+
+
+def test_minimax_h3_pdd_head_bank_projects_in_input_dtype():
+    bank = patcher_helpers.MiniMaxH3PDDHeadBank(
+        torch.ones(2, 3, 4, dtype=torch.float64),
+        torch.zeros(2, 3, dtype=torch.float64),
+        torch.ones(2, 2, 4, dtype=torch.float64),
+        torch.zeros(2, 2, dtype=torch.float64),
+    )
+    video, audio = bank.project(
+        torch.ones(1, 4, dtype=torch.float32),
+        torch.ones(1, 4, dtype=torch.float32),
+        1,
+    )
+
+    assert video.dtype == torch.float32
+    assert audio.dtype == torch.float32
+    assert torch.equal(video, torch.full((1, 3), 4.0))
+    assert torch.equal(audio, torch.full((1, 2), 4.0))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required to exercise CPU head-bank offload")
+def test_minimax_h3_pdd_head_bank_projects_from_offload_device():
+    bank = patcher_helpers.MiniMaxH3PDDHeadBank(
+        torch.ones(2, 3, 4),
+        torch.zeros(2, 3),
+        torch.ones(2, 2, 4),
+        torch.zeros(2, 2),
+    )
+    video, audio = bank.project(
+        torch.ones(1, 4, device="cuda"),
+        torch.ones(1, 4, device="cuda"),
+        1,
+    )
+
+    assert bank.video_weight.device.type == "cpu"
+    assert bank.audio_weight.device.type == "cpu"
+    assert video.device.type == "cuda"
+    assert audio.device.type == "cuda"
+    assert torch.equal(video.cpu(), torch.full((1, 3), 4.0))
+    assert torch.equal(audio.cpu(), torch.full((1, 2), 4.0))
