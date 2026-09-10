@@ -290,11 +290,14 @@ def _temporal_processed_sources(processed, videos, image_count):
     return blocks
 
 
+
+
 def encode_temporal_conditioning(
     clip, canonical_tokens, frame_pairs, prepare_pair_callback, *, token_fusion,
     fusion_callback, encode_tokens_callback, active_clip_model_callback=None,
     encode_preprocessed_callback=None, visual_context_callback=None,
     video_grid_callback=None, token_spans_callback=None,
+    cache=None,
 ):
     """Encode bounded full lanes, fusing only corresponding video interiors.
 
@@ -406,7 +409,10 @@ def encode_temporal_conditioning(
             if deepstack is not None:
                 entry["extra"]["deepstack"] = deepstack
         with visual_context_callback():
-            return encode_preprocessed_callback(clip_model, fused, attention, num_tokens, fused_info)
+            return encode_preprocessed_callback(
+                clip_model, fused, attention, num_tokens, fused_info,
+                **({"cache": cache, "hooks": clip.patcher.forced_hooks} if cache is not None else {}),
+            )
 
     hooks = clip.patcher.forced_hooks
     schedules = hooks.get_hooks_for_clip_schedule() if hooks is not None and clip.use_clip_schedule else None

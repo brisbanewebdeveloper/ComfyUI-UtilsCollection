@@ -21,6 +21,11 @@ The list below uses the canonical node IDs. Deprecated compatibility aliases rem
 - `UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion`
 - `UC_MiniMaxH3VLMGuide`
 - `UC_MiniMaxH3MediaConfig`
+- `UC_MiniMaxH3RefExtract`
+- `UC_MiniMaxH3AudioRefExtract`
+- `UC_MiniMaxH3RefLoad`
+- `UC_MiniMaxH3RefSave`
+- `UC_MiniMaxH3RefApply`
 - `UC_AdvancedVisConEncoder`
 - `UC_AdvancedVisConEncoderTokenFusion`
 - `UC_VisualConsensusConfiguration`
@@ -39,11 +44,25 @@ The list below uses the canonical node IDs. Deprecated compatibility aliases rem
 
 #### MiniMax H3 experiments
 
+All four H3 image-to-video encoders preserve joint Qwen encoding regardless of enable_caching. Enabled modes cache complete joint encoded results; changing their prompt or media invalidates those results. Image/video modes select matching VAE outputs; all also includes audio VAE outputs. Raw vision, DeepStack, and pre-Qwen tokens are never saved. Guide retains its established independent encoding and caches in images_only and all. Entries use UnifiedEfficientLoader under ComfyUI temporary storage.
+
 The temporal encoders fuse offset video samples into the ordinary video token budget. Set temporal density and consensus/spatial method on `UC_MiniMaxH3MediaConfig`; density 1 preserves ordinary sampling. Consensus uses `UC_TextConsensusBlendConfig`, spatial fusion uses `UC_VisualFusionConfig`.
 
 `UC_MiniMaxH3VLMGuide` inserts an independently encoded timestamp/image block before the prompt in compatible H3 conditioning. Chained guides retain insertion order. This experiment does not re-encode the original prompt jointly with the guide.
 
 `UC_MiniMaxH3FirstFrameReferences`, `UC_AdvancedMiniMaxH3ImageToVideoCombined`, and `UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion` were removed. Workflows using these IDs report missing nodes; no aliases or migration are provided.
+
+#### MiniMax H3 Ref
+
+**MiniMax H3 Ref Extract** encodes each image in an `IMAGE` batch as a separate native H3 reference. Select `video` only when the ordered batch is one 24 fps clip; the clip needs at least five frames. **MiniMax H3 Audio Ref Extract** creates an independent audio reference with a matching H3 audio VAE. Compression can reduce token cost but loses detail; refined compression optimizes only the compressed latent and does not train a model.
+
+Use **MiniMax H3 Ref Save** to write individual `.safetensors` artifacts under `ComfyUI/models/minimax_h3_refs`, then select an artifact with **MiniMax H3 Ref Load**. **MiniMax H3 Ref Apply** appends saved or newly extracted refs to existing MiniMax H3 conditioning. It uses ordinary native conditioning only—no model patcher or sampler wrapper—and does not add prompt labels, learned trigger words, or voice-cloning guarantees.
+
+Ref Save is an output node, so extraction can run without a sampler. Save uses the original `refmod_meta` file header. Load accepts original-format references and earlier files saved here with `ref_meta`; the shorter node names do not change file compatibility. Saved descriptions and settings are retained as metadata, not automatically applied as controls.
+
+Refs are applied independently in socket order. `retention` controls detail retained in newly supplied refs; it is not attention strength or a denoising curve. `max_ref_tokens` rejects excess total reference tokens instead of silently resizing or dropping refs.
+
+Custom merging, time-varying reference curves, synchronized audio/video identity binding, and library or preview UI are future work. Use the original reference-node package if you need its package-specific behavior.
 
 #### MiniMax H3 CLIP projection models
 
@@ -154,12 +173,46 @@ the base-resolution conditioning fusion.
 - `UC_TextOverlayNode`
 - `UC_CompositeNodesGuide`
 - `UC_LaMaInpaint`
+- `UC_BatchedOpenPose`
+- `UC_DWPoseEstimator`
+- `UC_AnimalPoseEstimator`
+- `UC_DensePoseEstimator`
+
+`UC_BatchedOpenPose` batches video frames for body inference and person crops for hand/face inference. `UC_DWPoseEstimator` batches YOLOX frames and RTMPose person crops, including partial batches without padding. Both return `IMAGE` and `POSE_KEYPOINT`, use ComfyUI's selected device/model management, and expose a batch size to control VRAM use. These are independent eager implementations loaded through UEL; `comfyui_controlnet_aux`, Ultralytics, ONNX Runtime, MMPose, and TorchScript are not runtime dependencies. Speed and prediction parity need real-model validation.
+
+Checkpoints belong in `ComfyUI/models/controlnet/preprocessors` (also discovered under additional `controlnet` roots registered through `folder_paths`). Executing a pose node downloads missing weights from the pack's HF repository through `huggingface_hub` and reuses existing local files. No model weights are stored in this node repository.
+
+DWPose exposes separate detection and keypoint-confidence thresholds (both default to `0.3`). OpenPose exposes body (`0.1`), hand/face (`0.05`), limb affinity (`0.05`), limb support (`0.8`), minimum connected body parts (`4`), and minimum assembled body score (`0.4`). OpenPose preserves face-landmark slots when points are below threshold so temporal matching cannot shift landmark identities.
+
+Both nodes share optional `temporal_filter`: it treats the input batch as ordered video frames and prunes individual unsupported keypoints before rendering and exporting, without removing person entries or interpolating replacement joints. Defaults inspect two frames on either side, require support from two neighbors where available, allow movement up to `0.1` of the person's box diagonal, and match person boxes at IoU `0.3`. Increase the distance allowance for faster motion; leave filtering disabled for unrelated still images. Matching spans processing-chunk boundaries.
+
+| Node | Checkpoints | Path in `silveroxides/ComfyUI-UtilsCollection-Models` |
+| --- | --- | --- |
+| OpenPose | `openpose_body.safetensors`; `openpose_hand.safetensors` when hands enabled; `openpose_face.safetensors` when face enabled | `preprocessors/openpose/` |
+| DWPose detector | `dwpose_yolox_l.safetensors` | `detectors/` |
+| DWPose pose | `dwpose_ucoco_384.safetensors` | `preprocessors/dwpose/` |
+
+`scripts/convert_pose_models_to_safetensors.py` converts the original trusted `.pth`/TorchScript sources, maps eager tensor names, and verifies shapes, dtypes, and tensor values before accepting the output. Runtime loaders accept the converted safetensors, not the original executable archives.
+
+`UC_AnimalPoseEstimator` reuses YOLOX for COCO animal classes 14–23 and runs AP10K RTMPose crops in batches, returning `IMAGE` and AP10K `POSE_KEYPOINT` records. Detection, keypoint, NMS and temporal-filter controls are exposed. `UC_DensePoseEstimator` runs an eager R50-FPN backbone and ROI heads in batches, with Viridis/Parula rendering and exposed detection/NMS/proposal limits. DensePose uses torchvision's existing ROI/NMS operations, not Detectron2.
+
+Additional files: `animalpose_ap10k_256.safetensors` under HF `preprocessors/animalpose/`, and `densepose_r50_fpn.safetensors` under `preprocessors/densepose/`; both install in the same local preprocessor model directory. Artifact conversion/loading is verified separately from numerical prediction parity and measured speed, which remain unverified for these ports.
+
+For further models, use `MODEL_MIGRATION.md` and the shared `models/migrations.json` manifest/schema rather than inventing a new conversion/loading flow.
 
 `UC_StagedLayeredBackgroundComposite` builds a scene from a background and ordered foreground sockets. Use `run_staging` to retain cutouts and populate the placement editor. Use `run_staged` to composite retained cutouts without loading models or evaluating foreground branches. Use `full_run` to restage and composite in one queue. `foreground_0` is the backmost layer. Retained cutouts are held in server memory and must be recreated after restarting ComfyUI.
 
 `UC_StagedMediaPipeFaceBackgroundComposite` detects faces in each foreground and adds them as independently placeable layers. The background and face options nodes contain removal, extraction, feathering, and blend settings. `UC_StagedIndividualComposites` provides the same ordinary foreground staging editor but returns one full-background image, placement mask, and box per included foreground without stacking them. `UC_BackgroundRemovalPreserveAlpha` directly returns source-resolution RGBA images and their soft alpha masks; existing RGBA inputs keep their supplied alpha without model execution. `UC_FaceRemovalPreserveAlpha` returns expanded face crops as RGBA images with matching alpha masks and transparent padding for differently sized batched crops.
 
 `UC_LoadLaMaModel` loads Big LaMa `.safetensors` files from `ComfyUI/models/lama` through Unified Efficient Loader. Connect its `LAMA_MODEL` output to `UC_LaMaInpaint`. Device choices include ComfyUI's default device, CPU, and every visible GPU. Models are never downloaded automatically. Download [Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/big-lama.safetensors) or [Anime/Manga Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/anime-manga-big-lama.safetensors), then place the selected file in `ComfyUI/models/lama`.
+
+Each staged foreground (including detected faces) supports **Brush** and **Text** in its right-click menu after staging. Additions use the foreground's rectangular canvas, including transparent pixels, and follow its transforms. Brush erasing leaves the original foreground and text untouched. Text is one editable multiline block; click the foreground in Text mode to position it. **Show Brush/Text** controls preview and output visibility independently of editing. **Reset Brush/Text** clears only that content; placement Reset preserves both. Additions stay attached to the same foreground socket when its source changes.
+
+Brush/text PNGs save automatically to ComfyUI input storage; queueing waits for saves. Keep those PNGs when moving workflows. Text stays editable in workflow data, while its saved PNG preserves appearance during backend execution. Tool-local Undo/Redo history lasts for the current editor session.
+
+The Brush panel's **Object Eraser** removes original foreground pixels without altering text. Brush opacity and hardness control erasure strength and edges. Undo/Redo covers painting and object erasures in order; **Reset Brush** restores the original foreground and clears painted content. **Show Brush** also controls whether object erasures apply.
+
+The left sidebar stays visible and shows the selected foreground's context actions when no drawing tool is active. Brush and text share an HSL color picker below their controls. Hold numeric or layer-order arrows to repeat changes; releasing stops the repeat.
 
 ### Staged compositor example
 
@@ -222,6 +275,7 @@ the base-resolution conditioning fusion.
 - `UC_LoadImageDirectory`
 - `UC_LoadImageWithAlpha`
 - `UC_SampleVideoFramesAsImages`
+- `UC_MiniMaxH3RefVid` — **H3 Reference Video Components** prepares 24 fps reference frames, H3-ready audio, width, height, and frame count. Its final `video` output preserves the source resolution and framing, adjusting only timing and audio for nodes that accept VIDEO. Set the duration in seconds (`0` uses the whole clip); the selected duration rounds up to H3's supported frame count. Only the separate `frames` output is matched to the nearest standard aspect ratio from Video Resolution Selector and center-cropped to its selected resolution. Audio is resampled to 32 kHz and padded only at the end to an 800-sample boundary, avoiding Core's H3 audio input-cropping issue; missing audio is filled with silence.
 - `UC_ImagesToVideoTimeline`
 - `UC_VideoTimelineText`
 - `UC_LoraLoaderCLIPOnly`

@@ -328,6 +328,8 @@ def _test_token_spans(row, tensor):
     return spans
 
 
+
+
 def test_post_lane_encoding_preserves_metadata_and_all_nonvideo_slices():
     tokens, pairs = _lane_fixture()
     calls = []

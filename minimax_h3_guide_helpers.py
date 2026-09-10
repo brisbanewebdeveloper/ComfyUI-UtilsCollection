@@ -99,6 +99,8 @@ def _validated_entry(entry, *, require_layout):
     return tensor, metadata, tags, layout["prompt_start"]
 
 
+
+
 def splice_conditioning(base_conditioning, guide_conditioning):
     """Insert one complete guide encoding before every compatible base prompt.
 

@@ -1,3 +1,8 @@
+[groups.minimax_h3_cache]
+paths = ["minimax_h3_cache_helpers.py", "encoder_helpers.py", "encoder_nodes.py", "minimax_h3_temporal_helpers.py", "patcher_helpers.py"]
+python_tests = ["tests/test_minimax_h3_cache.py"]
+frontend_tests = []
+
 [groups.minimax_h3_guide]
 paths = ["minimax_h3_guide_helpers.py"]
 python_tests = ["tests/test_minimax_h3_guide.py"]
@@ -49,6 +54,11 @@ python_tests = [
 ]
 frontend_tests = []
 
+[groups.minimax_h3_refs]
+paths = ["model_helpers.py", "model_nodes.py"]
+python_tests = ["tests/test_minimax_h3_refs.py"]
+frontend_tests = []
+
 [groups.embedding_analysis]
 paths = ["embedding_helpers.py", "embedding_nodes.py"]
 python_tests = ["tests/test_embedding_analysis.py"]
@@ -70,6 +80,7 @@ paths = [
   "composite_helpers.py",
   "composite_nodes.py",
   "staged_compositor_helpers.py",
+  "foreground_content_helpers.py",
   "staged_face_helpers.py",
 ]
 python_tests = ["tests/test_composite_nodes.py", "tests/test_composite_guide.py"]
@@ -87,6 +98,11 @@ frontend_tests = []
 paths = [
   "image_nodes.py",
   "image_helpers.py",
+  "models/openpose.py",
+  "models/yolox.py",
+  "models/rtmpose.py",
+  "models/densepose.py",
+  "models/migrations.json",
   "color_name_data.py",
   "color_palette_helpers.py",
 ]
@@ -96,6 +112,7 @@ python_tests = [
   "tests/test_prevalent_colors.py",
   "tests/test_image_resampling.py",
   "tests/test_video_frame_sampler.py",
+  "tests/test_pose_estimators.py",
 ]
 frontend_tests = []
 
@@ -152,7 +169,6 @@ frontend_tests = []
 [groups.registration]
 paths = [
   "__init__.py",
-  "README.md",
   "workflows/*.json",
   "legacy_nodes.py",
   "loader_nodes.py",
@@ -191,12 +207,18 @@ frontend_tests = [
 
 [groups.paint_frontend]
 paths = [
+  "web/foreground_content.js",
+  "web/foreground_content_editor.js",
+  "web/staged_editor_controls.js",
   "web/paint_brush.js",
   "web/paint_color_picker.js",
   "web/paint_persistence.js",
 ]
 python_tests = ["tests/test_composite_nodes.py"]
 frontend_tests = [
+  "tests/test_foreground_content.mjs",
+  "tests/test_foreground_content_editor.mjs",
+  "tests/test_staged_editor_controls.mjs",
   "tests/test_paint_brush.mjs",
   "tests/test_paint_color_picker.mjs",
   "tests/test_paint_persistence.mjs",

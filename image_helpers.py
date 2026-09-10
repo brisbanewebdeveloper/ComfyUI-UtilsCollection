@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import colorsys
+import comfy.model_management
+import comfy.utils
 import math
 import os
 import re
@@ -12,8 +15,735 @@ import av
 import cv2
 import numpy as np
 import torch
+import torchaudio
+from nodes import MAX_RESOLUTION
 
-from .helper_functions import resize_nchw
+from .helper_functions import ASPECT_RATIOS, resize_nchw
+from .parameter_helpers import h3_video_length_from_seconds, select_video_resolution
+
+
+BODY_LIMBS = ((1, 2), (1, 5), (2, 3), (3, 4), (5, 6), (6, 7), (1, 8), (8, 9),
+              (9, 10), (1, 11), (11, 12), (12, 13), (1, 0), (0, 14), (14, 16),
+              (0, 15), (15, 17), (2, 16), (5, 17))
+PAF_CHANNELS = ((12, 13), (20, 21), (14, 15), (16, 17), (22, 23), (24, 25),
+                (0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11), (28, 29),
+                (30, 31), (34, 35), (32, 33), (36, 37), (18, 19), (26, 27))
+BODY_COLORS = ((255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 255, 0),
+               (85, 255, 0), (0, 255, 0), (0, 255, 85), (0, 255, 170), (0, 255, 255),
+               (0, 170, 255), (0, 85, 255), (0, 0, 255), (85, 0, 255), (170, 0, 255),
+               (255, 0, 255), (255, 0, 170), (255, 0, 85))
+HAND_LIMBS = tuple(edge for start in (1, 5, 9, 13, 17)
+                   for edge in ((0, start), (start, start + 1), (start + 1, start + 2), (start + 2, start + 3)))
+
+
+def resize_pose_map(image, width, height):
+    """Resize feature maps in channel groups supported by OpenCV's area kernel."""
+    if image.shape[:2] == (height, width):
+        return image
+    interpolation = cv2.INTER_AREA if width + height < sum(image.shape[:2]) else cv2.INTER_LANCZOS4
+    if interpolation == cv2.INTER_AREA and image.ndim == 3 and image.shape[2] > 4:
+        return np.concatenate([resize_pose_map(image[..., start:start + 4], width, height)
+                               for start in range(0, image.shape[2], 4)], axis=2)
+    result = cv2.resize(image, (int(width), int(height)), interpolation=interpolation)
+    return result[..., None] if result.ndim == 2 and image.ndim == 3 else result
+
+
+def score_limb_pairs(first, second, paf, channels, limb_threshold=0.05, limb_support=0.8):
+    """Score every candidate pair using the original ten-point PAF criterion."""
+    if not len(first) or not len(second):
+        return []
+    delta = second[None, :, :2] - first[:, None, :2]
+    distance = np.maximum(np.linalg.norm(delta, axis=-1), 0.001)
+    direction = delta / distance[..., None]
+    fraction = np.linspace(0, 1, 10)
+    samples = first[:, None, None, :2] + delta[:, :, None, :] * fraction[None, None, :, None]
+    points = np.rint(samples).astype(np.intp)
+    x, y = points[..., 0], points[..., 1]
+    projection = paf[y, x, channels[0]] * direction[..., 0, None] + paf[y, x, channels[1]] * direction[..., 1, None]
+    scores = projection.mean(axis=-1) + np.minimum(0.5 * paf.shape[0] / distance - 1, 0)
+    valid = (np.count_nonzero(projection > limb_threshold, axis=-1) > limb_support * 10) & (scores > 0)
+    rows, columns = np.nonzero(valid)
+    order = np.argsort(-scores[rows, columns], kind="stable")
+    used_first, used_second, matches = set(), set(), []
+    for index in order:
+        i, j = int(rows[index]), int(columns[index])
+        if i not in used_first and j not in used_second:
+            used_first.add(i)
+            used_second.add(j)
+            matches.append((int(first[i, 3]), int(second[j, 3]), float(scores[i, j])))
+    return matches
+
+
+def decode_body(heatmap, paf, body_threshold=0.1, limb_threshold=0.05, limb_support=0.8, min_body_parts=4, min_body_score=0.4):
+    smoothed = cv2.GaussianBlur(heatmap[..., :18], (25, 25), 3, borderType=cv2.BORDER_REFLECT)
+    padded = np.pad(smoothed, ((1, 1), (1, 1), (0, 0)), mode="constant")
+    peaks = ((smoothed > body_threshold) & (smoothed >= padded[:-2, 1:-1]) & (smoothed >= padded[2:, 1:-1])
+             & (smoothed >= padded[1:-1, :-2]) & (smoothed >= padded[1:-1, 2:]))
+    candidates, by_part = [], []
+    for part in range(18):
+        y, x = np.nonzero(peaks[..., part])
+        entries = np.column_stack((x, y, heatmap[y, x, part], np.arange(len(candidates), len(candidates) + len(x))))
+        candidates.extend(entries)
+        by_part.append(entries)
+    if not candidates:
+        return []
+    candidate = np.asarray(candidates)
+    people = []
+    for limb, ((a, b), channels) in enumerate(zip(BODY_LIMBS, PAF_CHANNELS)):
+        for first, second, score in score_limb_pairs(by_part[a], by_part[b], paf, channels, limb_threshold, limb_support):
+            owners = [i for i, person in enumerate(people) if person[a] == first or person[b] == second]
+            if len(owners) == 1:
+                person = people[owners[0]]
+                if person[b] != second:
+                    person[b] = second
+                    person[-1] += 1
+                    person[-2] += candidate[second, 2] + score
+            elif len(owners) >= 2:
+                i, j = owners[:2]
+                first_person, second_person = people[i], people[j]
+                if not np.any((first_person[:18] >= 0) & (second_person[:18] >= 0)):
+                    first_person[:18] += second_person[:18] + 1
+                    first_person[-2:] += second_person[-2:]
+                    first_person[-2] += score
+                    people.pop(j)
+                else:
+                    first_person[b] = second
+                    first_person[-1] += 1
+                    first_person[-2] += candidate[second, 2] + score
+            elif limb < 17:
+                person = np.full(20, -1.0)
+                person[a], person[b] = first, second
+                person[-1] = 2
+                person[-2] = candidate[first, 2] + candidate[second, 2] + score
+                people.append(person)
+    return [
+        [None if index < 0 else tuple(candidate[int(index), :2]) for index in person[:18]]
+        for person in people if person[-1] >= min_body_parts and person[-2] / person[-1] >= min_body_score
+    ]
+
+
+def hand_boxes(body, width, height):
+    boxes = []
+    for side, joints in (("hand_left_keypoints_2d", (5, 6, 7)), ("hand_right_keypoints_2d", (2, 3, 4))):
+        if any(body[joint] is None for joint in joints):
+            continue
+        shoulder, elbow, wrist = (np.asarray(body[joint]) for joint in joints)
+        center = wrist + 0.33 * (wrist - elbow)
+        size = 1.5 * max(np.linalg.norm(wrist - elbow), 0.9 * np.linalg.norm(elbow - shoulder))
+        x, y = np.maximum(center - size / 2, 0)
+        size = min(size, width - x, height - y)
+        if size >= 20:
+            boxes.append((side, (int(x), int(y), int(size))))
+    return boxes
+
+
+def face_box(body, width, height):
+    if body[0] is None:
+        return None
+    head = np.asarray(body[0])
+    radius = max((max(abs(head - body[index])) * factor
+                  for index, factor in ((14, 3), (15, 3), (16, 1.5), (17, 1.5))
+                  if body[index] is not None), default=0)
+    x, y = np.maximum(head - radius, 0)
+    size = min(radius * 2, width - x, height - y)
+    return (int(x), int(y), int(size)) if size >= 20 else None
+
+
+def decode_hand(heatmap, box, width, height, threshold=0.05):
+    x, y, size = box
+    result = []
+    for part in range(21):
+        raw = heatmap[..., part]
+        blurred = cv2.GaussianBlur(raw, (25, 25), 3, borderType=cv2.BORDER_REFLECT)
+        count, labels = cv2.connectedComponents((blurred > threshold).astype(np.uint8), connectivity=8)
+        if count <= 1:
+            result.extend((-1.0, -1.0, 1.0))
+            continue
+        scores = np.bincount(labels.ravel(), weights=raw.ravel(), minlength=count)
+        component = int(np.argmax(scores[1:])) + 1
+        py, px = np.unravel_index(np.argmax(np.where(labels == component, raw, 0)), raw.shape)
+        local_x, local_y = int(px * size / raw.shape[1]), int(py * size / raw.shape[0])
+        result.extend(((x + local_x) / width if local_x else -1.0, (y + local_y) / height if local_y else -1.0, 1.0))
+    return result
+
+
+def decode_face(heatmap, box, width, height, threshold=0.05):
+    x, y, size = box
+    result = []
+    for part in range(heatmap.shape[-1]):
+        plane = heatmap[..., part]
+        index = int(plane.argmax())
+        if plane.flat[index] <= threshold:
+            result.extend((0.0, 0.0, 0.0))
+            continue
+        py, px = divmod(index, plane.shape[1])
+        local_x, local_y = px * size / plane.shape[1], py * size / plane.shape[0]
+        result.extend(((x + local_x) / width if local_x else -1.0, (y + local_y) / height if local_y else -1.0, 1.0))
+    return result if any(result[2::3]) else None
+
+
+def encode_body(body, width, height):
+    return [value for point in body for value in
+            ((float(point[0]) / width, float(point[1]) / height, 1.0) if point is not None else (0.0, 0.0, 0.0))]
+
+
+def pose_overlay_mask(pose_maps):
+    """Select rendered pose pixels, not person boxes or body silhouettes."""
+    return torch.any(pose_maps != 0, dim=-1).to(dtype=torch.float32)
+
+
+def draw_pose_frame(people, height, width, draw_body=True, draw_hands=True, draw_face=True, scale_stick=False, drawing_scale=1.0):
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    stick_scale = (1 if max(height, width) < 500 else min(2 + max(height, width) // 1000, 7)) if scale_stick else 1
+    for person in people:
+        if draw_body:
+            points = np.asarray(person["pose_keypoints_2d"]).reshape(-1, 3)
+            for (a, b), color in zip(BODY_LIMBS[:17], BODY_COLORS):
+                if not points[a, 2] or not points[b, 2]:
+                    continue
+                start, end = points[[a, b], :2] * [width, height]
+                center = (start + end) / 2
+                delta = start - end
+                polygon = cv2.ellipse2Poly(tuple(center.astype(int)), (int(np.linalg.norm(delta) / 2), max(1, round(4 * stick_scale * drawing_scale))),
+                                          int(math.degrees(math.atan2(delta[1], delta[0]))), 0, 360, 1)
+                cv2.fillConvexPoly(canvas, polygon, tuple(int(channel * 0.6) for channel in color))
+            for point, color in zip(points, BODY_COLORS):
+                if point[2]:
+                    cv2.circle(canvas, tuple((point[:2] * [width, height]).astype(int)), max(1, round(4 * drawing_scale)), color, -1)
+        if draw_hands:
+            for name in ("hand_left_keypoints_2d", "hand_right_keypoints_2d"):
+                if not person.get(name):
+                    continue
+                points = np.asarray(person[name]).reshape(-1, 3)
+                pixels = (points[:, :2] * [width, height]).astype(int)
+                for index, (a, b) in enumerate(HAND_LIMBS):
+                    if np.all(pixels[[a, b]] > 0):
+                        color = tuple(channel * 255 for channel in colorsys.hsv_to_rgb(index / 20, 1, 1))
+                        cv2.line(canvas, tuple(pixels[a]), tuple(pixels[b]), color, max(1, round(2 * drawing_scale)))
+                for point in pixels:
+                    if np.all(point > 0):
+                        cv2.circle(canvas, tuple(point), max(1, round(4 * drawing_scale)), (0, 0, 255), -1)
+        if draw_face and person.get("face_keypoints_2d"):
+            points = np.asarray(person["face_keypoints_2d"]).reshape(-1, 3)
+            for point in points:
+                pixel = (point[:2] * [width, height]).astype(int)
+                if np.all(pixel > 0):
+                    cv2.circle(canvas, tuple(pixel), max(1, round(3 * drawing_scale)), (255, 255, 255), -1)
+    return canvas
+
+
+def overlay_pose_keypoints(images, documents, draw_body=True, draw_hands=True, draw_face=True, opacity=1.0, drawing_scale=1.0):
+    if images.ndim != 4 or images.shape[-1] not in (3, 4) or not len(images):
+        raise ValueError("Pose overlay requires a nonempty RGB or RGBA image batch.")
+    if not isinstance(documents, list) or len(documents) not in (1, len(images)):
+        raise ValueError("Supply one pose frame to reuse, or one pose frame per image.")
+    if not 0 <= opacity <= 1 or drawing_scale <= 0:
+        raise ValueError("Pose opacity must be 0–1 and drawing size must be positive.")
+    height, width = images.shape[1:3]
+    output = images.clone()
+    masks = torch.empty((len(images), height, width), dtype=torch.float32, device=images.device)
+    for index in range(len(images)):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        document = documents[0 if len(documents) == 1 else index]
+        if "people" not in document:
+            raise ValueError("Pose overlay requires human OpenPose/DWPose keypoints, not animal keypoints.")
+        canvas = draw_pose_frame(document["people"], height, width, draw_body, draw_hands, draw_face, drawing_scale=drawing_scale)
+        pose = torch.from_numpy(canvas).to(device=images.device, dtype=images.dtype).div_(255)
+        masks[index] = pose_overlay_mask(pose) * opacity
+        alpha = masks[index].unsqueeze(-1)
+        output[index, ..., :3] = images[index, ..., :3] * (1 - alpha) + pose * alpha
+    return output, masks
+
+
+def prepare_pose_frames(images, resolution):
+    height, width = images.shape[1:3]
+    factor = resolution / min(height, width) if resolution else 1.0
+    target_height, target_width = max(1, round(height * factor)), max(1, round(width * factor))
+    frames, body_inputs = [], []
+    for image in images:
+        pixels = (image[..., :3].detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
+        resized = cv2.resize(pixels, (target_width, target_height), interpolation=cv2.INTER_CUBIC if factor > 1 else cv2.INTER_AREA)
+        frame = np.pad(resized[..., ::-1], ((0, -target_height % 64), (0, -target_width % 64), (0, 0)), mode="edge")
+        body_scale = 184 / frame.shape[0]
+        body = resize_pose_map(frame, int(frame.shape[1] * body_scale), 184)
+        body = np.pad(body, ((0, -body.shape[0] % 8), (0, -body.shape[1] % 8), (0, 0)), constant_values=128)
+        frames.append(frame)
+        body_inputs.append(body)
+    return frames, body_inputs, (target_height, target_width)
+
+
+def restore_body_maps(heatmap, paf, body_input, frame):
+    height, width = frame.shape[:2]
+    scaled_width = int(width * 184 / height)
+    results = []
+    for value in (heatmap, paf):
+        expanded = resize_pose_map(value, body_input.shape[1], body_input.shape[0])
+        results.append(resize_pose_map(expanded[:184, :scaled_width], width, height))
+    return results
+
+
+def estimate_hand_jobs(patcher, jobs, frames, people, batch_size, forward, threshold=0.05):
+    for start in range(0, len(jobs), batch_size):
+        chunk = jobs[start:start + batch_size]
+        crops = [cv2.GaussianBlur(frames[frame][y:y + size, x:x + size], (0, 0), 0.8)
+                 for frame, person, side, (x, y, size) in chunk]
+        average = np.zeros((len(chunk), 128, 128, 22), dtype=np.float32)
+        for side_length in (184, 368, 552, 736):
+            inputs = [resize_pose_map(crop, side_length, side_length) for crop in crops]
+            heatmaps = forward(patcher, inputs)
+            for index, heatmap in enumerate(heatmaps):
+                expanded = resize_pose_map(heatmap, side_length, side_length)
+                average[index] += resize_pose_map(expanded, 128, 128) * 0.25
+        for index, (frame, person, side, box) in enumerate(chunk):
+            height, width = frames[frame].shape[:2]
+            people[frame][person][side] = decode_hand(average[index], box, width, height, threshold)
+
+
+def estimate_face_jobs(patcher, jobs, frames, people, batch_size, forward, threshold=0.05):
+    for start in range(0, len(jobs), batch_size):
+        chunk = jobs[start:start + batch_size]
+        inputs = [resize_pose_map(frames[frame][y:y + size, x:x + size], 384, 384)
+                  for frame, person, (x, y, size) in chunk]
+        heatmaps = forward(patcher, inputs)
+        for heatmap, (frame, person, box) in zip(heatmaps, chunk):
+            height, width = frames[frame].shape[:2]
+            # Match the face decoder's threshold/argmax at crop resolution.
+            tensor = torch.from_numpy(heatmap).movedim(-1, 0)[None]
+            heatmap = torch.nn.functional.interpolate(tensor, size=(box[2], box[2]), mode="bilinear", align_corners=True)[0].movedim(0, -1).numpy()
+            people[frame][person]["face_keypoints_2d"] = decode_face(heatmap, box, width, height, threshold)
+
+
+def run_openpose_batch(images, resolution=0, batch_size=4, detect_body=True, detect_hand=True, detect_face=True,
+                       scale_stick=False, *, loader, forward, body_decoder=decode_body,
+                       body_threshold=0.45, hand_threshold=0.45, face_threshold=0.45, limb_threshold=0.45,
+                       limb_support=0.8, min_body_parts=4, min_body_score=0.4,
+                       temporal_filter=False, temporal_radius=2, temporal_min_support=2, temporal_max_distance=0.1,
+                       temporal_match_iou=0.3):
+    if images.ndim != 4 or images.shape[0] < 1 or images.shape[-1] not in (3, 4):
+        raise ValueError("OpenPose requires a nonempty IMAGE batch with RGB or RGBA channels.")
+    if batch_size < 1 or resolution < 0:
+        raise ValueError("OpenPose batch_size must be positive and resolution must be zero or positive.")
+    models = {"body": loader("body")}
+    if detect_hand:
+        models["hand"] = loader("hand")
+    if detect_face:
+        models["face"] = loader("face")
+    if not all(0 <= value <= 1 for value in (body_threshold, hand_threshold, face_threshold, limb_threshold, limb_support)):
+        raise ValueError("OpenPose confidence/support thresholds must be between zero and one.")
+    if min_body_parts < 1 or min_body_parts > 18 or min_body_score < 0:
+        raise ValueError("OpenPose requires 1–18 minimum body parts and a nonnegative minimum body score.")
+    output, documents, all_boxes = None, [], []
+    progress = comfy.utils.ProgressBar(len(images))
+    for start in range(0, len(images), batch_size):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        frames, body_inputs, (target_height, target_width) = prepare_pose_frames(images[start:start + batch_size], resolution)
+        pafs, heatmaps = forward(models["body"], body_inputs)
+        people, hand_jobs, face_jobs, chunk_boxes = [], [], [], []
+        for frame_index, (frame, body_input, heatmap, paf) in enumerate(zip(frames, body_inputs, heatmaps, pafs)):
+            heatmap, paf = restore_body_maps(heatmap, paf, body_input, frame)
+            bodies = body_decoder(heatmap[:target_height, :target_width], paf[:target_height, :target_width],
+                                  body_threshold=body_threshold, limb_threshold=limb_threshold, limb_support=limb_support,
+                                  min_body_parts=min_body_parts, min_body_score=min_body_score)
+            frame_people, frame_boxes = [], []
+            for person_index, body in enumerate(bodies):
+                points = np.asarray([point for point in body if point is not None])
+                lower, upper = points.min(axis=0), points.max(axis=0)
+                margin = max(float((upper - lower).max()) * 0.05, 1)
+                frame_boxes.append(np.concatenate((lower - margin, upper + margin)))
+                frame_people.append({
+                    "pose_keypoints_2d": encode_body(body, target_width, target_height),
+                    "hand_left_keypoints_2d": None, "hand_right_keypoints_2d": None, "face_keypoints_2d": None,
+                })
+                if detect_hand:
+                    hand_jobs.extend((frame_index, person_index, side, box) for side, box in hand_boxes(body, target_width, target_height))
+                if detect_face:
+                    box = face_box(body, target_width, target_height)
+                    if box:
+                        face_jobs.append((frame_index, person_index, box))
+            people.append(frame_people)
+            chunk_boxes.append(frame_boxes)
+        visible_frames = [frame[:target_height, :target_width] for frame in frames]
+        if hand_jobs:
+            estimate_hand_jobs(models["hand"], hand_jobs, visible_frames, people, batch_size, forward, hand_threshold)
+        if face_jobs:
+            estimate_face_jobs(models["face"], face_jobs, visible_frames, people, batch_size, forward, face_threshold)
+        if output is None:
+            output = torch.empty((len(images), target_height, target_width, 3), dtype=torch.float32, device="cpu")
+        for index, frame_people in enumerate(people):
+            documents.append({"people": frame_people, "canvas_height": target_height, "canvas_width": target_width})
+            all_boxes.append(chunk_boxes[index])
+            progress.update(1)
+    if temporal_filter:
+        documents = prune_temporal_pose_keypoints(documents, all_boxes, temporal_radius, temporal_min_support, temporal_max_distance, temporal_match_iou)
+    for index, document in enumerate(documents):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        rendered = draw_pose_frame(document["people"], target_height, target_width, detect_body, detect_hand, detect_face, scale_stick)
+        output[index] = torch.from_numpy(rendered).float().div_(255)
+    return output, documents
+
+
+def dwpose_detector_input(frame):
+    height, width = frame.shape[:2]
+    ratio = min(640 / height, 640 / width)
+    resized = cv2.resize(frame, (int(width * ratio), int(height * ratio)), interpolation=cv2.INTER_LINEAR)
+    padded = np.full((640, 640, 3), 114, dtype=np.uint8)
+    padded[:resized.shape[0], :resized.shape[1]] = resized
+    return padded.astype(np.float32), ratio
+
+
+def decode_dwpose_boxes(prediction, ratio, classes=(0,), detection_threshold=0.3, nms_threshold=0.45):
+    grids, strides = [], []
+    for stride in (8, 16, 32):
+        y, x = np.mgrid[:640 // stride, :640 // stride]
+        grids.append(np.stack((x, y), axis=-1).reshape(-1, 2))
+        strides.append(np.full((x.size, 1), stride))
+    grid, stride = np.concatenate(grids), np.concatenate(strides)
+    if prediction.ndim != 2 or prediction.shape != (len(grid), 85):
+        raise ValueError(f"Unsupported YOLOX output shape: {prediction.shape}; expected {(len(grid), 85)}.")
+    results = []
+    for category in classes:
+        scores = prediction[:, 4] * prediction[:, 5 + category]
+        chosen = scores > detection_threshold
+        if not np.any(chosen):
+            continue
+        center = (prediction[chosen, :2] + grid[chosen]) * stride[chosen]
+        size = np.exp(prediction[chosen, 2:4]) * stride[chosen]
+        boxes = np.concatenate((center - size / 2, center + size / 2), axis=-1) / ratio
+        results.append(suppress_pose_boxes(boxes, scores[chosen], nms_threshold))
+    return np.concatenate(results) if results else np.empty((0, 4), dtype=np.float32)
+
+
+def suppress_pose_boxes(boxes, scores, nms_threshold=0.45):
+    area = (boxes[:, 2] - boxes[:, 0] + 1) * (boxes[:, 3] - boxes[:, 1] + 1)
+    order, keep = np.argsort(scores)[::-1], []
+    while len(order):
+        current = int(order[0])
+        keep.append(current)
+        remaining = order[1:]
+        top_left = np.maximum(boxes[current, :2], boxes[remaining, :2])
+        bottom_right = np.minimum(boxes[current, 2:], boxes[remaining, 2:])
+        intersection = np.maximum(bottom_right - top_left + 1, 0).prod(axis=-1)
+        overlap = intersection / (area[current] + area[remaining] - intersection)
+        order = remaining[overlap <= nms_threshold]
+    return boxes[keep]
+
+
+def prepare_dwpose_crop(frame, box, input_size=(288, 384)):
+    box = np.asarray(box, dtype=np.float32)
+    center = (box[:2] + box[2:]) * 0.5
+    scale = (box[2:] - box[:2]) * 1.25
+    if np.any(scale <= 0):
+        raise ValueError("DWPose detector returned an empty person box.")
+    aspect = input_size[0] / input_size[1]
+    if scale[0] > scale[1] * aspect:
+        scale[1] = scale[0] / aspect
+    else:
+        scale[0] = scale[1] * aspect
+    factor = np.array(input_size, dtype=np.float32) / scale
+    matrix = np.array([[factor[0], 0, input_size[0] / 2 - center[0] * factor[0]],
+                       [0, factor[1], input_size[1] / 2 - center[1] * factor[1]]], dtype=np.float32)
+    crop = cv2.warpAffine(frame, matrix, input_size, flags=cv2.INTER_LINEAR)
+    crop = (crop.astype(np.float32) - np.array([123.675, 116.28, 103.53], dtype=np.float32)) / np.array([58.395, 57.12, 57.375], dtype=np.float32)
+    return crop, center, scale
+
+
+def decode_dwpose_person(simcc_x, simcc_y, center, scale, width, height, keypoint_threshold=0.3):
+    if simcc_x.shape != (133, 576) or simcc_y.shape != (133, 768):
+        raise ValueError(f"Unsupported DWPose SimCC shapes: {simcc_x.shape}, {simcc_y.shape}.")
+    points = np.stack((simcc_x.argmax(axis=-1), simcc_y.argmax(axis=-1)), axis=-1).astype(np.float32) / 2
+    points = points / [288, 384] * scale + center - scale / 2
+    scores = np.minimum(simcc_x.max(axis=-1), simcc_y.max(axis=-1))
+    joints = np.column_stack((points, scores))
+    neck = joints[[5, 6]].mean(axis=0)
+    neck[2] = float(np.all(scores[[5, 6]] > keypoint_threshold))
+    joints = np.insert(joints, 17, neck, axis=0)
+    joints[[1, 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 14, 15, 16, 17]] = joints[[17, 6, 8, 10, 7, 9, 12, 14, 16, 13, 15, 2, 1, 4, 3]]
+    def encode(part):
+        if not np.any((part[:, 2] >= keypoint_threshold) & (part[:, 2] > 0)):
+            return None
+        return [value for x, y, score in part for value in
+                ((float(x) / width, float(y) / height, 1.0) if score >= keypoint_threshold and score > 0 else (0.0, 0.0, 0.0))]
+    face = np.concatenate((joints[24:92], joints[[14, 15]]))
+    return {
+        "pose_keypoints_2d": encode(joints[:18]) or [0.0] * 54,
+        "face_keypoints_2d": encode(face),
+        "hand_left_keypoints_2d": encode(joints[92:113]),
+        "hand_right_keypoints_2d": encode(joints[113:134]),
+    }
+
+
+def decode_animal_pose(simcc_x, simcc_y, center, scale, keypoint_threshold=0.3):
+    if simcc_x.shape != (17, 512) or simcc_y.shape != (17, 512):
+        raise ValueError(f"Unsupported AP10K SimCC shapes: {simcc_x.shape}, {simcc_y.shape}")
+    coordinates = np.stack((simcc_x.argmax(axis=-1), simcc_y.argmax(axis=-1)), axis=-1).astype(np.float32) / 2
+    coordinates = coordinates / 256 * scale + center - scale / 2
+    scores = np.minimum(simcc_x.max(axis=-1), simcc_y.max(axis=-1)).clip(0, 1)
+    result = np.column_stack((coordinates, scores))
+    result[scores < keypoint_threshold] = 0
+    return result.tolist()
+
+
+AP10K_LIMBS = ((1, 2), (2, 3), (1, 3), (3, 4), (4, 9), (9, 10), (10, 11), (4, 6),
+              (6, 7), (7, 8), (4, 5), (5, 15), (15, 16), (16, 17), (5, 12), (12, 13), (13, 14))
+AP10K_COLORS = ((255, 255, 255), (100, 255, 100), (150, 255, 255), (100, 50, 255), (50, 150, 200),
+               (0, 255, 255), (0, 150, 0), (0, 0, 255), (0, 0, 150), (255, 50, 255), (255, 0, 255),
+               (255, 0, 0), (150, 0, 0), (255, 255, 100), (0, 150, 0), (255, 255, 0), (150, 150, 150))
+
+
+def draw_animal_pose_frame(animals, height, width):
+    output = np.zeros((height, width, 3), dtype=np.uint8)
+    for animal in animals:
+        for (a, b), color in zip(AP10K_LIMBS, AP10K_COLORS):
+            if animal[a - 1][2] <= 0 or animal[b - 1][2] <= 0:
+                continue
+            start = tuple(int(value) for value in animal[a - 1][:2])
+            end = tuple(int(value) for value in animal[b - 1][:2])
+            cv2.line(output, start, end, color, 5)
+    return output
+
+
+def prune_temporal_pose_keypoints(documents, boxes, radius=2, min_support=2, max_distance=0.1, match_iou=0.3):
+    """Zero unsupported joints; preserve person entries and use unfiltered neighbors."""
+    if radius < 1 or min_support < 1 or max_distance <= 0 or not 0 <= match_iou <= 1:
+        raise ValueError("Temporal filtering requires positive radius/support/distance and matching IoU between zero and one.")
+    if len(documents) < 2:
+        return documents
+    matches = [[{} for _ in frame["people"]] for frame in documents]
+    for first in range(len(documents)):
+        for second in range(first + 1, min(len(documents), first + radius + 1)):
+            a, b = np.asarray(boxes[first]), np.asarray(boxes[second])
+            if not len(a) or not len(b):
+                continue
+            extent = np.maximum(np.minimum(a[:, None, 2:], b[None, :, 2:]) - np.maximum(a[:, None, :2], b[None, :, :2]), 0)
+            intersection = extent.prod(-1)
+            area_a = np.maximum(a[:, 2:] - a[:, :2], 0).prod(-1)
+            area_b = np.maximum(b[:, 2:] - b[:, :2], 0).prod(-1)
+            overlap = intersection / np.maximum(area_a[:, None] + area_b[None, :] - intersection, 1e-8)
+            used_a, used_b = set(), set()
+            for flat in np.argsort(-overlap.ravel(), kind="stable"):
+                i, j = np.unravel_index(flat, overlap.shape)
+                if overlap[i, j] < match_iou or overlap[i, j] <= 0:
+                    break
+                if i in used_a or j in used_b:
+                    continue
+                used_a.add(i)
+                used_b.add(j)
+                matches[first][i][second] = j
+                matches[second][j][first] = i
+    filtered = [{**frame, "people": [dict(person) for person in frame["people"]]} for frame in documents]
+    fields = ("pose_keypoints_2d", "face_keypoints_2d", "hand_left_keypoints_2d", "hand_right_keypoints_2d")
+    for frame_index, frame in enumerate(documents):
+        available = min(radius, frame_index) + min(radius, len(documents) - frame_index - 1)
+        required = min(min_support, available)
+        dimensions = np.array([frame["canvas_width"], frame["canvas_height"]])
+        for person_index, person in enumerate(frame["people"]):
+            box = np.asarray(boxes[frame_index][person_index])
+            distance_limit = max_distance * max(float(np.linalg.norm(box[2:] - box[:2])), 1)
+            for field in fields:
+                values = person.get(field)
+                if not values:
+                    continue
+                points = np.asarray(values).reshape(-1, 3)
+                support = np.zeros(len(points), dtype=np.int32)
+                for neighbor, matched_person in matches[frame_index][person_index].items():
+                    other = documents[neighbor]["people"][matched_person].get(field)
+                    if not other or len(other) != len(values):
+                        continue
+                    other = np.asarray(other).reshape(-1, 3)
+                    distance = np.linalg.norm((points[:, :2] - other[:, :2]) * dimensions, axis=-1)
+                    support += (other[:, 2] > 0) & (distance <= distance_limit)
+                unsupported = (points[:, 2] > 0) & (support < required)
+                if np.any(unsupported):
+                    retained = points.copy()
+                    retained[unsupported] = 0
+                    filtered[frame_index]["people"][person_index][field] = retained.ravel().tolist()
+    return filtered
+
+
+def prune_temporal_animal_keypoints(documents, boxes, radius=2, min_support=2, max_distance=0.1, match_iou=0.3):
+    normalized = []
+    for frame in documents:
+        dimensions = np.array([frame["canvas_width"], frame["canvas_height"], 1])
+        people = [{"pose_keypoints_2d": (np.asarray(animal) / dimensions).ravel().tolist()} for animal in frame["animals"]]
+        normalized.append({"people": people, "canvas_width": frame["canvas_width"], "canvas_height": frame["canvas_height"]})
+    filtered = prune_temporal_pose_keypoints(normalized, boxes, radius, min_support, max_distance, match_iou)
+    return [{**original, "animals": [(np.asarray(person["pose_keypoints_2d"]).reshape(-1, 3)
+                                      * [frame["canvas_width"], frame["canvas_height"], 1]).tolist() for person in frame["people"]]}
+            for original, frame in zip(documents, filtered)]
+
+
+def run_dwpose_batch(images, resolution=0, batch_size=5, detect_body=True, detect_hand=True, detect_face=True,
+                     scale_stick=False, *, loader, forward, animal=False, detection_threshold=0.3, keypoint_threshold=0.3, nms_threshold=0.45,
+                     temporal_filter=False, temporal_radius=2, temporal_min_support=2, temporal_max_distance=0.1, temporal_match_iou=0.3):
+    if images.ndim != 4 or not len(images) or images.shape[-1] not in (3, 4):
+        raise ValueError("DWPose requires a nonempty RGB or RGBA IMAGE batch.")
+    if batch_size < 1 or resolution < 0:
+        raise ValueError("DWPose batch_size must be positive and resolution must be zero or positive.")
+    if not all(0 <= value <= 1 for value in (detection_threshold, keypoint_threshold, nms_threshold)):
+        raise ValueError("Detection and keypoint thresholds must be between zero and one.")
+    if temporal_filter and (temporal_radius < 1 or temporal_min_support < 1 or temporal_max_distance <= 0):
+        raise ValueError("Temporal keypoint filtering requires positive radius, support and distance values.")
+    models = {"detector": loader("detector")}
+    factor = resolution / min(images.shape[1:3]) if resolution else 1.0
+    height, width = (max(1, round(value * factor)) for value in images.shape[1:3])
+    output = torch.empty((len(images), height, width, 3), dtype=torch.float32, device="cpu")
+    documents, all_boxes = [], []
+    progress = comfy.utils.ProgressBar(len(images))
+    for start in range(0, len(images), batch_size):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        frames = []
+        for image in images[start:start + batch_size]:
+            pixels = (image[..., :3].detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
+            model_pixels = pixels if animal else pixels[..., ::-1]
+            frames.append(cv2.resize(model_pixels, (width, height), interpolation=cv2.INTER_CUBIC if factor > 1 else cv2.INTER_AREA))
+        inputs, ratios = zip(*(dwpose_detector_input(frame) for frame in frames))
+        detections = forward(models["detector"], inputs)
+        if len(detections) != len(frames):
+            raise ValueError("The YOLOX export did not preserve the detector batch. Use a batch-capable TorchScript export.")
+        jobs, people = [], [[] for frame in frames]
+        chunk_boxes = [[] for frame in frames]
+        for index, (frame, prediction, ratio) in enumerate(zip(frames, detections, ratios)):
+            for box in decode_dwpose_boxes(prediction, ratio, range(14, 24) if animal else (0,), detection_threshold, nms_threshold):
+                crop, center, scale = prepare_dwpose_crop(frame, box, (256, 256) if animal else (288, 384))
+                jobs.append((index, crop, center, scale))
+                chunk_boxes[index].append(box)
+        if jobs and "pose" not in models:
+            models["pose"] = loader("pose")
+        for offset in range(0, len(jobs), batch_size):
+            chunk = jobs[offset:offset + batch_size]
+            crops = [item[1] for item in chunk]
+            x, y = forward(models["pose"], crops)
+            for item, simcc_x, simcc_y in zip(chunk, x, y):
+                frame, _, center, scale = item
+                people[frame].append(decode_animal_pose(simcc_x, simcc_y, center, scale, keypoint_threshold) if animal
+                                     else decode_dwpose_person(simcc_x, simcc_y, center, scale, width, height, keypoint_threshold))
+        for index, frame_people in enumerate(people):
+            document = {"canvas_height": height, "canvas_width": width}
+            document.update({"version": "ap10k", "animals": frame_people} if animal else {"people": frame_people})
+            documents.append(document)
+            all_boxes.append(chunk_boxes[index])
+            progress.update(1)
+    if temporal_filter:
+        filter_keypoints = prune_temporal_animal_keypoints if animal else prune_temporal_pose_keypoints
+        documents = filter_keypoints(documents, all_boxes, temporal_radius, temporal_min_support, temporal_max_distance, temporal_match_iou)
+    for index, document in enumerate(documents):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        rendered = draw_animal_pose_frame(document["animals"], height, width) if animal else draw_pose_frame(document["people"], height, width, detect_body, detect_hand, detect_face, scale_stick)
+        output[index] = torch.from_numpy(rendered).float().div_(255)
+    return output, documents
+
+
+def render_densepose_frame(result, height, width, cmap="viridis"):
+    if cmap not in ("viridis", "parula"):
+        raise ValueError("DensePose colormap must be viridis or parula")
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    if cmap == "viridis":
+        canvas[:] = [68, 1, 84]
+    boxes, coarse, fine, _, _ = result
+    for index, box in enumerate(boxes.detach().cpu().tolist()):
+        x, y = int(box[0]), int(box[1])
+        box_width, box_height = max(1, int(box[2] - box[0])), max(1, int(box[3] - box[1]))
+        foreground = torch.nn.functional.interpolate(coarse[index:index + 1], (box_height, box_width), mode="bilinear", align_corners=False).argmax(1)[0] > 0
+        labels = torch.nn.functional.interpolate(fine[index:index + 1], (box_height, box_width), mode="bilinear", align_corners=False).argmax(1)[0]
+        labels = (labels * foreground).detach().cpu().numpy()
+        left, top, right, bottom = max(0, x), max(0, y), min(width, x + box_width), min(height, y + box_height)
+        if right <= left or bottom <= top:
+            continue
+        labels = labels[top - y:bottom - y, left - x:right - x]
+        color = cv2.applyColorMap((labels.astype(np.float32) * (255 / 24)).clip(0, 255).astype(np.uint8),
+                                 cv2.COLORMAP_VIRIDIS if cmap == "viridis" else cv2.COLORMAP_PARULA)[..., ::-1]
+        region = canvas[top:bottom, left:right]
+        mask = labels > 0
+        region[mask] = color[mask]
+    return canvas
+
+
+def run_densepose_batch(images, resolution=0, batch_size=2, cmap="viridis", *, loader, forward,
+                        score_threshold=0.05, detection_nms_threshold=0.5, max_detections=100,
+                        rpn_pre_nms_topk=1000, rpn_post_nms_topk=1000, rpn_nms_threshold=0.7):
+    if images.ndim != 4 or not len(images) or images.shape[-1] not in (3, 4):
+        raise ValueError("DensePose requires a nonempty RGB or RGBA IMAGE batch")
+    if resolution < 0 or batch_size < 1 or cmap not in ("viridis", "parula"):
+        raise ValueError("Invalid DensePose resolution, batch size or colormap")
+    if not all(0 <= value <= 1 for value in (score_threshold, detection_nms_threshold, rpn_nms_threshold)):
+        raise ValueError("DensePose thresholds must be between zero and one")
+    if min(max_detections, rpn_pre_nms_topk, rpn_post_nms_topk) < 1:
+        raise ValueError("DensePose detection/proposal limits must be positive")
+    patcher = loader()
+    scale = resolution / min(images.shape[1:3]) if resolution else 1.0
+    height, width = (max(1, round(size * scale)) for size in images.shape[1:3])
+    output = torch.empty((len(images), height, width, 3), dtype=torch.float32, device="cpu")
+    progress = comfy.utils.ProgressBar(len(images))
+    for start in range(0, len(images), batch_size):
+        frames = []
+        for image in images[start:start + batch_size]:
+            pixels = (image[..., :3].detach().cpu().numpy().clip(0, 1) * 255).astype(np.uint8)
+            frames.append(cv2.resize(pixels, (width, height), interpolation=cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA))
+        predictions = forward(patcher, frames, score_threshold=score_threshold, detection_nms_threshold=detection_nms_threshold,
+                              max_detections=max_detections, rpn_pre_nms_topk=rpn_pre_nms_topk,
+                              rpn_post_nms_topk=rpn_post_nms_topk, rpn_nms_threshold=rpn_nms_threshold)
+        if len(predictions) != len(frames):
+            raise ValueError("DensePose model did not preserve frame batch order")
+        for index, result in enumerate(predictions):
+            comfy.model_management.throw_exception_if_processing_interrupted()
+            output[start + index] = torch.from_numpy(render_densepose_frame(result, height, width, cmap)).float().div_(255)
+            progress.update(1)
+    return output
+
+
+def prepare_h3_reference_video_components(video, megapixels: float, duration_seconds: float = 0.0):
+    components = video.get_components()
+    source_frames = components.images
+    source_rate = float(components.frame_rate)
+    if source_frames.ndim != 4 or min(source_frames.shape[:3]) < 1:
+        raise ValueError("Reference video must contain non-empty frames.")
+    if not math.isfinite(source_rate) or source_rate <= 0:
+        raise ValueError("Reference video must have a positive frame rate.")
+    if not math.isfinite(megapixels) or megapixels <= 0:
+        raise ValueError("Megapixels must be positive.")
+    if not math.isfinite(duration_seconds) or duration_seconds < 0:
+        raise ValueError("Duration must be zero or a positive number of seconds.")
+
+    source_count = source_frames.shape[0]
+    selected_seconds = source_count / source_rate
+    if duration_seconds > 0:
+        selected_seconds = min(selected_seconds, duration_seconds)
+    frame_count = h3_video_length_from_seconds(selected_seconds)
+    frame_indices = [min(round(index * source_rate / 24), source_count - 1) for index in range(frame_count)]
+    video_frames = source_frames[frame_indices]
+    prepared_frames = video_frames
+
+    source_height, source_width = source_frames.shape[1:3]
+    source_aspect = source_width / source_height
+    ratio_width, ratio_height = min(
+        ASPECT_RATIOS.values(), key=lambda ratio: abs(source_aspect - ratio[0] / ratio[1]),
+    )
+    output_width, output_height = select_video_resolution(
+        ratio_width, ratio_height, megapixels, 32, 32, MAX_RESOLUTION,
+    )
+    if (output_height, output_width) != (source_height, source_width):
+        prepared_frames = resize_nchw(
+            prepared_frames.movedim(-1, 1), output_width, output_height, "lanczos", "center",
+        ).clamp(0.0, 1.0).movedim(1, -1).contiguous()
+
+    soundtrack = components.audio
+    audio_window = round(frame_count / 24 * 32000)
+    aligned_samples = ((audio_window + 799) // 800) * 800
+    if soundtrack is not None and soundtrack.get("waveform") is not None and soundtrack["waveform"].numel() > 0:
+        sample_rate = int(soundtrack["sample_rate"])
+        if sample_rate <= 0:
+            raise ValueError("Reference audio must have a positive sample rate.")
+        sample_count = round(frame_count / 24 * sample_rate)
+        audio_samples = soundtrack["waveform"][..., :sample_count]
+        if sample_rate != 32000:
+            audio_samples = torchaudio.functional.resample(audio_samples, sample_rate, 32000)
+        audio_samples = audio_samples[..., :audio_window]
+        # Align before Core's generic VAE crop; preserve the start of the audio.
+        audio_samples = torch.nn.functional.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
+    else:
+        audio_samples = torch.zeros(1, 2, aligned_samples)
+    prepared_audio = {"waveform": audio_samples, "sample_rate": 32000}
+    return prepared_frames, prepared_audio, output_width, output_height, frame_count, video_frames
 
 
 def _robust_channel_stats(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1367,6 +2097,7 @@ def focused_timeline_timestamps(count: int, duration: float, focus_areas: int, f
 
 def images_to_video_timeline(image_inputs, duration: float, focus_areas: int, focus_one: float, focus_two: float, focus_three: float, last_image_is_final: bool, resize_images: bool, timestamp_format: str, timeline_style: str, timeline_text_structure: str, structured_timeline_text_structure: str, index_offset: int = 0) -> SampledVideoFrames:
     """Normalize supplied images and assign their manual video timeline timestamps."""
+    duration = h3_video_length_from_seconds(duration) / 24
     image_batch, image_list = _timeline_image_outputs(image_inputs, resize_images)
     raw_timestamps = focused_timeline_timestamps(len(image_list), duration, focus_areas, focus_one, focus_two, focus_three, anchor_end=last_image_is_final)
     timestamps = [format_video_timestamp(timestamp, timestamp_format) for timestamp in raw_timestamps]
@@ -1398,7 +2129,7 @@ def sample_video_frames_as_images(
     focus_two: float = 0.5,
     focus_three: float = 0.5,
 ) -> SampledVideoFrames:
-    video_runtime = float(video.get_duration())
+    video_runtime = h3_video_length_from_seconds(float(video.get_duration())) / 24
     source_factory = _video_source_factory(video)
     records = scan_video_frame_records(video, source_factory)
     selected, output_timestamps = _select_video_frame_records_and_timestamps(
@@ -1448,6 +2179,7 @@ def video_timeline_text(
     timeline_text_structure: str,
     structured_timeline_text_structure: str,
 ) -> tuple[str, str, float, str]:
+    duration = h3_video_length_from_seconds(duration) / 24
     raw_timestamps = focused_timeline_timestamps(
         segment_count, duration, focus_areas, focus_one, focus_two, focus_three
     )
