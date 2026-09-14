@@ -319,6 +319,18 @@ def _minimax_h3_clip_continuation_path(filename_prefix: str, clip_index: int) ->
     return path
 
 
+def _minimax_h3_clip_continuation_saved_path(relative_path: str) -> Path:
+    """Resolve a Save node's output-relative continuation filename."""
+    relative = _minimax_h3_clip_continuation_relative_prefix(relative_path)
+    if relative.suffix.lower() != ".safetensors":
+        raise ValueError("MiniMax H3 Clip Continuation path must name a .safetensors file.")
+    root = _minimax_h3_clip_continuation_root()
+    path = (root / relative).resolve()
+    if root not in path.parents:
+        raise ValueError("MiniMax H3 Clip Continuation path must stay inside output.")
+    return path
+
+
 def save_minimax_h3_clip_continuation_media(
     frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int,
 ) -> str:
@@ -357,12 +369,33 @@ def save_minimax_h3_clip_continuation_media(
 
 def get_minimax_h3_clip_continuation_fingerprint(filename_prefix: str, clip_index: int) -> str:
     path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
+    return _minimax_h3_clip_continuation_fingerprint_path(path)
+
+
+def _minimax_h3_clip_continuation_fingerprint_path(path: Path) -> str:
     stat = path.stat()
     return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
 
 
 def load_minimax_h3_clip_continuation_media(filename_prefix: str, clip_index: int) -> dict:
     path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
+    return _load_minimax_h3_clip_continuation_media_path(path)
+
+
+def load_minimax_h3_clip_continuation_media_path(relative_path: str) -> dict:
+    """Load media from the exact relative path produced by Clip Continuation Save."""
+    return _load_minimax_h3_clip_continuation_media_path(
+        _minimax_h3_clip_continuation_saved_path(relative_path)
+    )
+
+
+def get_minimax_h3_clip_continuation_path_fingerprint(relative_path: str) -> str:
+    return _minimax_h3_clip_continuation_fingerprint_path(
+        _minimax_h3_clip_continuation_saved_path(relative_path)
+    )
+
+
+def _load_minimax_h3_clip_continuation_media_path(path: Path) -> dict:
     with MemoryEfficientSafeOpen(str(path), low_memory=True) as handle:
         if set(handle.keys()) != {"frames"}:
             raise ValueError("MiniMax H3 Clip Continuation file must contain only frames.")

@@ -18,7 +18,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_minimax_h3_refs_test import model_helpers, model_nodes
+from utils_collection_minimax_h3_refs_test import model_helpers, model_nodes, utils_nodes
 
 
 def _image_ref(value=1.0):
@@ -112,8 +112,14 @@ def test_clip_continuation_save_load_overwrite_and_fingerprint(monkeypatch, tmp_
     first = model_helpers.load_minimax_h3_clip_continuation_media(
         "h3_clip_continuation/clip", 1
     )
+    direct = model_helpers.load_minimax_h3_clip_continuation_media_path(relative)
+    loaded_from_save_output = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.execute(
+        relative, 0
+    ).args[0]
     assert first["frame_rate"] == 24
     torch.testing.assert_close(first["frames"], frames[-22:, ..., :3])
+    torch.testing.assert_close(direct["frames"], first["frames"])
+    torch.testing.assert_close(loaded_from_save_output["frames"], first["frames"])
     fingerprint = model_helpers.get_minimax_h3_clip_continuation_fingerprint(
         "h3_clip_continuation/clip", 1
     )
