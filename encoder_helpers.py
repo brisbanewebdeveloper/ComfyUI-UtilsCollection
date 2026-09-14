@@ -575,6 +575,63 @@ def _encode_minimax_h3_audio_reference(audio, audio_vae, cache=None):
     return {"kind": "audio", "ref_audio_t": latent.shape[-1], "audio_latent": latent}
 
 
+def validate_minimax_h3_clip_continuation_media(media) -> torch.Tensor:
+    """Return saved 24-fps RGB continuation frames with a strict wire contract."""
+    if not isinstance(media, dict):
+        raise ValueError("MiniMax H3 Clip Continuation media must be a dictionary.")
+    if media.get("format_version") != 1 or media.get("frame_rate") != 24:
+        raise ValueError("MiniMax H3 Clip Continuation media must use format version 1 at 24 fps.")
+    frames = media.get("frames")
+    if (
+        not torch.is_tensor(frames)
+        or frames.ndim != 4
+        or frames.shape[0] < 5
+        or min(frames.shape[1:3]) < 1
+        or frames.shape[3] < 3
+        or not torch.is_floating_point(frames)
+        or not torch.isfinite(frames).all()
+    ):
+        raise ValueError("MiniMax H3 Clip Continuation media must contain finite BHWC RGB frames.")
+    return frames[..., :3]
+
+
+def prepare_minimax_h3_clip_continuation_frames(media, maximum_frames: int) -> torch.Tensor:
+    """Prepare saved tail frames for Qwen video presentation only."""
+    frames = validate_minimax_h3_clip_continuation_media(media)
+    prepared, _ = prepare_minimax_h3_reference_video(
+        frames, None, maximum_frames, encode_reference=False
+    )
+    return prepared
+
+
+def minimax_h3_qwen_video_samples(
+    continuation_frames: torch.Tensor | None,
+    video_frames: torch.Tensor | None,
+    video_fps: int,
+) -> tuple[torch.Tensor | None, list[Fraction]]:
+    """Return one chronological Qwen Video stream; continuation is its head."""
+    samples, timestamps = [], []
+    offset = Fraction(0)
+    if continuation_frames is not None:
+        if video_frames is not None and continuation_frames.shape[1:3] != video_frames.shape[1:3]:
+            continuation_frames = comfy.utils.common_upscale(
+                continuation_frames.movedim(-1, 1),
+                video_frames.shape[2], video_frames.shape[1],
+                "lanczos", "center",
+            ).movedim(1, -1)
+        indices = minimax_h3_video_sample_indices(continuation_frames.shape[0], video_fps)
+        samples.append(continuation_frames[indices])
+        timestamps.extend(Fraction(index, 24) for index in indices)
+        offset = Fraction(continuation_frames.shape[0], 24)
+    if video_frames is not None:
+        indices = minimax_h3_video_sample_indices(video_frames.shape[0], video_fps)
+        samples.append(video_frames[indices])
+        timestamps.extend(offset + Fraction(index, 24) for index in indices)
+    if not samples:
+        return None, []
+    return torch.cat(samples, dim=0), timestamps
+
+
 def tokenize_minimax_h3_prompt(clip, text: str, images) -> dict:
     """Replace internal visual-slot sentinels with H3 picture token entries."""
     segments = text.split(VISION_BLOCK)
@@ -3398,6 +3455,7 @@ def execute_advanced_minimax_h3_image_to_video(
     vlm_video_resolution=384,
     media_config=None,
     video=None,
+    continuation_media=None,
     audio=None,
     audio_vae=None,
     token_fusion=False,
@@ -3420,7 +3478,8 @@ def execute_advanced_minimax_h3_image_to_video(
                 fusion_images=fusion_images, visual_fusion_config=visual_fusion_config,
                 multiplier=multiplier, ref_image_size=ref_image_size,
                 vlm_resolution=vlm_resolution, vlm_video_resolution=vlm_video_resolution,
-                media_config=media_config, video=video, audio=audio, audio_vae=audio_vae,
+                media_config=media_config, video=video, continuation_media=continuation_media,
+                audio=audio, audio_vae=audio_vae,
                 token_fusion=token_fusion, temporal_fusion=temporal_fusion,
                 temporal_token_fusion=temporal_token_fusion, text_blend_config=text_blend_config,
                 cache=invocation, enable_caching=enable_caching,
@@ -3523,6 +3582,11 @@ def execute_advanced_minimax_h3_image_to_video(
                 video_latent_keyframes,
                 cache=cache,
             )
+    continuation_frames = (
+        prepare_minimax_h3_clip_continuation_frames(continuation_media, frame_count)
+        if continuation_media is not None
+        else None
+    )
     audio_reference = _encode_minimax_h3_audio_reference(audio, audio_vae, cache=cache)
     prepared_first = (
         prepare_minimax_h3_frame(first_frame, width, height, "disabled")
@@ -3559,7 +3623,7 @@ def execute_advanced_minimax_h3_image_to_video(
             default_media_index = 0
         elif flat_references:
             default_media_index = int(last_frame is not None)
-        elif video_frames is None:
+        elif video_frames is None and continuation_frames is None:
             raise ValueError(
                 "MiniMax H3 default media config requires a first frame, reference image 1, or video."
             )
@@ -3582,7 +3646,11 @@ def execute_advanced_minimax_h3_image_to_video(
     prompt_length = sum(prompt_spans)
     def tokenize_presentation(text, images):
         if media_config is not None:
-            collapse_default_picture = default_single_visual and video_frames is None
+            collapse_default_picture = (
+                default_single_visual
+                and video_frames is None
+                and continuation_frames is None
+            )
             presentation_images = (
                 [images[default_media_index]]
                 if collapse_default_picture and default_media_index is not None
@@ -3590,7 +3658,14 @@ def execute_advanced_minimax_h3_image_to_video(
             )
             default_video_frames = None
             default_video_timestamps = []
-            if video_frames is not None:
+            if continuation_frames is not None:
+                default_video_frames, default_video_timestamps = minimax_h3_qwen_video_samples(
+                    continuation_frames, video_frames, video_fps
+                )
+                default_video_frames = prepare_minimax_h3_vlm_video_frames(
+                    default_video_frames, vlm_video_resolution
+                )
+            elif video_frames is not None:
                 sample_indices = minimax_h3_video_sample_indices(
                     video_frames.shape[0], video_fps
                 )
@@ -3612,11 +3687,22 @@ def execute_advanced_minimax_h3_image_to_video(
                 default_video_frames=default_video_frames,
                 default_video_timestamps=default_video_timestamps,
             )
-        if video_frames is not None or audio_reference is not None:
+        if video_frames is not None or continuation_frames is not None or audio_reference is not None:
             reference_items = [
                 {"type": "image", "data": image} for image in images
             ]
-            if video_frames is not None:
+            if continuation_frames is not None:
+                qwen_video_frames, qwen_video_timestamps = minimax_h3_qwen_video_samples(
+                    continuation_frames, video_frames, 2
+                )
+                reference_items.append({
+                    "type": "video",
+                    "data": prepare_minimax_h3_vlm_video_frames(
+                        qwen_video_frames, vlm_video_resolution
+                    ),
+                    "timestamps": qwen_video_timestamps,
+                })
+            elif video_frames is not None:
                 sample_indices = list(range(0, video_frames.shape[0], 12))
                 reference_items.append({
                     "type": "video",
@@ -3914,7 +4000,7 @@ def execute_advanced_minimax_h3_image_to_video(
                 f"metadata_keys={sorted(metadata)}."
             )
         metadata = metadata.copy()
-        empty_padding = not actual_prompt and not base_vlm_images and not fusion_vlm_images and video_frames is None and audio_reference is None
+        empty_padding = not actual_prompt and not base_vlm_images and not fusion_vlm_images and video_frames is None and continuation_frames is None and audio_reference is None
         boundary = 0 if empty_padding else tensor.shape[1] - prompt_length
         metadata[LAYOUT_KEY] = build_layout(tensor, tags, boundary)
         layout_conditioning.append([tensor, metadata])

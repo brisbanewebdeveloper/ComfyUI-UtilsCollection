@@ -1174,6 +1174,81 @@ def test_minimax_h3_video_latent_modes_do_not_change_qwen_video_presentation():
     assert all(timestamps == presentations[0][1] for _data, timestamps in presentations)
 
 
+def test_clip_continuation_encoder_prepends_qwen_head_without_native_h3_media():
+    class FailingVAE:
+        def encode(self, _frames):
+            raise AssertionError("Qwen-only continuation media must not reach the video VAE")
+
+    clip = _MiniMaxH3TestClip()
+    continuation = torch.zeros(22, 64, 64, 3)
+    video = torch.ones(22, 64, 64, 3)
+    result = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+        clip=clip,
+        vae=FailingVAE(),
+        prompt="prompt",
+        width=64,
+        height=64,
+        length=22,
+        continuation_media={"format_version": 1, "frame_rate": 24, "frames": continuation},
+        video=video,
+        media_config=encoder_helpers.build_minimax_h3_media_config(
+            None, video_latent_mode="off"
+        ),
+        enable_caching="disabled",
+    )
+    video_item = next(
+        call["minimax_ref_items"][0]
+        for call in clip.tokenize_calls
+        if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video"
+    )
+    assert [float(frame.mean()) for frame in video_item["data"]] == [0.0, 0.0, 1.0, 1.0]
+    assert video_item["timestamps"] == [
+        Fraction(0), Fraction(1, 2), Fraction(11, 12), Fraction(17, 12),
+    ]
+    metadata = result.args[0][0][1]
+    assert "minimax_refs" not in metadata
+    assert "minimax_keyframes" not in metadata
+
+
+def test_clip_continuation_encoder_disconnected_matches_standard_encoder():
+    standard_clip = _MiniMaxH3TestClip()
+    continuation_clip = _MiniMaxH3TestClip()
+    kwargs = {
+        "vae": None,
+        "prompt": "prompt",
+        "width": 64,
+        "height": 64,
+        "length": 22,
+        "enable_caching": "disabled",
+    }
+    standard = encoder_nodes.UC_AdvancedMiniMaxH3ImageToVideo.execute(
+        clip=standard_clip, **kwargs
+    )
+    continuation = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+        clip=continuation_clip, continuation_media=None, **kwargs
+    )
+    torch.testing.assert_close(standard.args[0][0][0], continuation.args[0][0][0])
+    assert standard.args[0][0][1] == continuation.args[0][0][1]
+    assert standard_clip.tokenize_calls == continuation_clip.tokenize_calls
+
+
+def test_clip_continuation_qwen_video_normalizes_head_to_ordinary_video_geometry():
+    continuation = torch.zeros(22, 32, 64, 3)
+    video = torch.ones(22, 64, 96, 3)
+    frames, timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
+        continuation, video, 2
+    )
+    assert frames.shape == (4, 64, 96, 3)
+    assert timestamps == [Fraction(0), Fraction(1, 2), Fraction(11, 12), Fraction(17, 12)]
+
+
+def test_clip_continuation_encoder_keeps_autogrow_inputs_last():
+    schema = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.define_schema()
+    ids = [value.id for value in schema.inputs]
+    assert ids[ids.index("video") + 1] == "continuation_media"
+    assert ids[-2:] == ["reference_images", "fusion_images"]
+
+
 @pytest.mark.parametrize("connect_media_config", [False, True])
 def test_advanced_minimax_h3_video_qwen_frames_use_vlm_resolution(
     monkeypatch, connect_media_config,

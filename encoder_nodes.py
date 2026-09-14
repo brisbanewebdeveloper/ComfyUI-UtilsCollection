@@ -196,6 +196,7 @@ VisualFusionConfig = io.Custom("VISUAL_FUSION_CONFIG")
 AdvancedConsensusConfig = io.Custom("ADVANCED_CONSENSUS_CONFIG")
 VisualConsensusConfig = io.Custom("VISUAL_CONSENSUS_CONFIG")
 MiniMaxH3MediaConfig = io.Custom("MINIMAX_H3_MEDIA_CONFIG")
+MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
 
 class UC_TextConsensusBlendConfig(io.ComfyNode):
     @classmethod
@@ -3846,6 +3847,90 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
             vlm_video_resolution=vlm_video_resolution,
             media_config=media_config,
             video=video,
+            audio=audio,
+            audio_vae=audio_vae,
+            enable_caching=enable_caching,
+            token_fusion=fusion_method == "token_fusion",
+        )
+        return io.NodeOutput(conditioning, latent)
+
+
+class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
+    """Advanced H3 encoder with an opt-in Qwen-only prior clip video head."""
+
+    @classmethod
+    def define_schema(cls):
+        schema = super().define_schema()
+        schema.node_id = "UC_MiniMaxH3ClipContinuationEncoder"
+        schema.display_name = "MiniMax H3 Clip Continuation Encoder"
+        schema.description = (
+            "Creates MiniMax H3 conditioning with an optional decoded prior-clip tail "
+            "as the leading Qwen Video context. The tail is Qwen-only and does not "
+            "create native H3 references, keyframes, or audio conditioning."
+        )
+        video_index = next(index for index, value in enumerate(schema.inputs) if value.id == "video")
+        schema.inputs.insert(
+            video_index + 1,
+            MiniMaxH3ClipContinuationMedia.Input(
+                "continuation_media",
+                optional=True,
+                tooltip=(
+                    "Optional output from MiniMax H3 Clip Continuation Load. Its 24 fps "
+                    "tail becomes the leading Qwen Video head without changing native H3 "
+                    "Video, keyframe, reference, or audio conditioning."
+                ),
+            ),
+        )
+        return schema
+
+    @classmethod
+    def execute(
+        cls,
+        clip,
+        vae=None,
+        prompt=None,
+        width=None,
+        height=None,
+        length=None,
+        first_frame=None,
+        last_frame=None,
+        reference_images: io.Autogrow.Type = None,
+        fusion_images: io.Autogrow.Type = None,
+        visual_fusion_config=None,
+        multiplier=1.0,
+        ref_image_size="match",
+        vlm_resolution=384,
+        vlm_video_resolution=384,
+        media_config=None,
+        video=None,
+        continuation_media=None,
+        audio=None,
+        audio_vae=None,
+        enable_caching="all",
+        fusion_method=None,
+    ) -> io.NodeOutput:
+        fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
+        if fusion_method not in ("conds_fusion", "token_fusion"):
+            raise ValueError(f"Unsupported MiniMax H3 fusion method: {fusion_method}")
+        conditioning, latent = execute_advanced_minimax_h3_image_to_video(
+            clip,
+            vae,
+            prompt,
+            width,
+            height,
+            length,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            reference_images=reference_images,
+            fusion_images=fusion_images,
+            visual_fusion_config=visual_fusion_config,
+            multiplier=multiplier,
+            ref_image_size=ref_image_size,
+            vlm_resolution=vlm_resolution,
+            vlm_video_resolution=vlm_video_resolution,
+            media_config=media_config,
+            video=video,
+            continuation_media=continuation_media,
             audio=audio,
             audio_vae=audio_vae,
             enable_caching=enable_caching,

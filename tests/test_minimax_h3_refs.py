@@ -101,6 +101,49 @@ def test_audio_mono_is_duplicated_and_native_resampling_is_retained(monkeypatch)
     assert len(encoded) == 1
 
 
+def test_clip_continuation_save_load_overwrite_and_fingerprint(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    frames = torch.arange(56, dtype=torch.float32).view(56, 1, 1, 1).expand(56, 8, 8, 3).clone()
+
+    relative = model_helpers.save_minimax_h3_clip_continuation_media(
+        frames, 22, "h3_clip_continuation/clip", 1
+    )
+    assert relative == "h3_clip_continuation/clip_00001.safetensors"
+    first = model_helpers.load_minimax_h3_clip_continuation_media(
+        "h3_clip_continuation/clip", 1
+    )
+    assert first["frame_rate"] == 24
+    torch.testing.assert_close(first["frames"], frames[-22:, ..., :3])
+    fingerprint = model_helpers.get_minimax_h3_clip_continuation_fingerprint(
+        "h3_clip_continuation/clip", 1
+    )
+
+    replacement = torch.full((22, 8, 8, 3), 0.5)
+    model_helpers.save_minimax_h3_clip_continuation_media(
+        replacement, 22, "h3_clip_continuation/clip", 1
+    )
+    assert model_helpers.get_minimax_h3_clip_continuation_fingerprint(
+        "h3_clip_continuation/clip", 1
+    ) != fingerprint
+    torch.testing.assert_close(
+        model_helpers.load_minimax_h3_clip_continuation_media(
+            "h3_clip_continuation/clip", 1
+        )["frames"], replacement,
+    )
+
+
+def test_clip_continuation_rejects_short_tail_and_output_escape(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    with pytest.raises(ValueError, match="needs 22 frames"):
+        model_helpers.save_minimax_h3_clip_continuation_media(
+            torch.ones(5, 8, 8, 3), 22, "h3_clip_continuation/clip", 1
+        )
+    with pytest.raises(ValueError, match="stay inside output"):
+        model_helpers.save_minimax_h3_clip_continuation_media(
+            torch.ones(22, 8, 8, 3), 22, "../escape", 1
+        )
+
+
 def test_refined_compression_can_create_gradients_inside_inference_mode():
     previous_grad = torch.is_grad_enabled()
     with torch.inference_mode(True):

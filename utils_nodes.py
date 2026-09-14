@@ -9,10 +9,16 @@ from comfy_api.latest import InputImpl, Types, io
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from .helper_functions import to_video_prompt
 from .image_helpers import prepare_h3_reference_components, cached_h3_reference_components, VIDEO_FRAME_TIMESTAMP_FORMATS
-from .model_helpers import transcribe_reference_audio
+from .model_helpers import (
+    get_minimax_h3_clip_continuation_fingerprint,
+    load_minimax_h3_clip_continuation_media,
+    save_minimax_h3_clip_continuation_media,
+    transcribe_reference_audio,
+)
 
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
 SeedClusterType = io.Custom("UC_SEED_CLUSTER")
+MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
 
 
 class UC_MiniMaxH3RefVid(io.ComfyNode):
@@ -53,6 +59,65 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
             Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)),
         )
         return io.NodeOutput(frames, audio, width, height, length, prepared_video, transcribed_audio, ui={"h3_reference_range": [preview]})
+
+
+class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationSave",
+            display_name="MiniMax H3 Clip Continuation Save",
+            category="advanced/conditioning",
+            description="Stores final decoded H3 RGB frames for a later Clip Continuation Encoder queue.",
+            inputs=[
+                io.Image.Input("images", tooltip="Decoded H3 frames from the completed prior clip."),
+                io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="Number of final 24 fps frames retained as Qwen video-head context."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative deterministic continuation slot prefix."),
+                io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Slot number. Re-running this index replaces its continuation tail."),
+            ],
+            outputs=[io.String.Output("path")],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(cls, images, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
+        path = save_minimax_h3_clip_continuation_media(
+            images, int(tail_frames), filename_prefix, clip_index
+        )
+        return io.NodeOutput(path)
+
+
+class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationLoad",
+            display_name="MiniMax H3 Clip Continuation Load",
+            category="advanced/conditioning",
+            description="Loads a saved decoded H3 tail for MiniMax H3 Clip Continuation Encoder only.",
+            inputs=[
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative continuation slot prefix used by Save."),
+                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Prior clip slot. Zero returns no continuation media for the first clip."),
+            ],
+            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
+        )
+
+    @classmethod
+    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
+        if int(clip_index) <= 0:
+            return "disabled"
+        try:
+            return get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
+        except FileNotFoundError:
+            return float("nan")
+
+    @classmethod
+    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
+        if int(clip_index) <= 0:
+            return io.NodeOutput(None)
+        return io.NodeOutput(
+            load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+        )
 
 
 class UC_SeedCluster(io.ComfyNode):

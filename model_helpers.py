@@ -44,6 +44,7 @@ from .encoder_helpers import (
     _encode_minimax_h3_audio_reference,
     prepare_minimax_h3_reference_image,
     prepare_minimax_h3_reference_video,
+    validate_minimax_h3_clip_continuation_media,
 )
 
 
@@ -285,6 +286,122 @@ def _refine_mask(sam3_model, frame, coarse_mask, iterations):
 MINIMAX_H3_REF_FOLDER = "minimax_h3_refs"
 MINIMAX_H3_REF_METADATA_KEY = "refmod_meta"
 MINIMAX_H3_REF_FORMAT = 4
+MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY = "minimax_h3_clip_continuation"
+MINIMAX_H3_CLIP_CONTINUATION_FORMAT = 1
+
+
+def _minimax_h3_clip_continuation_root() -> Path:
+    return Path(folder_paths.get_output_directory()).resolve()
+
+
+def _minimax_h3_clip_continuation_relative_prefix(filename_prefix: str) -> Path:
+    if not isinstance(filename_prefix, str) or not filename_prefix:
+        raise ValueError("MiniMax H3 Clip Continuation filename prefix must not be empty.")
+    relative = Path(filename_prefix)
+    reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        raise ValueError("MiniMax H3 Clip Continuation filename prefix must stay inside output.")
+    for part in relative.parts:
+        stem = part.split(".", 1)[0].upper()
+        if part in {"", ".", ".."} or ":" in part or part[-1:] in {".", " "} or stem in reserved or any(ord(character) < 32 for character in part):
+            raise ValueError("MiniMax H3 Clip Continuation filename prefix contains an unsupported path component.")
+    return relative
+
+
+def _minimax_h3_clip_continuation_path(filename_prefix: str, clip_index: int) -> Path:
+    if isinstance(clip_index, bool) or not isinstance(clip_index, numbers.Integral) or clip_index < 1:
+        raise ValueError("MiniMax H3 Clip Continuation clip index must be at least 1.")
+    root = _minimax_h3_clip_continuation_root()
+    prefix = _minimax_h3_clip_continuation_relative_prefix(filename_prefix)
+    path = (root / f"{prefix}_{int(clip_index):05d}.safetensors").resolve()
+    if root not in path.parents:
+        raise ValueError("MiniMax H3 Clip Continuation filename prefix must stay inside output.")
+    return path
+
+
+def save_minimax_h3_clip_continuation_media(
+    frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int,
+) -> str:
+    if isinstance(tail_frames, bool) or not isinstance(tail_frames, numbers.Integral) or tail_frames not in {5, 22, 39, 56}:
+        raise ValueError("MiniMax H3 Clip Continuation tail frames must be 5, 22, 39, or 56.")
+    media = {"format_version": 1, "frame_rate": 24, "frames": frames}
+    frames = validate_minimax_h3_clip_continuation_media(media)
+    if frames.shape[0] < tail_frames:
+        raise ValueError(
+            f"MiniMax H3 Clip Continuation needs {tail_frames} frames but received {frames.shape[0]}."
+        )
+    path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tail = frames[-tail_frames:].detach().cpu().contiguous()
+    metadata = {
+        MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY: json.dumps(
+            {
+                "format_version": MINIMAX_H3_CLIP_CONTINUATION_FORMAT,
+                "frame_rate": 24,
+                "shape": list(tail.shape),
+            },
+            separators=(",", ":"), sort_keys=True,
+        )
+    }
+    descriptor, temporary = tempfile.mkstemp(prefix=".h3-continuation-", suffix=".tmp", dir=path.parent)
+    os.close(descriptor)
+    try:
+        with IncrementalSafetensorsWriter(temporary, metadata=metadata, max_workers=1) as writer:
+            writer.write("frames", tail)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return str(path.relative_to(_minimax_h3_clip_continuation_root())).replace("\\", "/")
+
+
+def get_minimax_h3_clip_continuation_fingerprint(filename_prefix: str, clip_index: int) -> str:
+    path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
+    stat = path.stat()
+    return f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def load_minimax_h3_clip_continuation_media(filename_prefix: str, clip_index: int) -> dict:
+    path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
+    with MemoryEfficientSafeOpen(str(path), low_memory=True) as handle:
+        if set(handle.keys()) != {"frames"}:
+            raise ValueError("MiniMax H3 Clip Continuation file must contain only frames.")
+        raw_metadata = (handle.metadata() or {}).get(MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY)
+        if raw_metadata is None:
+            raise ValueError("MiniMax H3 Clip Continuation file has no metadata.")
+        try:
+            metadata = json.loads(raw_metadata)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MiniMax H3 Clip Continuation metadata is invalid JSON.") from exc
+        shape = handle.get_shape("frames")
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("format_version") != MINIMAX_H3_CLIP_CONTINUATION_FORMAT
+            or metadata.get("frame_rate") != 24
+            or metadata.get("shape") != list(shape)
+            or len(shape) != 4
+            or shape[0] < 5
+            or min(shape[1:3]) < 1
+            or shape[3] != 3
+            or not handle.get_dtype("frames").is_floating_point
+        ):
+            raise ValueError("MiniMax H3 Clip Continuation file has invalid frame metadata.")
+        frames = None
+        with closing(handle.async_stream(["frames"], batch_size=1, prefetch_batches=1, pin_memory=False)) as stream:
+            for batch in stream:
+                try:
+                    if len(batch) != 1 or batch[0][0] != "frames":
+                        raise ValueError("MiniMax H3 Clip Continuation stream returned an unexpected tensor.")
+                    frames = batch[0][1].detach().clone()
+                finally:
+                    for name, _value in batch:
+                        handle.mark_processed(name)
+        if frames is None:
+            raise ValueError("MiniMax H3 Clip Continuation file has no frames.")
+    validate_minimax_h3_clip_continuation_media(
+        {"format_version": 1, "frame_rate": 24, "frames": frames}
+    )
+    return {"format_version": 1, "frame_rate": 24, "frames": frames}
 
 
 def _register_minimax_h3_ref_folder() -> None:
