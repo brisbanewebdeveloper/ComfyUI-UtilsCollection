@@ -128,11 +128,12 @@ class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationTrim",
             display_name="MiniMax H3 Clip Continuation Trim",
             category="advanced/conditioning",
-            description="Removes repeated beginning frames before joining clips.",
+            description="Removes repeated beginning or ending frames before joining clips.",
             inputs=[
                 io.Image.Input("images", tooltip="Frames from the clip to trim."),
                 io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip. It is trimmed to match the frames."),
                 io.Int.Input("trim_leading_frames", default=0, min=0, max=99999, step=1, tooltip="How many beginning frames to remove. Use 0 for the first clip."),
+                io.Int.Input("trim_trailing_frames", default=0, min=0, max=99999, step=1, tooltip="How many ending frames to remove."),
             ],
             outputs=[
                 io.Image.Output("images"),
@@ -141,9 +142,9 @@ class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, audio=None, trim_leading_frames=0):
+    def execute(cls, images, audio=None, trim_leading_frames=0, trim_trailing_frames=0):
         trimmed_images, trimmed_audio = trim_minimax_h3_clip_continuation(
-            images, audio, int(trim_leading_frames)
+            images, audio, int(trim_leading_frames), int(trim_trailing_frames)
         )
         return io.NodeOutput(trimmed_images, trimmed_audio)
 

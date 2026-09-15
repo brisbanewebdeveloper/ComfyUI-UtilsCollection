@@ -332,21 +332,31 @@ def _minimax_h3_clip_continuation_saved_path(relative_path: str) -> Path:
 
 
 def trim_minimax_h3_clip_continuation(
-    images: torch.Tensor, audio: dict | None, trim_frames: int, fps: int = 24,
+    images: torch.Tensor, audio: dict | None, trim_leading_frames: int,
+    trim_trailing_frames: int = 0, fps: int = 24,
 ) -> tuple[torch.Tensor, dict | None]:
-    """Remove a pinned H3 head and keep its decoded audio sample-aligned."""
+    """Trim clip ends and keep decoded audio sample-aligned."""
     if not torch.is_tensor(images) or images.ndim != 4 or images.shape[0] < 1:
         raise ValueError("MiniMax H3 Clip Continuation images must be non-empty BHWC frames.")
-    if isinstance(trim_frames, bool) or not isinstance(trim_frames, numbers.Integral) or not 0 <= trim_frames < images.shape[0]:
+    if (
+        isinstance(trim_leading_frames, bool)
+        or not isinstance(trim_leading_frames, numbers.Integral)
+        or isinstance(trim_trailing_frames, bool)
+        or not isinstance(trim_trailing_frames, numbers.Integral)
+        or trim_leading_frames < 0
+        or trim_trailing_frames < 0
+        or trim_leading_frames + trim_trailing_frames >= images.shape[0]
+    ):
         raise ValueError("MiniMax H3 Clip Continuation trim frames must leave at least one frame.")
-    frames = images[int(trim_frames):]
+    stop = images.shape[0] - int(trim_trailing_frames) if trim_trailing_frames else None
+    frames = images[int(trim_leading_frames):stop]
     if audio is None:
         return frames, None
     waveform = audio.get("waveform") if isinstance(audio, dict) else None
     sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
     if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(sample_rate, int) or sample_rate <= 0:
         raise ValueError("MiniMax H3 Clip Continuation audio must be one mono or stereo waveform with a positive sample rate.")
-    start = round(int(trim_frames) * sample_rate / fps)
+    start = round(int(trim_leading_frames) * sample_rate / fps)
     if start >= waveform.shape[-1]:
         raise ValueError("MiniMax H3 Clip Continuation trim removes all audio.")
     waveform = waveform[..., start:]

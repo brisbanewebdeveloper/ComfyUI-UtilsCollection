@@ -155,17 +155,17 @@ def test_clip_continuation_trim_removes_aligned_frame_and_audio_heads():
     torch.testing.assert_close(untrimmed.args[1]["waveform"], audio["waveform"])
 
     trimmed = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(
-        frames, audio, 22
+        frames, audio, 22, 5
     )
-    torch.testing.assert_close(trimmed.args[0], frames[22:])
-    torch.testing.assert_close(trimmed.args[1]["waveform"], audio["waveform"][..., 220:])
+    torch.testing.assert_close(trimmed.args[0], frames[22:-5])
+    torch.testing.assert_close(trimmed.args[1]["waveform"], audio["waveform"][..., 220:510])
 
-    without_audio = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 22)
-    torch.testing.assert_close(without_audio.args[0], frames[22:])
+    without_audio = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 22, 5)
+    torch.testing.assert_close(without_audio.args[0], frames[22:-5])
     assert without_audio.args[1] is None
 
     with pytest.raises(ValueError, match="leave at least one frame"):
-        utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 56)
+        utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 22, 34)
 
 
 def test_clip_continuation_save_still_has_only_path_output():
