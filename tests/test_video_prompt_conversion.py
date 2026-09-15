@@ -12,8 +12,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_video_prompt_test import (
-    helper_functions,
+from utils_collection_video_prompt_test.helpers import helper_functions
+from utils_collection_video_prompt_test.nodes import (
     preset_nodes,
     utils_nodes,
 )

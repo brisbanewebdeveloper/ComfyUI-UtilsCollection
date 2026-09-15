@@ -13,9 +13,9 @@ import nodes
 import folder_paths
 import node_helpers
 from comfy_api.latest import ComfyExtension, io
-from .helper_functions import get_token_count, get_token_count_scaled, resize_nchw
-from .minimax_h3_cache_helpers import H3_CACHE_MODES
-from .encoder_helpers import(
+from ..helpers.helper_functions import get_token_count, get_token_count_scaled, resize_nchw
+from ..helpers.minimax_h3_cache_helpers import H3_CACHE_MODES
+from ..helpers.encoder_helpers import(
     encode_embedding_scaled_bias,
     is_image_token,
     evaluate_formula,
@@ -54,7 +54,7 @@ from .encoder_helpers import(
     MINIMAX_H3_VIDEO_LATENT_MODES,
     execute_token_fusion_visual_conditioning,
 )
-from .image_helpers import VIDEO_FRAME_TIMESTAMP_FORMATS
+from ..helpers.image_helpers import VIDEO_FRAME_TIMESTAMP_FORMATS
 
 def apply_parallel_ref_latents(clip, conditioning, ref_latents, ref_latent_mode):
     if not ref_latents:

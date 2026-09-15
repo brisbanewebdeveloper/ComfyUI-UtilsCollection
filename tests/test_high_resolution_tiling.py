@@ -12,12 +12,12 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_high_resolution_tiling_test.image_nodes import (
+from utils_collection_high_resolution_tiling_test.nodes.image_nodes import (
     HighResolutionTileLayout,
     UC_HighResolutionTileAccumulator,
     UC_HighResolutionTileSplit,
 )
-from utils_collection_high_resolution_tiling_test.tile_helpers import (
+from utils_collection_high_resolution_tiling_test.helpers.tile_helpers import (
     accumulate_tile_images,
     apply_depth_structure_mask,
     apply_tile_differential_diffusion,

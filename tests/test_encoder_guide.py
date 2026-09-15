@@ -14,7 +14,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_encoder_guide_test.utils_nodes import UC_EncoderNodesGuide
+    from utils_collection_encoder_guide_test.nodes.utils_nodes import UC_EncoderNodesGuide
 finally:
     cli_args.cpu = prior_cpu
 

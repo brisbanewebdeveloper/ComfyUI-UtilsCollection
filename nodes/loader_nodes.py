@@ -3,7 +3,7 @@ from folder_paths import get_filename_list, get_folder_paths, get_full_path_or_r
 from comfy.sd import load_lora_for_models
 from comfy.utils import load_torch_file
 from comfy_api.latest import io
-from .loader_helpers import load_sam31_checkpoint
+from ..helpers.loader_helpers import load_sam31_checkpoint
 
 _LORA_LOADER_CACHE = None
 

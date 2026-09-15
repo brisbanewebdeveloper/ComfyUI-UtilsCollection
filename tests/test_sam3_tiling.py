@@ -11,8 +11,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_sam3_tiling_test import model_helpers
-from utils_collection_sam3_tiling_test.model_helpers import (
+from utils_collection_sam3_tiling_test.helpers import model_helpers
+from utils_collection_sam3_tiling_test.helpers.model_helpers import (
     SAM3_EDGE_PADDING,
     SAM3_WORKING_SIZE,
     _padded_sam3_image,

@@ -3,7 +3,7 @@
 import folder_paths
 from comfy_api.latest import io
 
-from .patcher_helpers import (
+from ..helpers.patcher_helpers import (
     CUSTOM_SAGE_MODES,
     MiniMaxH3RadialAttentionConfig,
     MiniMaxH3SlaAttentionConfig,

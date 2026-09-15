@@ -89,6 +89,7 @@ def is_production_source(path: str) -> bool:
     normalized = path.replace("\\", "/")
     return (
         ("/" not in normalized and normalized.endswith(".py"))
+        or (normalized.startswith(("nodes/", "helpers/")) and normalized.endswith(".py"))
         or (normalized.startswith("web/") and normalized.endswith(".js"))
     )
 

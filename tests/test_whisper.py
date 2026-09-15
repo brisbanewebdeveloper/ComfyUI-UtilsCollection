@@ -15,9 +15,9 @@ PACKAGE = "utils_collection_whisper_test"
 package = types.ModuleType(PACKAGE)
 package.__path__ = [str(ROOT)]
 sys.modules.setdefault(PACKAGE, package)
-from utils_collection_whisper_test import model_helpers as helpers
+from utils_collection_whisper_test.helpers import model_helpers as helpers
 from utils_collection_whisper_test.models.whisper import ModelDimensions, Whisper
-from utils_collection_whisper_test import whisper_timing_helpers as timing
+from utils_collection_whisper_test.helpers import whisper_timing_helpers as timing
 from utils_collection_whisper_test.models.whisper import MultiHeadAttention
 
 
@@ -122,8 +122,8 @@ def test_missing_tiktoken_does_not_prevent_model_helpers_import(monkeypatch):
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", without_tiktoken)
-    module_name = f"{PACKAGE}.model_helpers_without_tiktoken"
-    spec = importlib.util.spec_from_file_location(module_name, ROOT / "model_helpers.py")
+    module_name = f"{PACKAGE}.helpers.model_helpers_without_tiktoken"
+    spec = importlib.util.spec_from_file_location(module_name, ROOT / "helpers" / "model_helpers.py")
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)

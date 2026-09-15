@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 
-from .model_assets import require_huggingface_model
+from ..model_assets import require_huggingface_model
 from .background_replace_helpers import _expanded_box, _ordered_ring, _polygon_mask
 from .composite_helpers import (
     _expand_mask,

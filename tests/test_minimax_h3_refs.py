@@ -19,7 +19,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_minimax_h3_refs_test import model_helpers, model_nodes, utils_nodes
+from utils_collection_minimax_h3_refs_test.helpers import model_helpers
+from utils_collection_minimax_h3_refs_test.nodes import model_nodes, utils_nodes
 
 
 def _image_ref(value=1.0):
@@ -423,6 +424,6 @@ def test_schema_nested_dynamic_combo_autogrow_order_and_registration_source(monk
         schema = getattr(model_nodes, node_id).GET_SCHEMA()
         assert all(output.tooltip for output in schema.outputs)
         assert all(input.tooltip for input in schema.inputs)
-    for source in ((CUSTOM_NODE_ROOT / "model_nodes.py").read_text(encoding="utf-8"), (CUSTOM_NODE_ROOT / "model_helpers.py").read_text(encoding="utf-8")):
+    for source in ((CUSTOM_NODE_ROOT / "nodes" / "model_nodes.py").read_text(encoding="utf-8"), (CUSTOM_NODE_ROOT / "helpers" / "model_helpers.py").read_text(encoding="utf-8")):
         assert "reference/" not in source
         assert "add_object_patch" not in source

@@ -15,7 +15,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_markdown_preview_test.utils_nodes import (
+    from utils_collection_markdown_preview_test.nodes.utils_nodes import (
         UC_ImageToVideoPrompt,
         UC_MarkdownPreview,
     )

@@ -12,12 +12,12 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_image_resampling_test.image_helpers import (
+from utils_collection_image_resampling_test.helpers.image_helpers import (
     downscale_nohalo_lohalo,
     halo_downscale_dimensions,
 )
-from utils_collection_image_resampling_test import image_helpers
-from utils_collection_image_resampling_test.image_nodes import UC_NoHaloLoHaloDownscale
+from utils_collection_image_resampling_test.helpers import image_helpers
+from utils_collection_image_resampling_test.nodes.image_nodes import UC_NoHaloLoHaloDownscale
 
 
 def test_nohalo_lohalo_schema_contract():

@@ -8,8 +8,8 @@ from comfy_api.latest import io
 from comfy import model_management
 from comfy.text_encoders.qwen_vl import qwen2vl_mrope_position_ids
 
-from .encoder_helpers import evaluate_tensor_expression, fuse_visual_token_sources, fuse_deepstack_layers, prepare_vlm_image
-from .textgen_helpers import (
+from ..helpers.encoder_helpers import evaluate_tensor_expression, fuse_visual_token_sources, fuse_deepstack_layers, prepare_vlm_image
+from ..helpers.textgen_helpers import (
     generate_qwen3vl_video,
     prepare_qwen3vl_video_frames,
     qwen3vl_video_prompt,

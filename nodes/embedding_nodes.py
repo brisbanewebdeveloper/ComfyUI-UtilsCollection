@@ -1,7 +1,7 @@
 from comfy_api.latest import io
 from folder_paths import get_filename_list, get_full_path_or_raise
 
-from .embedding_helpers import analyze_embedding_file
+from ..helpers.embedding_helpers import analyze_embedding_file
 
 
 class UC_EmbeddingDetokenizerAnalysis(io.ComfyNode):

@@ -20,18 +20,17 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_composite_test import (
+    from utils_collection_composite_test.helpers import (
         background_replace_helpers,
         composite_helpers,
-        composite_nodes,
         foreground_content_helpers,
         image_helpers,
-        image_nodes,
-        model_assets,
         staged_compositor_helpers,
         staged_face_helpers,
     )
-    from utils_collection_composite_test.helper_functions import resize_nchw
+    from utils_collection_composite_test.nodes import composite_nodes, image_nodes
+    from utils_collection_composite_test import model_assets
+    from utils_collection_composite_test.helpers.helper_functions import resize_nchw
 finally:
     cli_args.cpu = prior_cpu
 

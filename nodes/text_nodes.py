@@ -1,5 +1,5 @@
 from comfy_api.latest import io
-from .helper_functions import (
+from ..helpers.helper_functions import (
     join_words_in_text,
     to_bold_fraktur_style,
     from_bold_fraktur_style,
@@ -7,7 +7,7 @@ from .helper_functions import (
     unescape_string,
     repair_and_minify_json,
 )
-from .text_helpers import concatenate_aligned_text_inputs
+from ..helpers.text_helpers import concatenate_aligned_text_inputs
 
 class UC_BoldFrakturTextStyle(io.ComfyNode):
     @classmethod

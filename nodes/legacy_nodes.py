@@ -8,7 +8,7 @@ from .vlm_nodes import *
 from .parameter_nodes import *
 from .utils_nodes import *
 from .textgen_nodes import *
-from .lama_helpers import image_mask_to_luma, load_lama_model, run_lama_inpaint
+from ..helpers.lama_helpers import image_mask_to_luma, load_lama_model, run_lama_inpaint
 
 import folder_paths
 

@@ -15,8 +15,9 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_video_frame_sampler_test import image_helpers, utils_nodes
-from utils_collection_video_frame_sampler_test.image_helpers import (
+from utils_collection_video_frame_sampler_test.helpers import image_helpers
+from utils_collection_video_frame_sampler_test.nodes import utils_nodes
+from utils_collection_video_frame_sampler_test.helpers.image_helpers import (
     VIDEO_STRUCTURED_TIMELINE_TEXT_STRUCTURE,
     VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_STRUCTURE,
     VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE,
@@ -61,7 +62,7 @@ def test_parse_video_timestamps_rejects_invalid_values(value):
 def test_parse_video_timestamps_rejects_decreasing_order():
     with pytest.raises(ValueError, match="earlier"):
         parse_video_timestamps([1, 0])
-from utils_collection_video_frame_sampler_test.image_nodes import (
+from utils_collection_video_frame_sampler_test.nodes.image_nodes import (
     UC_ImagesToVideoTimeline,
     UC_SampleVideoFramesAsImages,
     UC_VideoTimelineText,
@@ -753,7 +754,7 @@ def test_h3_reference_components_round_seconds_and_preserve_audio_start():
     ("MM:SS.mmm", "[00:00.400–00:01.800] Shake the bottle."),
 ])
 def test_h3_whisper_selected_audio_and_timestamp_format(monkeypatch, timestamp_format, expected):
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     frames = torch.zeros(120, 8, 16, 3)
     waveform = torch.arange(160000, dtype=torch.float32).reshape(1, 1, -1)
@@ -785,7 +786,7 @@ def test_h3_whisper_selected_audio_and_timestamp_format(monkeypatch, timestamp_f
 
 @pytest.mark.parametrize("case", ["disconnected", "no_track", "empty_track", "disabled"])
 def test_h3_whisper_skips_inference_without_model_or_source_audio(monkeypatch, case):
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     def forbidden(*args):
         pytest.fail("Whisper must not run when disabled, disconnected, or without source audio")
@@ -806,7 +807,7 @@ def test_h3_whisper_skips_inference_without_model_or_source_audio(monkeypatch, c
 
 
 def test_h3_whisper_empty_speech_and_errors(monkeypatch):
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     audio = {"waveform": torch.zeros(1, 1, 32000), "sample_rate": 32000}
     monkeypatch.setattr(speech, "run_whisper", lambda *args, **kwargs: ([""], ["[]"], ["en"]))
@@ -822,7 +823,7 @@ def test_h3_whisper_empty_speech_and_errors(monkeypatch):
 
 def test_h3_transcript_groups_boundary_words_once_and_omits_padding(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     words = [
         {"word": "First", "start": 0, "end": 4 / 24},
@@ -845,7 +846,7 @@ def test_h3_transcript_groups_boundary_words_once_and_omits_padding(monkeypatch)
 
 def test_h3_transcript_text_boundaries_across_segments(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     tokens = ['say', ' hello,”', ' then', ' I', " I'm", ' Alice', ' speaks.', ' “Next?”', ' 終わり。', ' 最後、']
     words = [{"word": token, "start": i / 2, "end": (i + 1) / 2} for i, token in enumerate(tokens)]
@@ -864,7 +865,7 @@ def test_h3_transcript_text_boundaries_across_segments(monkeypatch):
 
 def test_h3_transcript_dictionary_counts_and_unknown_phrases(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     counts = speech.reference_syllable_counts({'disappear', 'poof', 'addicted', 'smoking', 'something', 'fire', 'every', 'zzzxq'})
     assert counts == {'disappear': 3, 'poof': 1, 'addicted': 3, 'smoking': 2, 'something': 2, 'fire': None, 'every': None}
@@ -890,7 +891,7 @@ def test_h3_transcript_dictionary_counts_and_unknown_phrases(monkeypatch):
 
 def test_h3_transcript_single_capital_comma_uses_syllable_grouping(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     # Synthetic word timings; the supplied sample contains phrase timings only.
     tokens = ['Donovan,', ' you', ' see', ' this?', ' Women,', ' oh', ' my', ' god,',
@@ -921,7 +922,7 @@ def test_h3_transcript_single_capital_comma_uses_syllable_grouping(monkeypatch):
     ([2, 2, 2], [[0, 1, 2]]),
 ])
 def test_h3_syllable_partition_objective(counts, expected):
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     words = [{"word": str(i)} for i in range(len(counts))]
     groups = speech.partition_reference_phrase(words, {str(i): value for i, value in enumerate(counts)})
@@ -935,7 +936,7 @@ def test_h3_syllable_partition_objective(counts, expected):
 ])
 def test_h3_transcript_rejects_low_word_rate(monkeypatch, speech_end, expected):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     # Synthetic internal timings reproduce the reported phrase span, not its alignment.
     tokens = ['Thank', ' you', ' for', ' watching!']
@@ -953,7 +954,7 @@ def test_h3_transcript_rejects_low_word_rate(monkeypatch, speech_end, expected):
 
 def test_h3_transcript_word_rate_excludes_pauses(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     # Same text and outer span as the hallucination regression, but short words
     # separated by silence must survive. These are synthetic alignment fixtures.
@@ -972,7 +973,7 @@ def test_h3_transcript_word_rate_excludes_pauses(monkeypatch):
 
 def test_h3_transcript_clamps_crossing_words_and_keeps_zero_duration(monkeypatch):
     import json
-    from utils_collection_video_frame_sampler_test import model_helpers as speech
+    from utils_collection_video_frame_sampler_test.helpers import model_helpers as speech
 
     words = [
         {"word": "excluded", "start": -2, "end": -1},
@@ -990,7 +991,7 @@ def test_h3_transcript_clamps_crossing_words_and_keeps_zero_duration(monkeypatch
 
 
 def test_h3_video_disk_cache_reuses_full_decode_across_ranges(tmp_path, monkeypatch):
-    from utils_collection_video_frame_sampler_test import image_helpers as cache
+    from utils_collection_video_frame_sampler_test.helpers import image_helpers as cache
     monkeypatch.setattr(cache, "_frame_storage", lambda video: "npz")
 
     monkeypatch.setattr(cache.folder_paths, "get_temp_directory", lambda: str(tmp_path / "cache"))
@@ -1046,7 +1047,7 @@ def test_h3_video_disk_cache_reuses_full_decode_across_ranges(tmp_path, monkeypa
 
 def test_h3_png_cache_reads_only_selected_frames_and_preserves_audio(tmp_path, monkeypatch):
     import zipfile
-    from utils_collection_video_frame_sampler_test import image_helpers as cache
+    from utils_collection_video_frame_sampler_test.helpers import image_helpers as cache
 
     frames = torch.arange(4 * 8 * 16 * 3).reshape(4, 8, 16, 3).remainder(256).float() / 255
     audio = {"waveform": torch.tensor([[[0.1, -0.2, 0.3]]]), "sample_rate": 32000}
@@ -1226,7 +1227,7 @@ def test_h3_streamed_cache_reuses_ranges(tmp_path, monkeypatch):
 
 def test_h3_legacy_video_cache_migrates_without_decoding_source(tmp_path, monkeypatch):
     from safetensors.torch import save_file
-    from utils_collection_video_frame_sampler_test import image_helpers as cache
+    from utils_collection_video_frame_sampler_test.helpers import image_helpers as cache
 
     monkeypatch.setattr(cache.folder_paths, "get_temp_directory", lambda: str(tmp_path))
     monkeypatch.setattr(cache, "_frame_storage", lambda video: "png8")
@@ -1254,7 +1255,7 @@ def test_h3_legacy_video_cache_migrates_without_decoding_source(tmp_path, monkey
 
 
 def test_h3_video_cache_invalidates_content_trim_crop_and_recovers(tmp_path, monkeypatch):
-    from utils_collection_video_frame_sampler_test import image_helpers as cache
+    from utils_collection_video_frame_sampler_test.helpers import image_helpers as cache
     monkeypatch.setattr(cache, "_frame_storage", lambda video: "npz")
 
     monkeypatch.setattr(cache.folder_paths, "get_temp_directory", lambda: str(tmp_path / "cache"))

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from comfy_api.latest import io, ui
 
 from .helper_functions import resize_nchw
-from .model_assets import require_huggingface_model
+from ..model_assets import require_huggingface_model
 
 
 _RESIZE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]

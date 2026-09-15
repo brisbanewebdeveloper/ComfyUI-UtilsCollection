@@ -3,7 +3,7 @@ from enum import Enum
 from comfy_api.latest import io
 from comfy_extras.nodes_ideogram4 import Ideogram4Scheduler
 
-from .scheduler_helpers import (
+from ..helpers.scheduler_helpers import (
     BASE_SIGMA_POINTS,
     discard_penultimate_sigma,
     parse_float_list,

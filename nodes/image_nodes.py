@@ -1,6 +1,6 @@
 import os
 import json
-from .model_helpers import register_openpose_paths, load_openpose_model, openpose_forward, load_dwpose_model, dwpose_forward, load_animal_pose_model, load_densepose_model, densepose_forward
+from ..helpers.model_helpers import register_openpose_paths, load_openpose_model, openpose_forward, load_dwpose_model, dwpose_forward, load_animal_pose_model, load_densepose_model, densepose_forward
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,14 +12,14 @@ import folder_paths
 from tqdm import tqdm
 from PIL import Image, ImageOps, ImageSequence, ImageDraw, ImageFont
 import kornia.morphology as morph
-from .helper_functions import pil2tensor, math_diag, pct_to_px, composite, fill_mask_from_edges, iterative_directional_stretch_fill, gaussian_blur_nchw, hex_to_rgb, string_to_color, resize_nchw, FLOW_PRESETS
-from .tile_helpers import (
+from ..helpers.helper_functions import pil2tensor, math_diag, pct_to_px, composite, fill_mask_from_edges, iterative_directional_stretch_fill, gaussian_blur_nchw, hex_to_rgb, string_to_color, resize_nchw, FLOW_PRESETS
+from ..helpers.tile_helpers import (
     accumulate_tile_images,
     apply_tile_differential_diffusion,
     split_and_encode_tiles,
 )
-from .color_palette_helpers import extract_prevalent_color_outputs
-from .image_helpers import (
+from ..helpers.color_palette_helpers import extract_prevalent_color_outputs
+from ..helpers.image_helpers import (
     run_openpose_batch,
     run_dwpose_batch,
     run_densepose_batch,

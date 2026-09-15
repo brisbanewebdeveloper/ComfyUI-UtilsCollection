@@ -15,16 +15,16 @@ try:
 except ImportError:
     tiktoken = None
 from comfy.model_management import throw_exception_if_processing_interrupted
-from .models.whisper import ModelDimensions, Whisper
+from ..models.whisper import ModelDimensions, Whisper
 from .whisper_timing_helpers import alignment_heads, add_word_timestamps
 import numpy as np
 import comfy.model_patcher
 import comfy.ops
-from .model_assets import download_huggingface_model, get_model_migration, MODEL_MIGRATIONS
-from .models.openpose import BodyPoseModel, HandPoseModel, FacePoseModel
-from .models.yolox import YOLOXDetector
-from .models.rtmpose import RTMPoseEstimator, AP10KPoseEstimator
-from .models.densepose import DensePoseModel
+from ..model_assets import download_huggingface_model, get_model_migration, MODEL_MIGRATIONS
+from ..models.openpose import BodyPoseModel, HandPoseModel, FacePoseModel
+from ..models.yolox import YOLOXDetector
+from ..models.rtmpose import RTMPoseEstimator, AP10KPoseEstimator
+from ..models.densepose import DensePoseModel
 import math
 import numbers
 import os
@@ -1207,7 +1207,7 @@ def whisper_log_mel_spectrogram(audio, n_mels=80, padding=0):
     window = torch.hann_window(WHISPER_N_FFT, device=audio.device, dtype=audio.dtype)
     stft = torch.stft(audio, WHISPER_N_FFT, WHISPER_HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs().square()
-    with np.load(Path(__file__).parent / "models" / "whisper_assets" / "mel_filters.npz", allow_pickle=False) as archive:
+    with np.load(Path(__file__).parent.parent / "models" / "whisper_assets" / "mel_filters.npz", allow_pickle=False) as archive:
         filters = torch.from_numpy(archive[f"mel_{n_mels}"]).to(device=audio.device, dtype=audio.dtype)
     log_spec = (filters @ magnitudes).clamp(min=1e-10).log10()
     log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
@@ -1538,7 +1538,7 @@ class WhisperTokenizer:
 def whisper_get_encoding(name: str = "gpt2", num_languages: int = 99):
     if tiktoken is None:
         raise RuntimeError("Whisper requires tiktoken. Install tiktoken in ComfyUI's Python environment and restart ComfyUI.")
-    vocab_path = os.path.join(os.path.dirname(__file__), "models", "whisper_assets", f"{name}.tiktoken")
+    vocab_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "whisper_assets", f"{name}.tiktoken")
     ranks = {
         base64.b64decode(token): int(rank)
         for token, rank in (line.split() for line in open(vocab_path) if line)
@@ -2604,7 +2604,7 @@ def reference_syllable_key(text):
 def reference_syllable_counts(keys):
     """Read only requested counts; differing pronunciation counts remain unknown."""
     counts = {}
-    with (Path(__file__).parent / "models" / "whisper_assets" / "cmudict" / "cmudict.dict").open(encoding="utf-8") as dictionary:
+    with (Path(__file__).parent.parent / "models" / "whisper_assets" / "cmudict" / "cmudict.dict").open(encoding="utf-8") as dictionary:
         for line in dictionary:
             entry, _, pronunciation = line.partition(" ")
             key = entry.split("(", 1)[0]

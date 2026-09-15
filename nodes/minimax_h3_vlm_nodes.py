@@ -1,11 +1,11 @@
 from comfy_api.latest import io
 
-from .minimax_h3_vlm_presets import (
+from ..minimax_h3_vlm_presets import (
     minimax_h3_system_instructions_vlm,
     minimax_h3_vlm_jailbreak_prefix,
     minimax_h3_vlm_jailbreak_suffix,
 )
-from .minimax_h3_vlm_experimental_presets import (
+from ..minimax_h3_vlm_experimental_presets import (
     minimax_h3_system_instructions_vlm_experimental,
 )
 

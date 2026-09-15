@@ -1,28 +1,28 @@
 from typing_extensions import override
 
-from .encoder_nodes import *
-from .embedding_nodes import *
-from .image_nodes import *
-from .preset_nodes import *
-from .vlm_nodes import *
-from .minimax_h3_vlm_nodes import *
-from .parameter_nodes import *
-from .utils_nodes import *
-from .legacy_nodes import *
-from .scheduler_nodes import *
-from .loader_nodes import *
-from .text_nodes import *
-from .textgen_nodes import *
-from .composite_nodes import *
-from .logic_math_nodes import *
-from .patcher_nodes import *
-from .lama_nodes import *
-from .model_nodes import *
+from .nodes.encoder_nodes import *
+from .nodes.embedding_nodes import *
+from .nodes.image_nodes import *
+from .nodes.preset_nodes import *
+from .nodes.vlm_nodes import *
+from .nodes.minimax_h3_vlm_nodes import *
+from .nodes.parameter_nodes import *
+from .nodes.utils_nodes import *
+from .nodes.legacy_nodes import *
+from .nodes.scheduler_nodes import *
+from .nodes.loader_nodes import *
+from .nodes.text_nodes import *
+from .nodes.textgen_nodes import *
+from .nodes.composite_nodes import *
+from .nodes.logic_math_nodes import *
+from .nodes.patcher_nodes import *
+from .nodes.lama_nodes import *
+from .nodes.model_nodes import *
 
 from comfy_api.latest import ComfyExtension, io
 from .node_replacements import register_replacements
 from .node_metadata import enrich_node_list
-from .scheduler_helpers import register_scheduler_handlers
+from .helpers.scheduler_helpers import register_scheduler_handlers
 
 class SamplingUtils(ComfyExtension):
     @override

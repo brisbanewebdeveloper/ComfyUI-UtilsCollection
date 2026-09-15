@@ -14,7 +14,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_from_list_test.utils_nodes import UC_FromList
+    from utils_collection_from_list_test.nodes.utils_nodes import UC_FromList
 finally:
     cli_args.cpu = prior_cpu
 

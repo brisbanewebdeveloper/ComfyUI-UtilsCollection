@@ -17,8 +17,8 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_visual_consensus_test import encoder_helpers
-    from utils_collection_visual_consensus_test.encoder_nodes import (
+    from utils_collection_visual_consensus_test.helpers import encoder_helpers
+    from utils_collection_visual_consensus_test.nodes.encoder_nodes import (
         AdvancedConsensusConfig,
         UC_AdvancedConsensusConfiguration,
         UC_AdvancedVisConEncoder,

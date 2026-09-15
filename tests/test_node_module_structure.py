@@ -43,7 +43,7 @@ LEGACY_MODULE_FUNCTIONS = {
 
 def test_node_modules_add_no_standalone_helpers():
     violations = {}
-    for path in sorted(REPOSITORY_ROOT.glob("*_nodes.py")):
+    for path in sorted((REPOSITORY_ROOT / "nodes").glob("*_nodes.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         actual = {
             node.name

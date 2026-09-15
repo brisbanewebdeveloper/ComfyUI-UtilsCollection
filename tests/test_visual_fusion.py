@@ -18,8 +18,9 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_test import embedding_helpers, encoder_helpers, encoder_nodes
-    from utils_collection_test.encoder_nodes import (
+    from utils_collection_test.helpers import embedding_helpers, encoder_helpers
+    from utils_collection_test.nodes import encoder_nodes
+    from utils_collection_test.nodes.encoder_nodes import (
         UC_AdvancedVisualConditioningEncode,
         UC_Krea2TokenAttentionWeight,
         UC_VisualFusionConfig,

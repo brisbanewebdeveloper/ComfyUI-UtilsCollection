@@ -14,7 +14,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(pathlib.Path(__file__).parents[1])]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_test.minimax_h3_temporal_helpers import (
+from utils_collection_test.helpers.minimax_h3_temporal_helpers import (
     fuse_temporal_block,
     encode_temporal_conditioning,
     minimax_h3_temporal_frame_pairs,
@@ -117,7 +117,7 @@ def encoder_callbacks():
     previous = args.cpu
     args.cpu = True
     try:
-        from utils_collection_test import encoder_helpers
+        from utils_collection_test.helpers import encoder_helpers
     finally:
         args.cpu = previous
     return encoder_helpers

@@ -5,7 +5,7 @@ import os
 import folder_paths
 from comfy_api.latest import io
 
-from .lama_helpers import (
+from ..helpers.lama_helpers import (
     get_lama_device_options,
     get_lama_model_names,
     load_lama_model,

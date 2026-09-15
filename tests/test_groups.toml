@@ -1,22 +1,22 @@
 [groups.minimax_h3_cache]
-paths = ["minimax_h3_cache_helpers.py", "encoder_helpers.py", "encoder_nodes.py", "minimax_h3_temporal_helpers.py", "patcher_helpers.py"]
+paths = ["helpers/minimax_h3_cache_helpers.py", "helpers/minimax_h3_preprocessing_helpers.py", "helpers/encoder_helpers.py", "nodes/encoder_nodes.py", "helpers/minimax_h3_temporal_helpers.py", "helpers/patcher_helpers.py"]
 python_tests = ["tests/test_minimax_h3_cache.py"]
 frontend_tests = []
 
 [groups.minimax_h3_guide]
-paths = ["minimax_h3_guide_helpers.py"]
+paths = ["helpers/minimax_h3_guide_helpers.py"]
 python_tests = ["tests/test_minimax_h3_guide.py"]
 frontend_tests = []
 
 [groups.minimax_h3_temporal]
-paths = ["minimax_h3_temporal_helpers.py"]
+paths = ["helpers/minimax_h3_temporal_helpers.py"]
 python_tests = ["tests/test_minimax_h3_temporal.py"]
 frontend_tests = []
 
 [groups.encoder]
 paths = [
-  "encoder_helpers.py",
-  "encoder_nodes.py",
+  "helpers/encoder_helpers.py",
+  "nodes/encoder_nodes.py",
 ]
 python_tests = [
   "tests/test_advanced_visual_consensus.py",
@@ -27,7 +27,7 @@ frontend_tests = []
 
 [groups.vlm]
 paths = [
-  "vlm_nodes.py",
+  "nodes/vlm_nodes.py",
   "vlm_presets.py",
   "vlm_presets_vars.py",
   "vlm_legacy_presets.py",
@@ -42,7 +42,7 @@ frontend_tests = []
 
 [groups.minimax_h3_vlm]
 paths = [
-  "minimax_h3_vlm_nodes.py",
+  "nodes/minimax_h3_vlm_nodes.py",
   "minimax_h3_vlm_presets.py",
   "minimax_h3_vlm_presets_vars.py",
   "minimax_h3_vlm_experimental_presets.py",
@@ -55,39 +55,39 @@ python_tests = [
 frontend_tests = []
 
 [groups.minimax_h3_refs]
-paths = ["model_helpers.py", "model_nodes.py"]
+paths = ["helpers/model_helpers.py", "nodes/model_nodes.py"]
 python_tests = ["tests/test_minimax_h3_refs.py"]
 frontend_tests = []
 
 [groups.embedding_analysis]
-paths = ["embedding_helpers.py", "embedding_nodes.py"]
+paths = ["helpers/embedding_helpers.py", "nodes/embedding_nodes.py"]
 python_tests = ["tests/test_embedding_analysis.py"]
 frontend_tests = []
 
 [groups.patcher]
-paths = ["patcher_helpers.py", "patcher_nodes.py"]
+paths = ["helpers/patcher_helpers.py", "nodes/patcher_nodes.py"]
 python_tests = ["tests/test_patcher_nodes.py"]
 frontend_tests = []
 
 [groups.textgen]
-paths = ["textgen_nodes.py", "textgen_helpers.py", "text_nodes.py", "text_helpers.py"]
+paths = ["nodes/textgen_nodes.py", "helpers/textgen_helpers.py", "nodes/text_nodes.py", "helpers/text_helpers.py"]
 python_tests = ["tests/test_textgen_formula.py", "tests/test_text_nodes.py"]
 frontend_tests = []
 
 [groups.composite]
 paths = [
-  "background_replace_helpers.py",
-  "composite_helpers.py",
-  "composite_nodes.py",
-  "staged_compositor_helpers.py",
-  "foreground_content_helpers.py",
-  "staged_face_helpers.py",
+  "helpers/background_replace_helpers.py",
+  "helpers/composite_helpers.py",
+  "nodes/composite_nodes.py",
+  "helpers/staged_compositor_helpers.py",
+  "helpers/foreground_content_helpers.py",
+  "helpers/staged_face_helpers.py",
 ]
 python_tests = ["tests/test_composite_nodes.py", "tests/test_composite_guide.py"]
 frontend_tests = []
 
 [groups.tiling]
-paths = ["tile_helpers.py", "image_nodes.py"]
+paths = ["helpers/tile_helpers.py", "nodes/image_nodes.py"]
 python_tests = [
   "tests/test_high_resolution_tiling.py",
   "tests/test_high_resolution_tiling_guide.py",
@@ -96,15 +96,15 @@ frontend_tests = []
 
 [groups.image_utilities]
 paths = [
-  "image_nodes.py",
-  "image_helpers.py",
+  "nodes/image_nodes.py",
+  "helpers/image_helpers.py",
   "models/openpose.py",
   "models/yolox.py",
   "models/rtmpose.py",
   "models/densepose.py",
   "models/migrations.json",
   "color_name_data.py",
-  "color_palette_helpers.py",
+  "helpers/color_palette_helpers.py",
 ]
 python_tests = [
   "tests/test_bounding_box.py",
@@ -117,7 +117,7 @@ python_tests = [
 frontend_tests = []
 
 [groups.shared_helpers]
-paths = ["helper_functions.py"]
+paths = ["helpers/helper_functions.py"]
 python_tests = [
   "tests/test_bounding_box.py",
   "tests/test_composite_nodes.py",
@@ -130,22 +130,22 @@ python_tests = [
 frontend_tests = []
 
 [groups.schedulers]
-paths = ["scheduler_helpers.py", "scheduler_nodes.py"]
+paths = ["helpers/scheduler_helpers.py", "nodes/scheduler_nodes.py"]
 python_tests = ["tests/test_scheduler_migration.py"]
 frontend_tests = []
 
 [groups.logic_math]
-paths = ["logic_math_nodes.py"]
+paths = ["nodes/logic_math_nodes.py"]
 python_tests = ["tests/test_logic_math_nodes.py"]
 frontend_tests = []
 
 [groups.parameters]
-paths = ["parameter_nodes.py", "parameter_helpers.py", "web/resolution_preview.js", "web/resolution_preview_layout.js", "web/h3_video_length.js"]
+paths = ["nodes/parameter_nodes.py", "helpers/parameter_helpers.py", "web/resolution_preview.js", "web/resolution_preview_layout.js", "web/h3_video_length.js"]
 python_tests = ["tests/test_parameter_nodes.py", "tests/test_primitive_nodes.py"]
 frontend_tests = ["tests/test_resolution_preview.mjs"]
 
 [groups.presets]
-paths = ["preset_nodes.py", "presets_collection.py"]
+paths = ["nodes/preset_nodes.py", "presets_collection.py"]
 python_tests = [
   "tests/test_photography_presets.py",
   "tests/test_preset_parentheses.py",
@@ -154,7 +154,7 @@ python_tests = [
 frontend_tests = []
 
 [groups.guides_and_markdown]
-paths = ["utils_nodes.py"]
+paths = ["nodes/utils_nodes.py"]
 python_tests = [
   "tests/test_composite_guide.py",
   "tests/test_encoder_guide.py",
@@ -169,16 +169,18 @@ frontend_tests = []
 [groups.registration]
 paths = [
   "__init__.py",
+  "nodes/__init__.py",
+  "helpers/__init__.py",
   "workflows/*.json",
-  "legacy_nodes.py",
-  "loader_nodes.py",
-  "loader_helpers.py",
+  "nodes/legacy_nodes.py",
+  "nodes/loader_nodes.py",
+  "helpers/loader_helpers.py",
   "model_assets.py",
   "node_metadata.py",
   "node_replacements.py",
-  "lama_nodes.py",
-  "model_nodes.py",
-  "model_helpers.py",
+  "nodes/lama_nodes.py",
+  "nodes/model_nodes.py",
+  "helpers/model_helpers.py",
 ]
 python_tests = [
   "tests/test_node_metadata.py",
@@ -239,17 +241,22 @@ paths = ["web/markdown_preview.js"]
 python_tests = ["tests/test_markdown_preview.py"]
 frontend_tests = []
 
+[groups.video_preview]
+paths = ["web/video_preview.js"]
+python_tests = []
+frontend_tests = []
+
 [groups.test_selector]
 paths = ["tests/run_tests.py", "tests/test_groups.toml"]
 python_tests = ["tests/test_test_runner.py"]
 frontend_tests = []
 
 [groups.lama]
-paths = ["models/__init__.py", "models/lama.py", "lama_helpers.py", "lama_nodes.py"]
+paths = ["models/__init__.py", "models/lama.py", "helpers/lama_helpers.py", "nodes/lama_nodes.py"]
 python_tests = ["tests/test_lama.py", "tests/test_lama_conversion.py"]
 frontend_tests = []
 
 [groups.whisper]
-paths = ["model_nodes.py", "model_helpers.py", "models/whisper.py", "models/whisper_assets/*"]
+paths = ["nodes/model_nodes.py", "helpers/model_helpers.py", "helpers/whisper_timing_helpers.py", "models/whisper.py", "models/whisper_assets/*"]
 python_tests = ["tests/test_whisper.py"]
 frontend_tests = []

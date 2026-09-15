@@ -13,12 +13,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_vlm_preset_test import (
-    vlm_experimental_presets,
-    vlm_legacy_presets,
-    vlm_nodes,
-    vlm_presets,
-)
+from utils_collection_vlm_preset_test import vlm_experimental_presets, vlm_legacy_presets, vlm_presets
+from utils_collection_vlm_preset_test.nodes import vlm_nodes
 
 
 HARDENED_IMAGE_PRESETS = (

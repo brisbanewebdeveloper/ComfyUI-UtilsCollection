@@ -6,12 +6,12 @@ import torch
 
 from comfy_api.latest import io
 from nodes import MAX_RESOLUTION
-from .staged_face_helpers import (
+from ..helpers.staged_face_helpers import (
     _stage_face_foregrounds,
     face_removal_with_alpha,
     load_face_model,
 )
-from .composite_helpers import (
+from ..helpers.composite_helpers import (
     _COMPOSITE_RESIZE_METHODS,
     _DEFAULT_LAYER_PLACEMENT,
     _DEFAULT_LAYER_PLACEMENT_V2,
@@ -40,7 +40,7 @@ from .composite_helpers import (
     background_removal_with_alpha,
     crop_staged_layers_by_indices,
 )
-from .background_replace_helpers import (
+from ..helpers.background_replace_helpers import (
     _expanded_box,
     _largest_face,
     _ordered_ring,
@@ -49,7 +49,7 @@ from .background_replace_helpers import (
     _transform_source,
     _warp_target,
 )
-from .staged_compositor_helpers import (
+from ..helpers.staged_compositor_helpers import (
     RetainedStageCache,
     _apply_staged_layer_options,
     _composite_staged_individual_foregrounds,

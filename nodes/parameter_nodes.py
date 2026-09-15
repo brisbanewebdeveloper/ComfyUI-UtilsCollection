@@ -6,8 +6,8 @@ from comfy_api.latest import ComfyExtension, io
 import comfy.model_management as mm
 import nodes
 
-from .helper_functions import round_to_nearest, AspectRatio, ASPECT_RATIOS, resize_nchw
-from .parameter_helpers import h3_video_length_from_seconds, select_video_resolution
+from ..helpers.helper_functions import round_to_nearest, AspectRatio, ASPECT_RATIOS, resize_nchw
+from ..helpers.parameter_helpers import h3_video_length_from_seconds, select_video_resolution
 
 
 class UC_AdjustedResolutionParameters(io.ComfyNode):

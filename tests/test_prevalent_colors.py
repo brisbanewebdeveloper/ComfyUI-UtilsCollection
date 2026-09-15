@@ -11,13 +11,13 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_prevalent_colors_test.color_palette_helpers import (
+from utils_collection_prevalent_colors_test.helpers.color_palette_helpers import (
     _describe_palette,
     _nearest_color_names,
     _render_palette_grid,
     extract_prevalent_hex_colors,
 )
-from utils_collection_prevalent_colors_test.image_nodes import (
+from utils_collection_prevalent_colors_test.nodes.image_nodes import (
     UC_ExtractPrevalentColors,
 )
 

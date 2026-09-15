@@ -21,8 +21,9 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_encoder_test import encoder_helpers, encoder_nodes
-    from utils_collection_encoder_test.encoder_nodes import (
+    from utils_collection_encoder_test.helpers import encoder_helpers
+    from utils_collection_encoder_test.nodes import encoder_nodes
+    from utils_collection_encoder_test.nodes.encoder_nodes import (
         TextEncodeKrea2SystemEditScaledAdv,
         TextEncodeKrea2SysEditScaledAdvAttn,
         UC_AdvancedMiniMaxH3ImageToVideo,
@@ -42,7 +43,7 @@ finally:
 
 @pytest.mark.parametrize("side,expected_grid", [(128, 16), (4096, 256), (4352, 256)])
 def test_h3_native_image_preprocessing_limits(side, expected_grid):
-    from utils_collection_encoder_test.minimax_h3_preprocessing_helpers import preprocess_h3_embed
+    from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import preprocess_h3_embed
 
     seen = []
     def visual(image, grid):
@@ -59,7 +60,7 @@ def test_h3_native_image_preprocessing_limits(side, expected_grid):
 
 
 def test_h3_rgba_preprocessing_preserves_rgb():
-    from utils_collection_encoder_test.minimax_h3_preprocessing_helpers import preprocess_h3_embed
+    from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import preprocess_h3_embed
 
     rgb = torch.rand(1, 256, 256, 3)
     rgba = torch.cat((rgb, torch.zeros(1, 256, 256, 1)), dim=-1)
@@ -78,7 +79,7 @@ def test_h3_rgba_preprocessing_preserves_rgb():
 
 
 def test_h3_preprocessing_patch_is_clone_owned():
-    from utils_collection_encoder_test.minimax_h3_preprocessing_helpers import (
+    from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import (
         MiniMaxQwen3VL, prepare_h3_preprocessing_clip,
     )
 
@@ -97,7 +98,7 @@ def test_h3_preprocessing_patch_is_clone_owned():
 
 
 def test_h3_native_image_token_spans_match_preprocessing():
-    from utils_collection_encoder_test.minimax_h3_preprocessing_helpers import tokenize_h3_images
+    from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import tokenize_h3_images
 
     image = torch.empty(1, 4096, 4096, 3, device="meta")
     class Clip:
@@ -1254,7 +1255,7 @@ def test_clip_continuation_encoder_rejects_missing_vae_short_target_and_first_fr
         encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
             vae=object(), length=5, **kwargs
         )
-    with pytest.raises(ValueError, match="disconnect first_frame"):
+    with pytest.raises(ValueError, match="Disconnect first_frame"):
         encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
             vae=object(), length=22, first_frame=torch.ones(1, 64, 64, 3), **kwargs
         )

@@ -16,9 +16,9 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_parameter_test import parameter_nodes
-    from utils_collection_parameter_test.helper_functions import AspectRatio
-    from utils_collection_parameter_test.parameter_helpers import select_video_resolution
+    from utils_collection_parameter_test.nodes import parameter_nodes
+    from utils_collection_parameter_test.helpers.helper_functions import AspectRatio
+    from utils_collection_parameter_test.helpers.parameter_helpers import select_video_resolution
 finally:
     cli_args.cpu = prior_cpu
 

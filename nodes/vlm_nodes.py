@@ -1,12 +1,12 @@
 from comfy_api.latest import io
-from .vlm_presets import (
+from ..vlm_presets import (
     additional_instructions_vlm,
     system_instructions_vlm,
     system_query_additional_vlm,
     system_query_raw_vlm,
 )
-from .vlm_legacy_presets import legacy_system_instructions_vlm
-from .vlm_experimental_presets import system_instructions_vlm_experimental
+from ..vlm_legacy_presets import legacy_system_instructions_vlm
+from ..vlm_experimental_presets import system_instructions_vlm_experimental
 
 
 class UC_VLMSysInstrPresets(io.ComfyNode):

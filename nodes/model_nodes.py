@@ -1,5 +1,5 @@
 from comfy_api.latest import io
-from .model_helpers import (
+from ..helpers.model_helpers import (
     WHISPER_MODELS, WHISPER_LANGUAGES, load_whisper_model, register_whisper_paths, run_whisper,
     apply_minimax_h3_refs_to_conditioning,
     create_minimax_h3_audio_ref,

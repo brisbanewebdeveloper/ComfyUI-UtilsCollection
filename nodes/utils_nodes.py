@@ -8,9 +8,9 @@ import torch
 from comfy_execution.graph import ExecutionBlocker
 from comfy_api.latest import InputImpl, Types, io
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
-from .helper_functions import to_video_prompt
-from .image_helpers import prepare_h3_reference_components, cached_h3_reference_components, VIDEO_FRAME_TIMESTAMP_FORMATS
-from .model_helpers import (
+from ..helpers.helper_functions import to_video_prompt
+from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, VIDEO_FRAME_TIMESTAMP_FORMATS
+from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
     load_minimax_h3_clip_continuation_media,
     save_minimax_h3_clip_continuation_media,

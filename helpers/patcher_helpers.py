@@ -59,7 +59,7 @@ MINIMAX_H3_VISION_START = 151652
 MINIMAX_H3_VISION_END = 151653
 IDEOGRAM4_DEBANNER_WRAPPER_KEY = "utilscollection_ideogram4_debanner"
 IDEOGRAM4_DEBANNER_STATE_KEY = "utilscollection_ideogram4_debanner_state"
-IDEOGRAM4_DEBANNER_BUNDLE = Path(__file__).resolve().parent / "models" / "ideogram4_correction_v1.safetensors"
+IDEOGRAM4_DEBANNER_BUNDLE = Path(__file__).resolve().parent.parent / "models" / "ideogram4_correction_v1.safetensors"
 
 
 def _register_minimax_h3_projection_folder() -> None:

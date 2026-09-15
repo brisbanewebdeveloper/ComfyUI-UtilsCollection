@@ -16,8 +16,9 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_patcher_test import patcher_helpers, patcher_nodes
-from utils_collection_patcher_test.minimax_h3_cache_helpers import H3EncoderCache, clip_description
+from utils_collection_patcher_test.helpers import patcher_helpers
+from utils_collection_patcher_test.nodes import patcher_nodes
+from utils_collection_patcher_test.helpers.minimax_h3_cache_helpers import H3EncoderCache, clip_description
 
 
 def test_unified_attention_schema_keeps_mode_settings_separate():

@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from .color_name_data import XKCD_COLOR_NAMES
+from ..color_name_data import XKCD_COLOR_NAMES
 
 
 _HISTOGRAM_LEVELS = 32

@@ -14,7 +14,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_primitive_test.utils_nodes import (
+    from utils_collection_primitive_test.nodes.utils_nodes import (
         UC_FromSeedCluster,
         UC_SeedCluster,
         UC_StaticFloat,

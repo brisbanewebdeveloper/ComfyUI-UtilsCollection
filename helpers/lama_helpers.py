@@ -14,7 +14,7 @@ import comfy.utils
 from unifiedefficientloader import MemoryEfficientSafeOpen
 
 from .helper_functions import gaussian_blur_nchw
-from .models.lama import FFCResNetGenerator
+from ..models.lama import FFCResNetGenerator
 
 
 LAMA_ARCHITECTURE = "FFCResNetGenerator"
