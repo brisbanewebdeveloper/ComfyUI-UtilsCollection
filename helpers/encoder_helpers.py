@@ -3691,10 +3691,6 @@ def execute_advanced_minimax_h3_image_to_video(
             default_media_index = 0
         elif flat_references:
             default_media_index = int(last_frame is not None)
-        elif video_frames is None and continuation_frames is None:
-            raise ValueError(
-                "MiniMax H3 default media config requires a first frame, reference image 1, or video."
-            )
     config = dict(visual_fusion_config or {})
     visual_method = config.get("visual_fusion_method", "off")
     video_export_tokens = None

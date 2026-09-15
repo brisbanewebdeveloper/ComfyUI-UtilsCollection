@@ -1283,6 +1283,22 @@ def test_clip_continuation_encoder_disconnected_matches_standard_encoder():
     assert standard_clip.tokenize_calls == continuation_clip.tokenize_calls
 
 
+def test_clip_continuation_encoder_allows_empty_first_generation_with_media_config():
+    clip = _MiniMaxH3TestClip()
+    result = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+        clip=clip,
+        vae=None,
+        prompt="prompt",
+        width=64,
+        height=64,
+        length=22,
+        media_config=encoder_helpers.build_minimax_h3_media_config(None),
+        continuation_media=None,
+        enable_caching="disabled",
+    )
+    assert result.args[0]
+
+
 def test_clip_continuation_qwen_video_keeps_interior_tail_before_ordinary_video():
     continuation = torch.zeros(22, 64, 96, 3)
     video = torch.cat((continuation, torch.ones(17, 64, 96, 3)))
