@@ -104,7 +104,7 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Connect Clip Continuation Save path here. Or enter its output-relative prefix for legacy prefix/index loading."),
                 io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Ignored when Save path is connected. For legacy prefix loading, prior clip slot; zero returns no continuation media for the first clip."),
             ],
-            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media"), io.Audio.Output("continuation_audio")],
+            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
 
     @classmethod
@@ -125,11 +125,11 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
     def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
         if filename_prefix.lower().endswith(".safetensors"):
             media = load_minimax_h3_clip_continuation_media_path(filename_prefix)
-            return io.NodeOutput(media, media.get("audio"))
+            return io.NodeOutput(media)
         if int(clip_index) <= 0:
-            return io.NodeOutput(None, None)
+            return io.NodeOutput(None)
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
-        return io.NodeOutput(media, media.get("audio"))
+        return io.NodeOutput(media)
 
 
 class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):

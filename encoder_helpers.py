@@ -3456,7 +3456,6 @@ def execute_advanced_minimax_h3_image_to_video(
     media_config=None,
     video=None,
     continuation_media=None,
-    continuation_audio=None,
     audio=None,
     audio_vae=None,
     token_fusion=False,
@@ -3480,7 +3479,6 @@ def execute_advanced_minimax_h3_image_to_video(
                 multiplier=multiplier, ref_image_size=ref_image_size,
                 vlm_resolution=vlm_resolution, vlm_video_resolution=vlm_video_resolution,
                 media_config=media_config, video=video, continuation_media=continuation_media,
-                continuation_audio=continuation_audio,
                 audio=audio, audio_vae=audio_vae,
                 token_fusion=token_fusion, temporal_fusion=temporal_fusion,
                 temporal_token_fusion=temporal_token_fusion, text_blend_config=text_blend_config,
@@ -3591,7 +3589,9 @@ def execute_advanced_minimax_h3_image_to_video(
     )
     audio_reference = _encode_minimax_h3_audio_reference(audio, audio_vae, cache=cache)
     continuation_audio_reference = _encode_minimax_h3_audio_reference(
-        continuation_audio, audio_vae, cache=cache
+        continuation_media.get("audio") if continuation_media is not None else None,
+        audio_vae,
+        cache=cache,
     )
     prepared_first = (
         prepare_minimax_h3_frame(first_frame, width, height, "disabled")
