@@ -140,6 +140,7 @@ class SamplingUtils(ComfyExtension):
             UC_FromSeedCluster,
             UC_GetJsonValue,
             UC_ImageMatchPropertiesNode,
+            UC_ImageColorRestore,
             UC_OpticalFlowComposite,
             UC_ImageInwardEdgeFill,
             UC_ImageIterativeStretchFill,

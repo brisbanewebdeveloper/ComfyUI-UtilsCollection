@@ -1532,6 +1532,81 @@ def match_image_properties(
     return torch.stack(outputs).to(device=target.device, dtype=target.dtype)
 
 
+def _restore_match_histogram(source: np.ndarray, template: np.ndarray) -> np.ndarray:
+    oldshape = source.shape
+    source_flat = source.ravel()
+    template_flat = template.ravel()
+    source_values, source_bins, source_counts = np.unique(
+        source_flat, return_inverse=True, return_counts=True
+    )
+    template_values, template_counts = np.unique(template_flat, return_counts=True)
+    source_quantiles = np.cumsum(source_counts).astype(np.float64)
+    source_quantiles /= source_quantiles[-1]
+    template_quantiles = np.cumsum(template_counts).astype(np.float64)
+    template_quantiles /= template_quantiles[-1]
+    mapped_values = np.interp(
+        source_quantiles, template_quantiles, template_values
+    )
+    return mapped_values[source_bins].reshape(oldshape)
+
+
+def restore_image_color_properties(
+    original_tensor: torch.Tensor,
+    generated_tensor: torch.Tensor,
+    overall_weight: float,
+    color_weight: float,
+    lighting_weight: float,
+    texture_preservation: float,
+    mask_tensor: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Restore historical global LAB color and lighting transfer behavior."""
+    if overall_weight == 0.0 or (color_weight == 0.0 and lighting_weight == 0.0):
+        return generated_tensor.clone()
+
+    outputs = []
+    original_batch = original_tensor.shape[0]
+    mask_batch = mask_tensor.shape[0] if mask_tensor is not None else 0
+    for index in range(generated_tensor.shape[0]):
+        original_index = index if index < original_batch else 0
+        original = np.clip(
+            original_tensor[original_index].detach().cpu().numpy().squeeze(), 0.0, 1.0
+        ).astype(np.float32)
+        generated = np.clip(
+            generated_tensor[index].detach().cpu().numpy().squeeze(), 0.0, 1.0
+        ).astype(np.float32)
+        mask = None
+        if mask_tensor is not None:
+            mask_index = index if index < mask_batch else 0
+            mask = mask_tensor[mask_index].detach().cpu().numpy().squeeze()
+            if mask.shape != generated.shape[:2]:
+                mask = cv2.resize(mask, (generated.shape[1], generated.shape[0]), interpolation=cv2.INTER_LINEAR)
+            mask = mask[..., None]
+        original_lab = cv2.cvtColor(original, cv2.COLOR_RGB2LAB)
+        generated_lab = cv2.cvtColor(generated, cv2.COLOR_RGB2LAB)
+        output_lab = generated_lab.astype(np.float32).copy()
+        generated_lab_float = generated_lab.astype(np.float32)
+        if texture_preservation > 0.0:
+            generated_base = cv2.bilateralFilter(generated_lab_float[..., 0], 9, 75, 75)
+            generated_detail = generated_lab_float[..., 0] - generated_base
+            original_base = cv2.bilateralFilter(original_lab[..., 0].astype(np.float32), 9, 75, 75)
+            light_transfer = _restore_match_histogram(generated_base, original_base)
+            light_transfer += generated_detail * texture_preservation
+        else:
+            light_transfer = _restore_match_histogram(generated_lab[..., 0], original_lab[..., 0])
+        light = lighting_weight * overall_weight
+        output_lab[..., 0] = generated_lab_float[..., 0] * (1.0 - light) + light_transfer * light
+        color = color_weight * overall_weight
+        output_lab[..., 1] = generated_lab_float[..., 1] * (1.0 - color) + _restore_match_histogram(generated_lab[..., 1], original_lab[..., 1]) * color
+        output_lab[..., 2] = generated_lab_float[..., 2] * (1.0 - color) + _restore_match_histogram(generated_lab[..., 2], original_lab[..., 2]) * color
+        if mask is not None:
+            output_lab = generated_lab_float * (1.0 - mask) + output_lab * mask
+        output_lab[..., 0] = np.clip(output_lab[..., 0], 0.0, 100.0)
+        output_lab[..., 1:] = np.clip(output_lab[..., 1:], -127.0, 127.0)
+        result = np.clip(cv2.cvtColor(output_lab, cv2.COLOR_LAB2RGB), 0.0, 1.0)
+        outputs.append(torch.from_numpy(result.astype(np.float32)).unsqueeze(0))
+    return torch.cat(outputs, dim=0).to(generated_tensor)
+
+
 def mask_to_bounding_box(
     mask: torch.Tensor,
     invert: bool = False,

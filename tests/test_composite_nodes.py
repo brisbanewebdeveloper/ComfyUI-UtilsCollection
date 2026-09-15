@@ -1855,6 +1855,23 @@ def test_property_match_zero_weight_is_bit_exact():
     assert torch.equal(result, generated)
 
 
+def test_image_color_restore_uses_legacy_schema_and_transfer():
+    schema = image_nodes.UC_ImageColorRestore.define_schema()
+    assert schema.node_id == "UC_ImageColorRestore"
+    assert schema.display_name == "Image Color Restore"
+    assert [value.id for value in schema.inputs] == [
+        "original_image", "generated_image", "overall_weight", "color_weight",
+        "lighting_weight", "texture_preservation", "mask",
+    ]
+    source = torch.full((1, 6, 8, 3), 0.8)
+    generated = torch.full((1, 10, 5, 3), 0.2)
+    restored = image_nodes.UC_ImageColorRestore.execute(
+        source, generated, 1.0, 1.0, 1.0, 0.5,
+    ).result[0]
+    assert restored.shape == generated.shape
+    assert restored.mean() > generated.mean()
+
+
 def test_property_match_uses_global_statistics_without_spatial_correspondence():
     source = torch.rand(1, 9, 7, 3)
     target = torch.rand(1, 6, 8, 3)

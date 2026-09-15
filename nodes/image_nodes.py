@@ -36,6 +36,7 @@ from ..helpers.image_helpers import (
     images_to_video_timeline,
     mask_to_bounding_box,
     match_image_properties,
+    restore_image_color_properties,
     sample_video_frames_as_images,
     video_timeline_text,
 )
@@ -1118,6 +1119,50 @@ class UC_ImageMatchPropertiesNode(io.ComfyNode):
             contrast_weight,
         )
         return io.NodeOutput(result)
+
+
+class UC_ImageColorRestore(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_ImageColorRestore",
+            display_name="Image Color Restore",
+            category="advanced/image",
+            description="Restores the original image's global color and lighting on a generated image while preserving its detail.",
+            inputs=[
+                io.Image.Input("original_image", tooltip="Reference image whose overall color and lighting will be restored."),
+                io.Image.Input("generated_image", tooltip="Generated image that receives the color and lighting restoration."),
+                io.Float.Input("overall_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Strength of the complete restoration. 0 leaves the generated image unchanged."),
+                io.Float.Input("color_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Strength of the original image's color restoration."),
+                io.Float.Input("lighting_weight", default=1.0, min=0.0, max=1.0, step=0.001, tooltip="Strength of the original image's brightness restoration."),
+                io.Float.Input("texture_preservation", default=0.5, min=0.0, max=1.0, step=0.001, tooltip="Keeps detail and texture from the generated image while restoring its lighting."),
+                io.Mask.Input("mask", optional=True, tooltip="Optional mask controlling where restoration is applied. White areas are restored and black areas remain unchanged."),
+            ],
+            outputs=[io.Image.Output(display_name="image")],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        original_image: torch.Tensor,
+        generated_image: torch.Tensor,
+        overall_weight: float,
+        color_weight: float,
+        lighting_weight: float,
+        texture_preservation: float,
+        mask: torch.Tensor = None,
+    ) -> io.NodeOutput:
+        return io.NodeOutput(
+            restore_image_color_properties(
+                original_image,
+                generated_image,
+                overall_weight,
+                color_weight,
+                lighting_weight,
+                texture_preservation,
+                mask,
+            )
+        )
 
 
 class UC_OpticalFlowComposite(io.ComfyNode):
