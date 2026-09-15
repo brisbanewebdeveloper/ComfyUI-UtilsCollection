@@ -166,7 +166,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
                 io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip."),
                 io.Int.Input("target_batches", default=2, min=1, max=99999, step=1, tooltip="How many clips to collect before making one combined clip."),
                 io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="Advanced: matching prioritizes frames with motion at the clip boundary. Keep the default unless the automatic join removes too much or too little.", advanced=True),
-                io.Int.Input("maximum_overlap_frames", default=56, min=1, max=99999, step=1, tooltip="Maximum number of previous-tail and current-head frames to compare for repeated overlap."),
+                io.Int.Input("maximum_overlap_frames", display_name="Maximum duplicate frames to check", default=56, min=1, max=99999, step=1, tooltip="Limits how many frames at the join between clips are checked for repeated content."),
                 io.Boolean.Input(
                     "first_batch_reset",
                     default=False,
@@ -177,17 +177,18 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
                 io.Boolean.Input(
                     "auto_accumulate",
                     default=True,
-                    label_on="Auto entry",
-                    label_off="Manual entry",
-                    tooltip="Automatically use the next entry number. Disable to set current_entry yourself and retry an existing entry.",
+                    label_on="Add next clip automatically",
+                    label_off="Choose clip number",
+                    tooltip="On: add each clip as the next one in the batch. Off: choose the clip number below so you can retry it.",
                 ),
                 io.Int.Input(
                     "current_entry",
+                    display_name="Clip number",
                     default=1,
                     min=1,
                     max=99999,
                     step=1,
-                    tooltip="Manual mode only. One-based entry number matching target_batches. Reusing an existing number replaces that clip instead of appending another one.",
+                    tooltip="Manual mode only. Number of the clip being added. Use the same number again to replace that clip when retrying it.",
                 ),
             ],
             outputs=[io.Image.Output("images"), io.Audio.Output("audio")],
@@ -199,7 +200,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         return float("nan")
 
     @classmethod
-    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, first_batch_reset=False, auto_accumulate=True, current_entry=0, unique_id=None):
+    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, first_batch_reset=False, auto_accumulate=True, current_entry=1, unique_id=None):
         state_key = str(unique_id)
         state = _MINIMAX_H3_CLIP_ACCUMULATION.get(state_key)
         if first_batch_reset or state is None:

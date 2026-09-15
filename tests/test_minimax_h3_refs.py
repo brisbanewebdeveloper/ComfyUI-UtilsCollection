@@ -186,10 +186,14 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     assert inputs["overlap_threshold"].max == 100.0
     assert inputs["overlap_threshold"].step == 0.1
     assert inputs["maximum_overlap_frames"].default == 56
+    assert inputs["maximum_overlap_frames"].display_name == "Maximum duplicate frames to check"
     assert inputs["first_batch_reset"].default is False
     assert inputs["auto_accumulate"].default is True
+    assert inputs["auto_accumulate"].label_on == "Add next clip automatically"
+    assert inputs["auto_accumulate"].label_off == "Choose clip number"
     assert inputs["current_entry"].default == 1
     assert inputs["current_entry"].min == 1
+    assert inputs["current_entry"].display_name == "Clip number"
     first_images = torch.zeros(2, 8, 8, 3)
     second_images = torch.ones(3, 8, 8, 3)
     first_audio = {"waveform": torch.zeros(1, 1, 20), "sample_rate": 240}
