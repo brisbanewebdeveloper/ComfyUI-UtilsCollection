@@ -444,6 +444,26 @@ def accumulate_minimax_h3_clip_continuations(
     return torch.cat(tuple(image_batches), dim=0), {"waveform": torch.cat(waveforms, dim=-1), "sample_rate": sample_rate}
 
 
+def trim_minimax_h3_clip_continuation_batch(
+    image_batches: Sequence[torch.Tensor], audio_batches: Sequence[dict | None],
+    threshold: float, maximum_frames: int,
+) -> tuple[list[torch.Tensor], list[dict | None]]:
+    """Trim detected continuation overlap once, after a complete batch is collected."""
+    if not image_batches or len(image_batches) != len(audio_batches):
+        raise ValueError("MiniMax H3 Clip Continuation batch trimming needs matching image and audio batches.")
+    trimmed_images = [image_batches[0]]
+    trimmed_audio = [audio_batches[0]]
+    for images, audio in zip(image_batches[1:], audio_batches[1:]):
+        overlap = find_minimax_h3_clip_continuation_overlap(
+            torch.cat(trimmed_images, dim=0), images, threshold, maximum_frames
+        )
+        if overlap:
+            images, audio = trim_minimax_h3_clip_continuation(images, audio, overlap)
+        trimmed_images.append(images)
+        trimmed_audio.append(audio)
+    return trimmed_images, trimmed_audio
+
+
 def find_minimax_h3_clip_continuation_overlap(
     previous: torch.Tensor, current: torch.Tensor, threshold: int, maximum_frames: int = 56,
 ) -> int:

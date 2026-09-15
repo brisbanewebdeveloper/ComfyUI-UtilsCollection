@@ -187,6 +187,8 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     assert inputs["overlap_threshold"].step == 0.1
     assert inputs["maximum_overlap_frames"].default == 56
     assert inputs["first_batch_reset"].default is False
+    assert inputs["auto_accumulate"].default is True
+    assert inputs["current_entry"].default == 0
     first_images = torch.zeros(2, 8, 8, 3)
     second_images = torch.ones(3, 8, 8, 3)
     first_audio = {"waveform": torch.zeros(1, 1, 20), "sample_rate": 240}
@@ -207,6 +209,45 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     output = node.execute(second_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-main")
     torch.testing.assert_close(output.args[0], torch.cat((first_images, second_images)))
     assert output.args[1] is None
+
+
+def test_clip_continuation_accumulate_manual_entry_replaces_retry():
+    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate
+    first = torch.zeros(2, 8, 8, 3)
+    initial = torch.ones(2, 8, 8, 3)
+    retry = torch.full((2, 8, 8, 3), 0.5)
+    final = torch.full((2, 8, 8, 3), 0.75)
+    entry_id = "accumulate-manual"
+
+    assert isinstance(node.execute(first, target_batches=3, overlap_threshold=100, first_batch_reset=True, auto_accumulate=False, current_entry=0, unique_id=entry_id).args[0], ExecutionBlocker)
+    assert isinstance(node.execute(initial, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=1, unique_id=entry_id).args[0], ExecutionBlocker)
+    assert isinstance(node.execute(retry, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=1, unique_id=entry_id).args[0], ExecutionBlocker)
+    output = node.execute(final, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=2, unique_id=entry_id)
+
+    torch.testing.assert_close(output.args[0], torch.cat((first, retry, final)))
+
+    reset = node.execute(final, target_batches=2, overlap_threshold=100, first_batch_reset=True, auto_accumulate=False, current_entry=99, unique_id=entry_id)
+    assert isinstance(reset.args[0], ExecutionBlocker)
+
+
+def test_clip_continuation_accumulate_defers_overlap_until_target(monkeypatch):
+    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate
+    calls = []
+    original = utils_nodes.trim_minimax_h3_clip_continuation_batch
+
+    def track(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(utils_nodes, "trim_minimax_h3_clip_continuation_batch", track)
+    entry_id = "accumulate-deferred"
+    for index in range(2):
+        output = node.execute(torch.full((2, 8, 8, 3), index / 2), target_batches=3, first_batch_reset=index == 0, unique_id=entry_id)
+        assert isinstance(output.args[0], ExecutionBlocker)
+    assert calls == []
+
+    node.execute(torch.full((2, 8, 8, 3), 1.0), target_batches=3, first_batch_reset=False, unique_id=entry_id)
+    assert calls == [1]
 
 
 def test_clip_continuation_accumulate_rejects_mixed_audio_and_geometry():
