@@ -18,7 +18,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_minimax_h3_refs_test import model_helpers, model_nodes
+from utils_collection_minimax_h3_refs_test import model_helpers, model_nodes, utils_nodes
 
 
 def _image_ref(value=1.0):
@@ -142,6 +142,35 @@ def test_clip_continuation_rejects_short_tail_and_output_escape(monkeypatch, tmp
         model_helpers.save_minimax_h3_clip_continuation_media(
             torch.ones(22, 8, 8, 3), 22, "../escape", 1
         )
+
+
+def test_clip_continuation_trim_removes_aligned_frame_and_audio_heads():
+    frames = torch.arange(56, dtype=torch.float32).view(56, 1, 1, 1).expand(56, 8, 8, 3).clone()
+    audio = {"waveform": torch.arange(560, dtype=torch.float32).view(1, 1, 560), "sample_rate": 240}
+
+    untrimmed = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(
+        frames, audio, 0
+    )
+    torch.testing.assert_close(untrimmed.args[0], frames)
+    torch.testing.assert_close(untrimmed.args[1]["waveform"], audio["waveform"])
+
+    trimmed = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(
+        frames, audio, 22
+    )
+    torch.testing.assert_close(trimmed.args[0], frames[22:])
+    torch.testing.assert_close(trimmed.args[1]["waveform"], audio["waveform"][..., 220:])
+
+    without_audio = utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 22)
+    torch.testing.assert_close(without_audio.args[0], frames[22:])
+    assert without_audio.args[1] is None
+
+    with pytest.raises(ValueError, match="leave at least one frame"):
+        utils_nodes.UC_MiniMaxH3ClipContinuationTrim.execute(frames, None, 56)
+
+
+def test_clip_continuation_save_still_has_only_path_output():
+    schema = utils_nodes.UC_MiniMaxH3ClipContinuationSave.define_schema()
+    assert [output.id for output in schema.outputs] == ["path"]
 
 
 def test_refined_compression_can_create_gradients_inside_inference_mode():

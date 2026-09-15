@@ -14,6 +14,7 @@ from .model_helpers import (
     load_minimax_h3_clip_continuation_media,
     save_minimax_h3_clip_continuation_media,
     transcribe_reference_audio,
+    trim_minimax_h3_clip_continuation,
 )
 
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
@@ -118,6 +119,33 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             return io.NodeOutput(None)
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
         return io.NodeOutput(media)
+
+
+class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationTrim",
+            display_name="MiniMax H3 Clip Continuation Trim",
+            category="advanced/conditioning",
+            description="Removes leading overlapping continuation frames and matching audio for clip assembly.",
+            inputs=[
+                io.Image.Input("images", tooltip="Generated 24 fps clip frames to trim."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional matching clip audio. Its leading duration is trimmed with the frames."),
+                io.Int.Input("trim_leading_frames", default=0, min=0, max=99999, step=1, tooltip="Leading 24 fps frames to remove. Leave 0 for the first clip."),
+            ],
+            outputs=[
+                io.Image.Output("images"),
+                io.Audio.Output("audio"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, images, audio=None, trim_leading_frames=0):
+        trimmed_images, trimmed_audio = trim_minimax_h3_clip_continuation(
+            images, audio, int(trim_leading_frames)
+        )
+        return io.NodeOutput(trimmed_images, trimmed_audio)
 
 
 class UC_SeedCluster(io.ComfyNode):
