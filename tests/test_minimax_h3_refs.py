@@ -188,7 +188,8 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     assert inputs["maximum_overlap_frames"].default == 56
     assert inputs["first_batch_reset"].default is False
     assert inputs["auto_accumulate"].default is True
-    assert inputs["current_entry"].default == 0
+    assert inputs["current_entry"].default == 1
+    assert inputs["current_entry"].min == 1
     first_images = torch.zeros(2, 8, 8, 3)
     second_images = torch.ones(3, 8, 8, 3)
     first_audio = {"waveform": torch.zeros(1, 1, 20), "sample_rate": 240}
@@ -219,10 +220,10 @@ def test_clip_continuation_accumulate_manual_entry_replaces_retry():
     final = torch.full((2, 8, 8, 3), 0.75)
     entry_id = "accumulate-manual"
 
-    assert isinstance(node.execute(first, target_batches=3, overlap_threshold=100, first_batch_reset=True, auto_accumulate=False, current_entry=0, unique_id=entry_id).args[0], ExecutionBlocker)
-    assert isinstance(node.execute(initial, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=1, unique_id=entry_id).args[0], ExecutionBlocker)
-    assert isinstance(node.execute(retry, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=1, unique_id=entry_id).args[0], ExecutionBlocker)
-    output = node.execute(final, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=2, unique_id=entry_id)
+    assert isinstance(node.execute(first, target_batches=3, overlap_threshold=100, first_batch_reset=True, auto_accumulate=False, current_entry=1, unique_id=entry_id).args[0], ExecutionBlocker)
+    assert isinstance(node.execute(initial, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=2, unique_id=entry_id).args[0], ExecutionBlocker)
+    assert isinstance(node.execute(retry, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=2, unique_id=entry_id).args[0], ExecutionBlocker)
+    output = node.execute(final, target_batches=3, overlap_threshold=100, first_batch_reset=False, auto_accumulate=False, current_entry=3, unique_id=entry_id)
 
     torch.testing.assert_close(output.args[0], torch.cat((first, retry, final)))
 

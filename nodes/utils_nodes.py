@@ -183,11 +183,11 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "current_entry",
-                    default=0,
-                    min=0,
+                    default=1,
+                    min=1,
                     max=99999,
                     step=1,
-                    tooltip="Manual mode only. Zero-based entry number. Reusing an existing number replaces that clip instead of appending another one.",
+                    tooltip="Manual mode only. One-based entry number matching target_batches. Reusing an existing number replaces that clip instead of appending another one.",
                 ),
             ],
             outputs=[io.Image.Output("images"), io.Audio.Output("audio")],
@@ -205,7 +205,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         if first_batch_reset or state is None:
             state = {"image_batches": [], "audio_batches": []}
             _MINIMAX_H3_CLIP_ACCUMULATION[state_key] = state
-        entry_index = 0 if first_batch_reset else (len(state["image_batches"]) if auto_accumulate else int(current_entry))
+        entry_index = 0 if first_batch_reset else (len(state["image_batches"]) if auto_accumulate else int(current_entry) - 1)
         if entry_index < 0 or entry_index > len(state["image_batches"]):
             raise ValueError("MiniMax H3 Clip Continuation manual entries must be sequential or replace an existing entry.")
         images = images.detach().cpu().clone()
