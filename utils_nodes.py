@@ -71,6 +71,7 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             description="Stores final decoded H3 RGB frames for a later Clip Continuation Encoder queue.",
             inputs=[
                 io.Image.Input("images", tooltip="Decoded H3 frames from the completed prior clip."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional decoded audio from same prior clip. Its matching tail is saved inside continuation media."),
                 io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="Final 24 fps frames retained as visual context. 22 frames is about one second."),
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative shared slot prefix. Use exactly same value on Load."),
                 io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Slot this generated clip writes. Re-running same slot replaces its saved tail."),
@@ -80,9 +81,9 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
+    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, clip_index
+            images, int(tail_frames), filename_prefix, clip_index, audio=audio
         )
         return io.NodeOutput(path)
 
