@@ -1130,19 +1130,20 @@ def minimax_h3_block_patch_forward(
         payload.get("audio_cond_noise_aug", minimax_model.AUDIO_COND_TIMESTEP)
     )
     has_vis_cond = any(kind in ("cond", "ref_img") for _, _, kind in layout.segments)
-    has_aud_cond = any(kind == "ref_audio" for _, _, kind in layout.segments)
+    has_aud_cond = any(kind in ("cond_audio", "ref_audio") for _, _, kind in layout.segments)
     seg_t = {
         "text": t_v,
         "video": t_v,
         "audio": t_a,
         "cond": max(t_v, vis_aug),
         "ref_img": max(t_v, vis_aug),
+        "cond_audio": max(t_a, aud_aug),
         "ref_audio": max(t_a, aud_aug),
     }
     unique_t = sorted(
         {t_v, t_a}
         | ({seg_t["cond"]} if has_vis_cond else set())
-        | ({seg_t["ref_audio"]} if has_aud_cond else set())
+        | ({seg_t["cond_audio"]} if has_aud_cond else set())
     )
     t_row = {value: index for index, value in enumerate(unique_t)}
     seg_tag = {
@@ -1151,6 +1152,7 @@ def minimax_h3_block_patch_forward(
         "audio": 2,
         "cond": 0,
         "ref_img": 0,
+        "cond_audio": 2,
         "ref_audio": 2,
     }
 
