@@ -3798,8 +3798,12 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         )
 
     @classmethod
-    def check_lazy_status(cls, audio=None, audio_vae=None, **kwargs):
-        return ["audio_vae"] if audio is not None and audio_vae is None else []
+    def check_lazy_status(cls, audio=None, audio_vae=None, continuation_media=None, **kwargs):
+        continuation_audio = (
+            isinstance(continuation_media, dict)
+            and continuation_media.get("audio") is not None
+        )
+        return ["audio_vae"] if (audio is not None or continuation_audio) and audio_vae is None else []
 
     @classmethod
     def execute(
@@ -3856,7 +3860,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
 
 
 class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
-    """Advanced H3 encoder with an opt-in Qwen-only prior clip video head."""
+    """Advanced H3 encoder with a saved target-frame continuation head."""
 
     @classmethod
     def define_schema(cls):
@@ -3864,9 +3868,9 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         schema.node_id = "UC_MiniMaxH3ClipContinuationEncoder"
         schema.display_name = "MiniMax H3 Clip Continuation Encoder"
         schema.description = (
-            "Creates MiniMax H3 conditioning with an optional decoded prior-clip tail "
-            "as the leading Qwen Video context. The tail is Qwen-only and does not "
-            "create native H3 references, keyframes, or audio conditioning."
+            "Uses a saved tail as target frames: frame 0 and the final tail frame are "
+            "native guides, interior frames are Qwen Video context, and the final tail "
+            "frame is an appended semantic Qwen Picture. Saved audio is native-only."
         )
         video_index = next(index for index, value in enumerate(schema.inputs) if value.id == "video")
         schema.inputs.insert(
@@ -3875,9 +3879,9 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
                 "continuation_media",
                 optional=True,
                 tooltip=(
-                    "Optional output from MiniMax H3 Clip Continuation Load. Its 24 fps "
-                    "tail becomes the leading Qwen Video head without changing native H3 "
-                    "Video, keyframe, reference, or audio conditioning."
+                    "Optional output from MiniMax H3 Clip Continuation Load. Tail frame 0 "
+                    "owns target frame 0; interior frames are Qwen-only Video context; the "
+                    "final tail frame is a target-frame guide and appended Qwen Picture."
                 ),
             ),
         )

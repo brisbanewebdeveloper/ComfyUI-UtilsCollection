@@ -390,11 +390,24 @@ def _minimax_h3_timestamped_video_entries(
     return entries
 
 
+def minimax_h3_continuation_anchor_prefix(
+    frame_index: int, picture_index: int,
+) -> str:
+    centiseconds = round(Fraction(frame_index, 24) * 100)
+    anchor_timestamp = f"{centiseconds // 100:02d}.{centiseconds % 100:02d}s"
+    return (
+        "For the target video, at "
+        f"{anchor_timestamp} into the target video, "
+        f"<Picture {picture_index}> is fully referenced. "
+    )
+
+
 def tokenize_minimax_h3_media_prompt(
     clip, text, pictures, picture_timestamps, timestamp_format, picture_structure,
     video_frames=None, video_timestamps=(),
     audio=False, default_single_visual=False, default_video_frames=None,
-    default_video_timestamps=(),
+    default_video_timestamps=(), continuation_picture=None,
+    continuation_frame_index=None,
 ):
     configured_video_frames = () if video_frames is None else video_frames
     if (
@@ -436,6 +449,22 @@ def tokenize_minimax_h3_media_prompt(
         entries.extend(_minimax_h3_text_entries(clip, before))
         entries.extend(visual)
         entries.extend(_minimax_h3_text_entries(clip, after))
+    if continuation_picture is not None:
+        if continuation_frame_index is None:
+            raise ValueError("MiniMax H3 continuation Picture requires a target frame index.")
+        continuation_blocks = _minimax_h3_visual_token_blocks(
+            clip, [continuation_picture]
+        )
+        continuation_picture_index = len(visual_blocks) + 1
+        entries.extend(
+            _minimax_h3_text_entries(
+                clip, f"<Picture {continuation_picture_index}>: "
+            )
+        )
+        entries.extend(continuation_blocks[0])
+        text = minimax_h3_continuation_anchor_prefix(
+            continuation_frame_index, continuation_picture_index
+        ) + text
     if configured_video_frames:
         frames = torch.cat(tuple(configured_video_frames), dim=0)
         entries.extend(_minimax_h3_timestamped_video_entries(
@@ -596,12 +625,13 @@ def validate_minimax_h3_clip_continuation_media(media) -> torch.Tensor:
 
 
 def prepare_minimax_h3_clip_continuation_frames(media, maximum_frames: int) -> torch.Tensor:
-    """Prepare saved tail frames for Qwen video presentation only."""
+    """Return an index-preserving saved tail that fits the target video."""
     frames = validate_minimax_h3_clip_continuation_media(media)
-    prepared, _ = prepare_minimax_h3_reference_video(
-        frames, None, maximum_frames, encode_reference=False
-    )
-    return prepared
+    if frames.shape[0] > maximum_frames:
+        raise ValueError(
+            "MiniMax H3 Clip Continuation tail frames cannot exceed the target frame count."
+        )
+    return frames
 
 
 def minimax_h3_qwen_video_samples(
@@ -609,21 +639,23 @@ def minimax_h3_qwen_video_samples(
     video_frames: torch.Tensor | None,
     video_fps: int,
 ) -> tuple[torch.Tensor | None, list[Fraction]]:
-    """Return one chronological Qwen Video stream; continuation is its head."""
+    """Return one chronological Qwen Video stream with an interior continuation head."""
     samples, timestamps = [], []
     offset = Fraction(0)
     if continuation_frames is not None:
-        if video_frames is not None and continuation_frames.shape[1:3] != video_frames.shape[1:3]:
-            continuation_frames = comfy.utils.common_upscale(
-                continuation_frames.movedim(-1, 1),
-                video_frames.shape[2], video_frames.shape[1],
-                "lanczos", "center",
-            ).movedim(1, -1)
-        indices = minimax_h3_video_sample_indices(continuation_frames.shape[0], video_fps)
-        samples.append(continuation_frames[indices])
-        timestamps.extend(Fraction(index, 24) for index in indices)
+        interior_frames = continuation_frames[1:-1]
+        if interior_frames.shape[0]:
+            samples.append(interior_frames)
+            timestamps.extend(
+                Fraction(index, 24)
+                for index in range(1, continuation_frames.shape[0] - 1)
+            )
         offset = Fraction(continuation_frames.shape[0], 24)
     if video_frames is not None:
+        if continuation_frames is not None and continuation_frames.shape[1:3] != video_frames.shape[1:3]:
+            raise ValueError(
+                "MiniMax H3 Clip Continuation and Video frames must have matching geometry."
+            )
         indices = minimax_h3_video_sample_indices(video_frames.shape[0], video_fps)
         samples.append(video_frames[indices])
         timestamps.extend(offset + Fraction(index, 24) for index in indices)
@@ -3488,6 +3520,10 @@ def execute_advanced_minimax_h3_image_to_video(
     _, flat_fusion_images, _ = extract_and_flatten_images(fusion_images)
     fusion_socket_batches = extract_image_socket_batches(fusion_images)
     keyframe_mode = first_frame is not None or last_frame is not None
+    if continuation_media is not None and first_frame is not None:
+        raise ValueError(
+            "MiniMax H3 Clip Continuation uses its saved tail frame 0; disconnect first_frame."
+        )
     if keyframe_mode and flat_references:
         raise ValueError(
             "MiniMax H3 frame inputs cannot be combined with native reference images."
@@ -3587,6 +3623,8 @@ def execute_advanced_minimax_h3_image_to_video(
         if continuation_media is not None
         else None
     )
+    if continuation_frames is not None and vae is None:
+        raise ValueError("MiniMax H3 Clip Continuation requires a video VAE.")
     audio_reference = _encode_minimax_h3_audio_reference(audio, audio_vae, cache=cache)
     continuation_audio_reference = _encode_minimax_h3_audio_reference(
         continuation_media.get("audio") if continuation_media is not None else None,
@@ -3601,6 +3639,16 @@ def execute_advanced_minimax_h3_image_to_video(
     prepared_last = (
         prepare_minimax_h3_frame(last_frame, width, height, "center")
         if last_frame is not None and frame_vae_enabled
+        else None
+    )
+    prepared_continuation_first = (
+        prepare_minimax_h3_frame(continuation_frames[:1], width, height, "disabled")
+        if continuation_frames is not None
+        else None
+    )
+    prepared_continuation_last = (
+        prepare_minimax_h3_frame(continuation_frames[-1:], width, height, "center")
+        if continuation_frames is not None
         else None
     )
     prepared_references = (
@@ -3621,6 +3669,11 @@ def execute_advanced_minimax_h3_image_to_video(
         base_vlm_images.append(prepare_vlm_image(last_frame, vlm_resolution))
     base_vlm_images.extend(
         prepare_vlm_image(image, vlm_resolution) for image in flat_references
+    )
+    continuation_picture = (
+        prepare_vlm_image(continuation_frames[-1:], vlm_resolution)
+        if continuation_frames is not None
+        else None
     )
     default_media_index = None
     if default_single_visual:
@@ -3644,12 +3697,27 @@ def execute_advanced_minimax_h3_image_to_video(
     fusion_active = visual_method != "off" and bool(fusion_vlm_images)
     visual_encoder_path = config.get("visual_encoder_path", "grid-deepstack")
     actual_prompt = prompt if token_fusion and fusion_active else strip_contextual_weight_syntax(prompt)
+    if continuation_frames is not None:
+        actual_prompt = minimax_h3_continuation_anchor_prefix(
+            continuation_frames.shape[0] - 1,
+            len(base_vlm_images) + len(fusion_vlm_images) + 1,
+        ) + actual_prompt
     prompt_entries = _minimax_h3_text_entries(clip, actual_prompt)
     prompt_spans = [_conditioning_token_span(entry) for entry in prompt_entries]
     if any(span is None for span in prompt_spans):
         raise ValueError("MiniMax H3 prompt contains an unsupported embedding span.")
     prompt_length = sum(prompt_spans)
     def tokenize_presentation(text, images):
+        continuation_video_frames = None
+        continuation_video_timestamps = []
+        if continuation_frames is not None:
+            continuation_video_frames, continuation_video_timestamps = minimax_h3_qwen_video_samples(
+                continuation_frames, video_frames, video_fps
+            )
+            if continuation_video_frames is not None:
+                continuation_video_frames = prepare_minimax_h3_vlm_video_frames(
+                    continuation_video_frames, vlm_video_resolution
+                )
         if media_config is not None:
             collapse_default_picture = (
                 default_single_visual
@@ -3663,13 +3731,9 @@ def execute_advanced_minimax_h3_image_to_video(
             )
             default_video_frames = None
             default_video_timestamps = []
-            if continuation_frames is not None:
-                default_video_frames, default_video_timestamps = minimax_h3_qwen_video_samples(
-                    continuation_frames, video_frames, video_fps
-                )
-                default_video_frames = prepare_minimax_h3_vlm_video_frames(
-                    default_video_frames, vlm_video_resolution
-                )
+            if continuation_video_frames is not None:
+                default_video_frames = continuation_video_frames
+                default_video_timestamps = continuation_video_timestamps
             elif video_frames is not None:
                 sample_indices = minimax_h3_video_sample_indices(
                     video_frames.shape[0], video_fps
@@ -3691,23 +3755,29 @@ def execute_advanced_minimax_h3_image_to_video(
                 default_single_visual=default_single_visual,
                 default_video_frames=default_video_frames,
                 default_video_timestamps=default_video_timestamps,
+                continuation_picture=continuation_picture,
+                continuation_frame_index=(
+                    continuation_frames.shape[0] - 1
+                    if continuation_frames is not None else None
+                ),
             )
-        if video_frames is not None or continuation_frames is not None or audio_reference is not None:
-            reference_items = [
-                {"type": "image", "data": image} for image in images
-            ]
-            if continuation_frames is not None:
-                qwen_video_frames, qwen_video_timestamps = minimax_h3_qwen_video_samples(
-                    continuation_frames, video_frames, 2
-                )
-                reference_items.append({
-                    "type": "video",
-                    "data": prepare_minimax_h3_vlm_video_frames(
-                        qwen_video_frames, vlm_video_resolution
-                    ),
-                    "timestamps": qwen_video_timestamps,
-                })
-            elif video_frames is not None:
+        if continuation_frames is not None:
+            return tokenize_minimax_h3_media_prompt(
+                clip,
+                text,
+                images,
+                (),
+                "0.00s",
+                MINIMAX_H3_MEDIA_STRUCTURE,
+                audio=audio_reference is not None,
+                default_video_frames=continuation_video_frames,
+                default_video_timestamps=continuation_video_timestamps,
+                continuation_picture=continuation_picture,
+                continuation_frame_index=continuation_frames.shape[0] - 1,
+            )
+        if video_frames is not None or audio_reference is not None:
+            reference_items = [{"type": "image", "data": image} for image in images]
+            if video_frames is not None:
                 sample_indices = list(range(0, video_frames.shape[0], 12))
                 reference_items.append({
                     "type": "video",
@@ -4022,6 +4092,10 @@ def execute_advanced_minimax_h3_image_to_video(
         conditioning = scaled
 
     keyframes = []
+    if prepared_continuation_first is not None:
+        keyframes.append(
+            {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_continuation_first)}
+        )
     if prepared_first is not None:
         keyframes.append(
             {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_first)}
@@ -4031,6 +4105,13 @@ def execute_advanced_minimax_h3_image_to_video(
             {
                 "resolved_frame_index": frame_count - 1,
                 "latent": cache.encode_vae(vae, prepared_last),
+            }
+        )
+    if prepared_continuation_last is not None:
+        keyframes.append(
+            {
+                "resolved_frame_index": continuation_frames.shape[0] - 1,
+                "latent": cache.encode_vae(vae, prepared_continuation_last),
             }
         )
     references = [
@@ -4054,6 +4135,7 @@ def execute_advanced_minimax_h3_image_to_video(
             "resolved_frame_index": 0,
             "audio_latent": continuation_audio_reference["audio_latent"],
         })
+    keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
     metadata = {}
     if keyframes:
         metadata["minimax_keyframes"] = keyframes

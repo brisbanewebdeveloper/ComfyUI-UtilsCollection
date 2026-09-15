@@ -790,6 +790,18 @@ def test_minimax_h3_audio_vae_is_conditionally_lazy(node_name):
     assert node.check_lazy_status(audio=audio, audio_vae=object()) == []
 
 
+def test_clip_continuation_audio_requests_audio_vae_lazily():
+    node = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder
+    media = {
+        "format_version": 1,
+        "frame_rate": 24,
+        "frames": torch.ones(22, 8, 8, 3),
+        "audio": {"waveform": torch.ones(1, 2, 8), "sample_rate": 32000},
+    }
+    assert node.check_lazy_status(continuation_media=media, audio_vae=None) == ["audio_vae"]
+    assert node.check_lazy_status(continuation_media=media, audio_vae=object()) == []
+
+
 def test_minimax_h3_audio_reference_matches_core_contract(monkeypatch):
     class AudioVAE:
         audio_sample_rate = 32000
@@ -1174,26 +1186,29 @@ def test_minimax_h3_video_latent_modes_do_not_change_qwen_video_presentation():
     assert all(timestamps == presentations[0][1] for _data, timestamps in presentations)
 
 
-def test_clip_continuation_encoder_prepends_qwen_head_without_native_h3_media():
-    class FailingVAE:
-        def encode(self, _frames):
-            raise AssertionError("Qwen-only continuation media must not reach the video VAE")
+def test_clip_continuation_encoder_anchors_tail_end_without_renumbering_pictures():
+    class VideoVAE:
+        def __init__(self):
+            self.frames = []
+
+        def encode(self, frames):
+            self.frames.append(frames.clone())
+            return torch.full((1, 4, 2, 4, 4), frames.mean())
 
     clip = _MiniMaxH3TestClip()
-    continuation = torch.zeros(22, 64, 64, 3)
-    video = torch.ones(22, 64, 64, 3)
+    vae = VideoVAE()
+    continuation = torch.arange(22, dtype=torch.float32).view(22, 1, 1, 1).expand(22, 64, 64, 3) / 21
+    reference = torch.full((1, 64, 64, 3), 0.5)
     result = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
         clip=clip,
-        vae=FailingVAE(),
+        vae=vae,
         prompt="prompt",
         width=64,
         height=64,
         length=22,
+        ref_image_size="none",
+        reference_images={"reference_image_1": reference},
         continuation_media={"format_version": 1, "frame_rate": 24, "frames": continuation},
-        video=video,
-        media_config=encoder_helpers.build_minimax_h3_media_config(
-            None, video_latent_mode="off"
-        ),
         enable_caching="disabled",
     )
     video_item = next(
@@ -1201,13 +1216,48 @@ def test_clip_continuation_encoder_prepends_qwen_head_without_native_h3_media():
         for call in clip.tokenize_calls
         if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video"
     )
-    assert [float(frame.mean()) for frame in video_item["data"]] == [0.0, 0.0, 1.0, 1.0]
-    assert video_item["timestamps"] == [
-        Fraction(0), Fraction(1, 2), Fraction(11, 12), Fraction(17, 12),
-    ]
+    assert [float(frame.mean()) for frame in video_item["data"]] == pytest.approx(
+        [index / 21 for index in range(1, 21)]
+    )
+    assert video_item["timestamps"] == [Fraction(index, 24) for index in range(1, 21)]
+    tokens = clip.encoded_tokens[-1]["qwen3vl_32b"][0]
+    text = "".join(entry[0] for entry in tokens if isinstance(entry[0], str))
+    assert text.index("<Picture 1>") < text.index("<Picture 2>") < text.index("<Video 1>")
+    assert "For the target video, at 00.88s into the target video, <Picture 2> is fully referenced. prompt" in text
     metadata = result.args[0][0][1]
-    assert "minimax_refs" not in metadata
-    assert "minimax_keyframes" not in metadata
+    keyframes = metadata["minimax_keyframes"]
+    assert [item["resolved_frame_index"] for item in keyframes] == [0, 21]
+    assert [float(item["latent"].mean()) for item in keyframes] == pytest.approx([0.0, 1.0])
+    assert [float(frames.mean()) for frames in vae.frames] == pytest.approx([0.0, 1.0])
+    assert all(
+        item["type"] != "audio"
+        for call in clip.tokenize_calls
+        for item in call["minimax_ref_items"] or []
+    )
+
+
+def test_clip_continuation_encoder_rejects_missing_vae_short_target_and_first_frame():
+    continuation = {"format_version": 1, "frame_rate": 24, "frames": torch.ones(22, 64, 64, 3)}
+    kwargs = {
+        "clip": _MiniMaxH3TestClip(),
+        "prompt": "prompt",
+        "width": 64,
+        "height": 64,
+        "continuation_media": continuation,
+        "enable_caching": "disabled",
+    }
+    with pytest.raises(ValueError, match="requires a video VAE"):
+        encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+            vae=None, length=22, **kwargs
+        )
+    with pytest.raises(ValueError, match="cannot exceed the target frame count"):
+        encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+            vae=object(), length=5, **kwargs
+        )
+    with pytest.raises(ValueError, match="disconnect first_frame"):
+        encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+            vae=object(), length=22, first_frame=torch.ones(1, 64, 64, 3), **kwargs
+        )
 
 
 def test_clip_continuation_encoder_disconnected_matches_standard_encoder():
@@ -1232,14 +1282,17 @@ def test_clip_continuation_encoder_disconnected_matches_standard_encoder():
     assert standard_clip.tokenize_calls == continuation_clip.tokenize_calls
 
 
-def test_clip_continuation_qwen_video_normalizes_head_to_ordinary_video_geometry():
-    continuation = torch.zeros(22, 32, 64, 3)
+def test_clip_continuation_qwen_video_keeps_interior_tail_before_ordinary_video():
+    continuation = torch.zeros(22, 64, 96, 3)
     video = torch.ones(22, 64, 96, 3)
     frames, timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2
     )
-    assert frames.shape == (4, 64, 96, 3)
-    assert timestamps == [Fraction(0), Fraction(1, 2), Fraction(11, 12), Fraction(17, 12)]
+    assert frames.shape == (22, 64, 96, 3)
+    assert timestamps == [
+        *[Fraction(index, 24) for index in range(1, 21)],
+        Fraction(22, 24), Fraction(34, 24),
+    ]
 
 
 def test_clip_continuation_encoder_keeps_autogrow_inputs_last():
