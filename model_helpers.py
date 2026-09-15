@@ -412,6 +412,65 @@ def combine_minimax_h3_clip_continuations(
     return merged_frames, {"waveform": torch.cat(merged_audio, dim=-1), "sample_rate": target_rate}
 
 
+def accumulate_minimax_h3_clip_continuations(
+    image_batches: Sequence[torch.Tensor], audio_batches: Sequence[dict | None],
+) -> tuple[torch.Tensor, dict | None]:
+    """Join compatible accumulated clip batches without changing their audio."""
+    if not image_batches or len(image_batches) != len(audio_batches):
+        raise ValueError("MiniMax H3 Clip Continuation accumulation needs matching image and audio batches.")
+    first = image_batches[0]
+    if not torch.is_tensor(first) or first.ndim != 4 or first.shape[0] < 1:
+        raise ValueError("MiniMax H3 Clip Continuation images must be non-empty BHWC frames.")
+    image_shape = tuple(first.shape[1:])
+    for images in image_batches:
+        if not torch.is_tensor(images) or images.ndim != 4 or images.shape[0] < 1 or tuple(images.shape[1:]) != image_shape:
+            raise ValueError("MiniMax H3 Clip Continuation accumulated images must have matching geometry.")
+    if all(audio is None for audio in audio_batches):
+        return torch.cat(tuple(image_batches), dim=0), None
+    if any(audio is None for audio in audio_batches):
+        raise ValueError("MiniMax H3 Clip Continuation accumulated clips must either all include audio or all omit it.")
+    sample_rate = None
+    waveforms = []
+    for audio in audio_batches:
+        waveform = audio.get("waveform") if isinstance(audio, dict) else None
+        rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+        if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(rate, int) or rate <= 0:
+            raise ValueError("MiniMax H3 Clip Continuation accumulated audio must be one mono or stereo waveform with a positive sample rate.")
+        if sample_rate is None:
+            sample_rate = rate
+        elif rate != sample_rate or waveform.shape[1] != waveforms[0].shape[1]:
+            raise ValueError("MiniMax H3 Clip Continuation accumulated audio must have matching sample rates and channels.")
+        waveforms.append(waveform)
+    return torch.cat(tuple(image_batches), dim=0), {"waveform": torch.cat(waveforms, dim=-1), "sample_rate": sample_rate}
+
+
+def find_minimax_h3_clip_continuation_overlap(
+    previous: torch.Tensor, current: torch.Tensor, threshold: int, maximum_frames: int = 56,
+) -> int:
+    """Return the longest perceptually matching previous-tail/current-head overlap."""
+    if isinstance(threshold, bool) or not isinstance(threshold, numbers.Integral) or not 0 <= threshold <= 255:
+        raise ValueError("MiniMax H3 Clip Continuation overlap threshold must be an integer from 0 to 255.")
+    if not torch.is_tensor(previous) or not torch.is_tensor(current) or previous.ndim != 4 or current.ndim != 4 or tuple(previous.shape[1:]) != tuple(current.shape[1:]):
+        raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
+    limit = min(int(maximum_frames), previous.shape[0], current.shape[0] - 1)
+    for overlap in range(limit, 0, -1):
+        first = previous[-overlap:, ..., :3].to(torch.float32).movedim(-1, 1)
+        second = current[:overlap, ..., :3].to(torch.float32).movedim(-1, 1)
+        first = F.interpolate(first, size=(64, 64), mode="area")
+        second = F.interpolate(second, size=(64, 64), mode="area")
+        first = (0.2126 * first[:, :1] + 0.7152 * first[:, 1:2] + 0.0722 * first[:, 2:3]).clamp(0, 1)
+        second = (0.2126 * second[:, :1] + 0.7152 * second[:, 1:2] + 0.0722 * second[:, 2:3]).clamp(0, 1)
+        first_mean = F.avg_pool2d(first, 7, stride=1, padding=3)
+        second_mean = F.avg_pool2d(second, 7, stride=1, padding=3)
+        first_var = F.avg_pool2d(first.square(), 7, stride=1, padding=3) - first_mean.square()
+        second_var = F.avg_pool2d(second.square(), 7, stride=1, padding=3) - second_mean.square()
+        covariance = F.avg_pool2d(first * second, 7, stride=1, padding=3) - first_mean * second_mean
+        similarity = ((2 * first_mean * second_mean + 0.01 ** 2) * (2 * covariance + 0.03 ** 2)) / ((first_mean.square() + second_mean.square() + 0.01 ** 2) * (first_var + second_var + 0.03 ** 2))
+        if similarity.mean() * 255 >= threshold:
+            return overlap
+    return 0
+
+
 def save_minimax_h3_clip_continuation_media(
     frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int, audio: dict | None = None,
 ) -> str:
