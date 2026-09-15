@@ -3588,11 +3588,6 @@ def execute_advanced_minimax_h3_image_to_video(
         else None
     )
     audio_reference = _encode_minimax_h3_audio_reference(audio, audio_vae, cache=cache)
-    continuation_audio_reference = _encode_minimax_h3_audio_reference(
-        continuation_media.get("audio") if continuation_media is not None else None,
-        audio_vae,
-        cache=cache,
-    )
     prepared_first = (
         prepare_minimax_h3_frame(first_frame, width, height, "disabled")
         if first_frame is not None and frame_vae_enabled
@@ -4049,11 +4044,6 @@ def execute_advanced_minimax_h3_image_to_video(
     if positioned_video_keyframes:
         keyframes.extend(positioned_video_keyframes)
         keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
-    if continuation_audio_reference is not None:
-        keyframes.append({
-            "resolved_frame_index": 0,
-            "audio_latent": continuation_audio_reference["audio_latent"],
-        })
     metadata = {}
     if keyframes:
         metadata["minimax_keyframes"] = keyframes

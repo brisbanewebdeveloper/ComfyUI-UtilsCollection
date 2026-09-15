@@ -12,8 +12,6 @@ from .image_helpers import prepare_h3_reference_components, cached_h3_reference_
 from .model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
     load_minimax_h3_clip_continuation_media,
-    trim_minimax_h3_clip_continuation,
-    combine_minimax_h3_clip_continuations,
     save_minimax_h3_clip_continuation_media,
     transcribe_reference_audio,
 )
@@ -73,19 +71,18 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             description="Stores final decoded H3 RGB frames for a later Clip Continuation Encoder queue.",
             inputs=[
                 io.Image.Input("images", tooltip="Decoded H3 frames from the completed prior clip."),
-                io.Audio.Input("audio", optional=True, tooltip="Matching decoded prior-clip audio. Save keeps the same final tail duration as images."),
-                io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="Number of final 24 fps frames retained as Qwen video-head context."),
-                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative deterministic continuation slot prefix."),
-                io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Slot number. Re-running this index replaces its continuation tail."),
+                io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="Final 24 fps frames retained as visual context. 22 frames is about one second."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative shared slot prefix. Use exactly same value on Load."),
+                io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Slot this generated clip writes. Re-running same slot replaces its saved tail."),
             ],
             outputs=[io.String.Output("path")],
             is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
+    def execute(cls, images, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, clip_index, audio=audio
+            images, int(tail_frames), filename_prefix, clip_index
         )
         return io.NodeOutput(path)
 
@@ -97,10 +94,10 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationLoad",
             display_name="MiniMax H3 Clip Continuation Load",
             category="advanced/conditioning",
-            description="Loads a saved decoded H3 tail for MiniMax H3 Clip Continuation Encoder only.",
+            description="Loads saved visual-tail context for MiniMax H3 Clip Continuation Encoder only.",
             inputs=[
-                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative slot prefix. Must exactly match Clip Continuation Save filename_prefix."),
-                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Prior clip slot. Zero returns no continuation media for the first clip."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Shared output-relative slot prefix. Must exactly match Save filename_prefix."),
+                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Prior clip slot to read. Set 0 for first clip; Load then returns no context."),
             ],
             outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
@@ -120,49 +117,6 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             return io.NodeOutput(None)
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
         return io.NodeOutput(media)
-
-
-class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="UC_MiniMaxH3ClipContinuationTrim",
-            display_name="MiniMax H3 Clip Continuation Trim",
-            category="advanced/conditioning",
-            description="Removes leading continuation frames and matching audio before final clip assembly.",
-            inputs=[
-                io.Image.Input("images", tooltip="Decoded frames from one generated H3 clip."),
-                io.Int.Input("trim_frames", default=0, min=0, max=56, tooltip="Leading pinned frames to remove."),
-                io.Audio.Input("audio", optional=True, tooltip="Decoded audio from same generated clip."),
-            ],
-            outputs=[io.Image.Output("images"), io.Audio.Output("audio")],
-        )
-
-    @classmethod
-    def execute(cls, images, trim_frames=0, audio=None):
-        return io.NodeOutput(*trim_minimax_h3_clip_continuation(images, audio, trim_frames))
-
-
-class UC_MiniMaxH3ClipContinuationCombine(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        image_template = io.Autogrow.TemplatePrefix(io.Image.Input("clip", optional=True), prefix="clip_", min=1, max=100)
-        audio_template = io.Autogrow.TemplatePrefix(io.Audio.Input("audio", optional=True), prefix="audio_", min=1, max=100)
-        return io.Schema(
-            node_id="UC_MiniMaxH3ClipContinuationCombine",
-            display_name="MiniMax H3 Clip Continuation Combine",
-            category="advanced/conditioning",
-            description="Joins ordered, already-trimmed H3 clips and their synchronized audio into one 24 fps video.",
-            inputs=[io.Autogrow.Input("clips", template=image_template), io.Autogrow.Input("audio_clips", template=audio_template)],
-            outputs=[io.Image.Output("images"), io.Audio.Output("audio"), io.Video.Output("video")],
-        )
-
-    @classmethod
-    def execute(cls, clips: io.Autogrow.Type, audio_clips: io.Autogrow.Type):
-        ordered = lambda values: [value for _name, value in sorted((values or {}).items(), key=lambda pair: int(''.join(filter(str.isdigit, pair[0])) or 0)) if value is not None]
-        frames, audio = combine_minimax_h3_clip_continuations(ordered(clips), ordered(audio_clips))
-        video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
-        return io.NodeOutput(frames, audio, video)
 
 
 class UC_SeedCluster(io.ComfyNode):

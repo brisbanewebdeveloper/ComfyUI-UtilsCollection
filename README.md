@@ -61,6 +61,8 @@ The temporal encoders fuse offset video samples into the ordinary video token bu
 
 `UC_MiniMaxH3FirstFrameReferences`, `UC_AdvancedMiniMaxH3ImageToVideoCombined`, and `UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion` were removed. Workflows using these IDs report missing nodes; no aliases or migration are provided.
 
+**MiniMax H3 Clip Continuation** carries visual Qwen context only. Save decoded RGB frames from clip 1 with slot `1`; Load slot `0` for clip 1 (no context), then Load slot `1` when generating clip 2. Keep one identical `filename_prefix` on both nodes. For each later clip, Load prior slot and Save current slot: `1→2`, `2→3`, and so on. Connect Load `continuation_media` to Clip Continuation Encoder. The saved tail guides the next generated clip; it is not copied into output frames, native H3 references, keyframes, or audio conditioning. Do not wire Save `path` to Load.
+
 #### MiniMax H3 Ref
 
 **MiniMax H3 Ref Extract** encodes each image in an `IMAGE` batch as a separate native H3 reference. Select `video` only when the ordered batch is one 24 fps clip; the clip needs at least five frames. **MiniMax H3 Audio Ref Extract** creates an independent audio reference with a matching H3 audio VAE. Compression can reduce token cost but loses detail; refined compression optimizes only the compressed latent and does not train a model.
