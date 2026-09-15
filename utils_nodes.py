@@ -23,6 +23,7 @@ from .model_helpers import (
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
 SeedClusterType = io.Custom("UC_SEED_CLUSTER")
 MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
+_MINIMAX_H3_CLIP_ACCUMULATION = {}
 
 
 class UC_MiniMaxH3RefVid(io.ComfyNode):
@@ -102,7 +103,7 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             description="Gets a saved clip ending so the next clip can continue it.",
             inputs=[
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used by Save. Use the same name on both nodes."),
-                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip; nothing is loaded."),
+                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip. Nothing is loaded."),
             ],
             outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
@@ -153,64 +154,68 @@ class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
 
 
 class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
-    def __init__(self):
-        self._image_batches = []
-        self._audio_batches = []
-        self._reset_counter = None
-
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="UC_MiniMaxH3ClipContinuationAccumulate",
             display_name="MiniMax H3 Clip Continuation Accumulate",
             category="advanced/conditioning",
-            description="Waits for several clips, then joins them into one continuous batch.",
+            description="Collects generated clips, removes repeated overlap, then outputs one combined clip.",
             inputs=[
-                io.Image.Input("images", tooltip="Frames from the next clip to add."),
+                io.Image.Input("images", tooltip="Frames from the clip you just made."),
                 io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip."),
-                io.Int.Input("target_batches", default=2, min=1, max=99999, step=1, tooltip="How many clips to collect before outputting one combined result."),
-                io.Int.Input("overlap_threshold", default=224, min=0, max=255, step=1, tooltip="How similar overlapping frames must be. 255 requires the closest match; lower values allow more difference."),
-                io.Int.Input("reset_counter", default=0, min=0, max=99999, step=1, tooltip="Change this number to discard clips collected so far and start again."),
+                io.Int.Input("target_batches", default=2, min=1, max=99999, step=1, tooltip="How many clips to collect before making one combined clip."),
+                io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="Advanced: matching prioritizes frames with motion at the clip boundary. Keep the default unless the automatic join removes too much or too little.", advanced=True),
+                io.Int.Input("maximum_overlap_frames", default=56, min=1, max=99999, step=1, tooltip="Maximum number of previous-tail and current-head frames to compare for repeated overlap."),
+                io.Boolean.Input(
+                    "first_batch_reset",
+                    default=False,
+                    label_on="Start new batch",
+                    label_off="Continue batch",
+                    tooltip="Enable for the first clip of a new combined batch, then disable for each clip that follows.",
+                ),
             ],
             outputs=[io.Image.Output("images"), io.Audio.Output("audio")],
+            hidden=[io.Hidden.unique_id],
         )
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("nan")
 
-    def execute(self, images, audio=None, target_batches=2, overlap_threshold=224, reset_counter=0):
-        if self._reset_counter != reset_counter:
-            self._image_batches = []
-            self._audio_batches = []
-            self._reset_counter = reset_counter
+    @classmethod
+    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, first_batch_reset=False, unique_id=None):
+        state_key = str(unique_id)
+        state = _MINIMAX_H3_CLIP_ACCUMULATION.get(state_key)
+        if first_batch_reset or state is None:
+            state = {"image_batches": [], "audio_batches": []}
+            _MINIMAX_H3_CLIP_ACCUMULATION[state_key] = state
         images = images.detach().cpu().clone()
-        if self._image_batches:
+        if state["image_batches"]:
             overlap = find_minimax_h3_clip_continuation_overlap(
-                torch.cat(self._image_batches, dim=0), images, int(overlap_threshold)
+                torch.cat(state["image_batches"], dim=0), images, overlap_threshold, maximum_overlap_frames
             )
             if overlap:
                 images, audio = trim_minimax_h3_clip_continuation(images, audio, overlap)
-        self._image_batches.append(images)
+        state["image_batches"].append(images)
         if audio is not None and (
             not isinstance(audio, dict)
             or not torch.is_tensor(audio.get("waveform"))
             or not isinstance(audio.get("sample_rate"), int)
         ):
             raise ValueError("MiniMax H3 Clip Continuation accumulated audio must contain a waveform and sample rate.")
-        self._audio_batches.append(
+        state["audio_batches"].append(
             None if audio is None else {
                 "waveform": audio["waveform"].detach().cpu().clone(),
                 "sample_rate": audio.get("sample_rate"),
             }
         )
-        if len(self._image_batches) < target_batches:
+        if len(state["image_batches"]) < target_batches:
             return io.NodeOutput(ExecutionBlocker(None), ExecutionBlocker(None))
         output = accumulate_minimax_h3_clip_continuations(
-            self._image_batches, self._audio_batches
+            state["image_batches"], state["audio_batches"]
         )
-        self._image_batches = []
-        self._audio_batches = []
+        del _MINIMAX_H3_CLIP_ACCUMULATION[state_key]
         return io.NodeOutput(*output)
 
 

@@ -370,7 +370,7 @@ def trim_minimax_h3_clip_continuation(
 def combine_minimax_h3_clip_continuations(
     clips: Sequence[torch.Tensor], audio_clips: Sequence[dict | None], fps: int = 24,
 ) -> tuple[torch.Tensor, dict | None]:
-    """Join already-trimmed H3 clips; audio is normalized to each clip duration."""
+    """Join already-trimmed H3 clips with audio normalized to each clip duration."""
     if not clips:
         raise ValueError("Connect at least one MiniMax H3 Clip Continuation clip.")
     if len(audio_clips) not in {0, len(clips)}:
@@ -447,12 +447,14 @@ def accumulate_minimax_h3_clip_continuations(
 def find_minimax_h3_clip_continuation_overlap(
     previous: torch.Tensor, current: torch.Tensor, threshold: int, maximum_frames: int = 56,
 ) -> int:
-    """Return the longest perceptually matching previous-tail/current-head overlap."""
-    if isinstance(threshold, bool) or not isinstance(threshold, numbers.Integral) or not 0 <= threshold <= 255:
-        raise ValueError("MiniMax H3 Clip Continuation overlap threshold must be an integer from 0 to 255.")
+    """Return the strongest temporally consistent previous-tail/current-head overlap."""
+    if isinstance(threshold, bool) or not isinstance(threshold, numbers.Real) or not 0.0 <= float(threshold) <= 100.0:
+        raise ValueError("MiniMax H3 Clip Continuation overlap threshold must be from 0.0 to 100.0.")
     if not torch.is_tensor(previous) or not torch.is_tensor(current) or previous.ndim != 4 or current.ndim != 4 or tuple(previous.shape[1:]) != tuple(current.shape[1:]):
         raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
     limit = min(int(maximum_frames), previous.shape[0], current.shape[0] - 1)
+    best_overlap = 0
+    best_similarity = float("-inf")
     for overlap in range(limit, 0, -1):
         first = previous[-overlap:, ..., :3].to(torch.float32).movedim(-1, 1)
         second = current[:overlap, ..., :3].to(torch.float32).movedim(-1, 1)
@@ -466,9 +468,31 @@ def find_minimax_h3_clip_continuation_overlap(
         second_var = F.avg_pool2d(second.square(), 7, stride=1, padding=3) - second_mean.square()
         covariance = F.avg_pool2d(first * second, 7, stride=1, padding=3) - first_mean * second_mean
         similarity = ((2 * first_mean * second_mean + 0.01 ** 2) * (2 * covariance + 0.03 ** 2)) / ((first_mean.square() + second_mean.square() + 0.01 ** 2) * (first_var + second_var + 0.03 ** 2))
-        if similarity.mean() * 255 >= threshold:
-            return overlap
-    return 0
+        if overlap > 1:
+            motion_weight = first.std(dim=0, correction=0) + second.std(dim=0, correction=0)
+            if motion_weight.max() > 1e-6:
+                motion_weight = motion_weight / motion_weight.mean()
+                frame_similarity = (similarity * motion_weight).flatten(1).sum(dim=1) / motion_weight.sum()
+            else:
+                frame_similarity = similarity.flatten(1).mean(dim=1)
+        else:
+            frame_similarity = similarity.flatten(1).mean(dim=1)
+        if overlap > 1:
+            frame_motion = (first[1:] - first[:-1]).abs().mean(dim=(1, 2, 3))
+            frame_motion += (second[1:] - second[:-1]).abs().mean(dim=(1, 2, 3))
+            frame_weight = torch.zeros_like(frame_similarity)
+            frame_weight[:-1] += frame_motion
+            frame_weight[1:] += frame_motion
+            if frame_weight.max() > 1e-6:
+                sequence_similarity = (frame_similarity * frame_weight).sum().div(frame_weight.sum()).item()
+            else:
+                sequence_similarity = frame_similarity.quantile(0.1).item()
+        else:
+            sequence_similarity = frame_similarity.item()
+        if sequence_similarity * 100 >= float(threshold) and sequence_similarity > best_similarity:
+            best_overlap = overlap
+            best_similarity = sequence_similarity
+    return best_overlap
 
 
 def save_minimax_h3_clip_continuation_media(

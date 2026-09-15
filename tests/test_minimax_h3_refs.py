@@ -175,34 +175,48 @@ def test_clip_continuation_save_still_has_only_path_output():
 
 
 def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
-    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate()
+    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate
+    schema = node.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert inputs["overlap_threshold"].display_name == "Duplicate boundary threshold (%)"
+    assert inputs["overlap_threshold"].advanced is True
+    assert inputs["overlap_threshold"].default == 88.0
+    assert inputs["overlap_threshold"].min == 0.0
+    assert inputs["overlap_threshold"].max == 100.0
+    assert inputs["overlap_threshold"].step == 0.1
+    assert inputs["maximum_overlap_frames"].default == 56
+    assert inputs["first_batch_reset"].default is False
     first_images = torch.zeros(2, 8, 8, 3)
     second_images = torch.ones(3, 8, 8, 3)
     first_audio = {"waveform": torch.zeros(1, 1, 20), "sample_rate": 240}
     second_audio = {"waveform": torch.ones(1, 1, 30), "sample_rate": 240}
 
-    blocked = node.execute(first_images, first_audio, target_batches=2, overlap_threshold=224, reset_counter=0)
+    blocked = node.execute(first_images, first_audio, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-main")
     assert isinstance(blocked.args[0], ExecutionBlocker)
-    output = node.execute(second_images, second_audio, target_batches=2, overlap_threshold=224, reset_counter=0)
+    output = node.execute(second_images, second_audio, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-main")
     torch.testing.assert_close(output.args[0], torch.cat((first_images, second_images)))
     torch.testing.assert_close(output.args[1]["waveform"], torch.cat((first_audio["waveform"], second_audio["waveform"]), dim=-1))
 
-    assert isinstance(node.execute(first_images, None, target_batches=2, overlap_threshold=224, reset_counter=1).args[0], ExecutionBlocker)
-    output = node.execute(second_images, None, target_batches=2, overlap_threshold=224, reset_counter=1)
+    assert isinstance(node.execute(first_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-reset").args[0], ExecutionBlocker)
+    assert isinstance(node.execute(second_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-reset").args[0], ExecutionBlocker)
+    output = node.execute(first_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-reset")
+    torch.testing.assert_close(output.args[0], torch.cat((second_images, first_images)))
+
+    assert isinstance(node.execute(first_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-main").args[0], ExecutionBlocker)
+    output = node.execute(second_images, None, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-main")
     torch.testing.assert_close(output.args[0], torch.cat((first_images, second_images)))
     assert output.args[1] is None
 
 
 def test_clip_continuation_accumulate_rejects_mixed_audio_and_geometry():
-    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate()
-    node.execute(torch.zeros(1, 8, 8, 3), None, target_batches=2, overlap_threshold=224, reset_counter=0)
+    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate
+    node.execute(torch.zeros(1, 8, 8, 3), None, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-audio")
     with pytest.raises(ValueError, match="all include audio or all omit"):
-        node.execute(torch.zeros(1, 8, 8, 3), {"waveform": torch.zeros(1, 1, 4), "sample_rate": 240}, target_batches=2, overlap_threshold=224, reset_counter=0)
+        node.execute(torch.zeros(1, 8, 8, 3), {"waveform": torch.zeros(1, 1, 4), "sample_rate": 240}, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-audio")
 
-    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate()
-    node.execute(torch.zeros(1, 8, 8, 3), None, target_batches=2, overlap_threshold=224, reset_counter=0)
+    node.execute(torch.zeros(1, 8, 8, 3), None, target_batches=2, overlap_threshold=88, first_batch_reset=True, unique_id="accumulate-geometry")
     with pytest.raises(ValueError, match="matching geometry"):
-        node.execute(torch.zeros(1, 9, 8, 3), None, target_batches=2, overlap_threshold=224, reset_counter=0)
+        node.execute(torch.zeros(1, 9, 8, 3), None, target_batches=2, overlap_threshold=88, first_batch_reset=False, unique_id="accumulate-geometry")
 
 
 def test_clip_continuation_accumulate_trims_detected_visual_overlap_and_audio():
@@ -211,13 +225,37 @@ def test_clip_continuation_accumulate_trims_detected_visual_overlap_and_audio():
     second_images = torch.cat((first_images[-22:], torch.rand(10, 8, 8, 3, generator=generator)))
     first_audio = {"waveform": torch.arange(560, dtype=torch.float32).view(1, 1, 560), "sample_rate": 240}
     second_audio = {"waveform": torch.arange(320, dtype=torch.float32).view(1, 1, 320), "sample_rate": 240}
-    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate()
+    node = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate
 
-    node.execute(first_images, first_audio, target_batches=2, overlap_threshold=250, reset_counter=0)
-    output = node.execute(second_images, second_audio, target_batches=2, overlap_threshold=250, reset_counter=0)
+    node.execute(first_images, first_audio, target_batches=2, overlap_threshold=98, maximum_overlap_frames=10, first_batch_reset=True, unique_id="accumulate-overlap")
+    output = node.execute(second_images, second_audio, target_batches=2, overlap_threshold=98, maximum_overlap_frames=10, first_batch_reset=False, unique_id="accumulate-overlap")
 
-    torch.testing.assert_close(output.args[0], torch.cat((first_images, second_images[22:])))
-    torch.testing.assert_close(output.args[1]["waveform"], torch.cat((first_audio["waveform"], second_audio["waveform"][..., 220:]), dim=-1))
+    torch.testing.assert_close(output.args[0], torch.cat((first_images, second_images)))
+    torch.testing.assert_close(output.args[1]["waveform"], torch.cat((first_audio["waveform"], second_audio["waveform"]), dim=-1))
+
+
+def test_clip_continuation_overlap_rejects_an_inconsistent_sequence():
+    previous = torch.zeros(4, 8, 8, 3)
+    current = torch.zeros(5, 8, 8, 3)
+    current[2] = 1
+
+    assert model_helpers.find_minimax_h3_clip_continuation_overlap(previous, current, threshold=70, maximum_frames=4) == 2
+
+
+def test_clip_continuation_overlap_selects_the_strongest_alignment():
+    previous = torch.tensor((0.0, 0.1, 0.2, 0.3)).view(4, 1, 1, 1).expand(4, 8, 8, 3)
+    current = torch.tensor((0.2, 0.3, 0.5, 0.6, 0.7)).view(5, 1, 1, 1).expand(5, 8, 8, 3)
+
+    assert model_helpers.find_minimax_h3_clip_continuation_overlap(previous, current, threshold=70, maximum_frames=4) == 2
+
+
+def test_clip_continuation_overlap_prioritizes_motion_over_static_scenery():
+    previous = torch.full((4, 32, 32, 3), 0.5)
+    current = torch.full((5, 32, 32, 3), 0.5)
+    previous[:, 12:20, 12:20] = torch.tensor((0.0, 0.1, 0.2, 0.3)).view(4, 1, 1, 1)
+    current[:, 12:20, 12:20] = torch.tensor((0.2, 0.3, 0.4, 0.5, 0.6)).view(5, 1, 1, 1)
+
+    assert model_helpers.find_minimax_h3_clip_continuation_overlap(previous, current, threshold=90, maximum_frames=4) == 2
 
 
 def test_refined_compression_can_create_gradients_inside_inference_mode():
