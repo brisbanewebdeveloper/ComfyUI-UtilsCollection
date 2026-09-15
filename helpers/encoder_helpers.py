@@ -638,10 +638,13 @@ def minimax_h3_qwen_video_samples(
     continuation_frames: torch.Tensor | None,
     video_frames: torch.Tensor | None,
     video_fps: int,
+    merge_mode: str = "replace",
 ) -> tuple[torch.Tensor | None, list[Fraction]]:
     """Return one chronological Qwen Video stream with an interior continuation head."""
     samples, timestamps = [], []
     offset = Fraction(0)
+    if merge_mode not in ("replace", "prepend"):
+        raise ValueError("MiniMax H3 continuation video merge mode must be replace or prepend.")
     if continuation_frames is not None:
         interior_frames = continuation_frames[1:-1]
         if interior_frames.shape[0]:
@@ -656,8 +659,15 @@ def minimax_h3_qwen_video_samples(
             raise ValueError(
                 "MiniMax H3 Clip Continuation and Video frames must have matching geometry."
             )
-        indices = minimax_h3_video_sample_indices(video_frames.shape[0], video_fps)
-        samples.append(video_frames[indices])
+        video_start = (
+            continuation_frames.shape[0]
+            if continuation_frames is not None and merge_mode == "replace"
+            else 0
+        )
+        remaining_video = video_frames[video_start:]
+        indices = minimax_h3_video_sample_indices(remaining_video.shape[0], video_fps)
+        if indices:
+            samples.append(remaining_video[indices])
         timestamps.extend(offset + Fraction(index, 24) for index in indices)
     if not samples:
         return None, []
@@ -3712,7 +3722,10 @@ def execute_advanced_minimax_h3_image_to_video(
         continuation_video_timestamps = []
         if continuation_frames is not None:
             continuation_video_frames, continuation_video_timestamps = minimax_h3_qwen_video_samples(
-                continuation_frames, video_frames, video_fps
+                continuation_frames,
+                video_frames,
+                video_fps,
+                continuation_media.get("video_merge_mode", "replace"),
             )
             if continuation_video_frames is not None:
                 continuation_video_frames = prepare_minimax_h3_vlm_video_frames(

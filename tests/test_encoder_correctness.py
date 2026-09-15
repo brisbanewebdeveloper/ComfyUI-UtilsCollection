@@ -1285,11 +1285,22 @@ def test_clip_continuation_encoder_disconnected_matches_standard_encoder():
 
 def test_clip_continuation_qwen_video_keeps_interior_tail_before_ordinary_video():
     continuation = torch.zeros(22, 64, 96, 3)
-    video = torch.ones(22, 64, 96, 3)
+    video = torch.cat((continuation, torch.ones(17, 64, 96, 3)))
     frames, timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2
     )
     assert frames.shape == (22, 64, 96, 3)
+    torch.testing.assert_close(frames[:20], continuation[1:-1])
+    torch.testing.assert_close(frames[20:], torch.ones(2, 64, 96, 3))
+
+    prepended, prepended_timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
+        continuation, video, 2, "prepend"
+    )
+    assert prepended.shape == (24, 64, 96, 3)
+    assert prepended_timestamps == [
+        *[Fraction(index, 24) for index in range(1, 21)],
+        Fraction(22, 24), Fraction(34, 24), Fraction(46, 24), Fraction(58, 24),
+    ]
     assert timestamps == [
         *[Fraction(index, 24) for index in range(1, 21)],
         Fraction(22, 24), Fraction(34, 24),

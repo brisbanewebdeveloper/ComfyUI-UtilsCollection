@@ -194,6 +194,10 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     assert inputs["current_entry"].default == 1
     assert inputs["current_entry"].min == 1
     assert inputs["current_entry"].display_name == "Clip number"
+    load_schema = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.define_schema()
+    load_inputs = {value.id: value for value in load_schema.inputs}
+    assert load_inputs["video_merge_mode"].default == "replace"
+    assert load_inputs["video_merge_mode"].options == ["replace", "prepend"]
     first_images = torch.zeros(2, 8, 8, 3)
     second_images = torch.ones(3, 8, 8, 3)
     first_audio = {"waveform": torch.zeros(1, 1, 20), "sample_rate": 240}

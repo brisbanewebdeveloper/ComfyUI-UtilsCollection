@@ -104,24 +104,31 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             inputs=[
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used by Save. Use the same name on both nodes."),
                 io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip. Nothing is loaded."),
+                io.Combo.Input("video_merge_mode", options=["replace", "prepend"], default="replace", tooltip="Choose how loaded continuation frames combine with the encoder's video input. Replace skips video frames already covered by the continuation. Prepend keeps both sequences.", advanced=True),
             ],
             outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
 
     @classmethod
-    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
+    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
         if int(clip_index) <= 0:
             return "disabled"
+        if video_merge_mode not in ("replace", "prepend"):
+            raise ValueError("MiniMax H3 continuation video merge mode must be replace or prepend.")
         try:
-            return get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
+            fingerprint = get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
+            return f"{fingerprint}:{video_merge_mode}"
         except FileNotFoundError:
             return float("nan")
 
     @classmethod
-    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
+    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
         if int(clip_index) <= 0:
             return io.NodeOutput(None)
+        if video_merge_mode not in ("replace", "prepend"):
+            raise ValueError("MiniMax H3 continuation video merge mode must be replace or prepend.")
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+        media["video_merge_mode"] = video_merge_mode
         return io.NodeOutput(media)
 
 
