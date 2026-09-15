@@ -3881,6 +3881,14 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
                 ),
             ),
         )
+        audio_index = next(index for index, value in enumerate(schema.inputs) if value.id == "audio")
+        schema.inputs.insert(
+            audio_index,
+            io.Audio.Input(
+                "continuation_audio", optional=True,
+                tooltip="Optional matching tail audio from Clip Continuation Load. Pins real prior audio at this clip's start; requires audio_vae.",
+            ),
+        )
         return schema
 
     @classmethod
@@ -3904,6 +3912,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         media_config=None,
         video=None,
         continuation_media=None,
+        continuation_audio=None,
         audio=None,
         audio_vae=None,
         enable_caching="all",
@@ -3931,6 +3940,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
             media_config=media_config,
             video=video,
             continuation_media=continuation_media,
+            continuation_audio=continuation_audio,
             audio=audio,
             audio_vae=audio_vae,
             enable_caching=enable_caching,

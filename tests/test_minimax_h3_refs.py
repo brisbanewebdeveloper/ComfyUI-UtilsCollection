@@ -150,6 +150,37 @@ def test_clip_continuation_rejects_short_tail_and_output_escape(monkeypatch, tmp
         )
 
 
+def test_clip_continuation_trim_and_combine_keep_audio_on_frame_timeline():
+    first = torch.zeros(22, 8, 8, 3)
+    second = torch.ones(22, 8, 8, 3)
+    audio = {"waveform": torch.arange(44, dtype=torch.float32).reshape(1, 1, 44), "sample_rate": 24}
+    trimmed_frames, trimmed_audio = model_helpers.trim_minimax_h3_clip_continuation(
+        second, audio, 5
+    )
+    assert trimmed_frames.shape[0] == 17
+    torch.testing.assert_close(trimmed_audio["waveform"], audio["waveform"][..., 5:22])
+    frames, combined_audio = model_helpers.combine_minimax_h3_clip_continuations(
+        [first, trimmed_frames], [None, trimmed_audio]
+    )
+    assert frames.shape[0] == 39
+    assert combined_audio["waveform"].shape == (1, 2, 39)
+    torch.testing.assert_close(combined_audio["waveform"][..., :22], torch.zeros(1, 2, 22))
+
+
+def test_clip_continuation_persists_matching_audio_tail(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    frames = torch.ones(22, 8, 8, 3)
+    audio = {"waveform": torch.arange(48, dtype=torch.float32).reshape(1, 1, 48), "sample_rate": 24}
+    model_helpers.save_minimax_h3_clip_continuation_media(
+        frames, 5, "h3_clip_continuation/with_audio", 1, audio
+    )
+    loaded = model_helpers.load_minimax_h3_clip_continuation_media(
+        "h3_clip_continuation/with_audio", 1
+    )
+    torch.testing.assert_close(loaded["audio"]["waveform"], audio["waveform"][..., -5:])
+    assert loaded["audio"]["sample_rate"] == 24
+
+
 def test_refined_compression_can_create_gradients_inside_inference_mode():
     previous_grad = torch.is_grad_enabled()
     with torch.inference_mode(True):

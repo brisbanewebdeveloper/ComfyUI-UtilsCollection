@@ -14,6 +14,8 @@ from .model_helpers import (
     get_minimax_h3_clip_continuation_path_fingerprint,
     load_minimax_h3_clip_continuation_media,
     load_minimax_h3_clip_continuation_media_path,
+    trim_minimax_h3_clip_continuation,
+    combine_minimax_h3_clip_continuations,
     save_minimax_h3_clip_continuation_media,
     transcribe_reference_audio,
 )
@@ -73,6 +75,7 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             description="Stores final decoded H3 RGB frames for a later Clip Continuation Encoder queue.",
             inputs=[
                 io.Image.Input("images", tooltip="Decoded H3 frames from the completed prior clip."),
+                io.Audio.Input("audio", optional=True, tooltip="Matching decoded prior-clip audio. Save keeps the same final tail duration as images."),
                 io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="Number of final 24 fps frames retained as Qwen video-head context."),
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Output-relative deterministic continuation slot prefix."),
                 io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Slot number. Re-running this index replaces its continuation tail."),
@@ -82,9 +85,9 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
+    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, clip_index
+            images, int(tail_frames), filename_prefix, clip_index, audio=audio
         )
         return io.NodeOutput(path)
 
@@ -101,7 +104,7 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Connect Clip Continuation Save path here. Or enter its output-relative prefix for legacy prefix/index loading."),
                 io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Ignored when Save path is connected. For legacy prefix loading, prior clip slot; zero returns no continuation media for the first clip."),
             ],
-            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
+            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media"), io.Audio.Output("continuation_audio")],
         )
 
     @classmethod
@@ -121,14 +124,55 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
     @classmethod
     def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0):
         if filename_prefix.lower().endswith(".safetensors"):
-            return io.NodeOutput(
-                load_minimax_h3_clip_continuation_media_path(filename_prefix)
-            )
+            media = load_minimax_h3_clip_continuation_media_path(filename_prefix)
+            return io.NodeOutput(media, media.get("audio"))
         if int(clip_index) <= 0:
-            return io.NodeOutput(None)
-        return io.NodeOutput(
-            load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+            return io.NodeOutput(None, None)
+        media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+        return io.NodeOutput(media, media.get("audio"))
+
+
+class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationTrim",
+            display_name="MiniMax H3 Clip Continuation Trim",
+            category="advanced/conditioning",
+            description="Removes leading continuation frames and matching audio before final clip assembly.",
+            inputs=[
+                io.Image.Input("images", tooltip="Decoded frames from one generated H3 clip."),
+                io.Int.Input("trim_frames", default=0, min=0, max=56, tooltip="Leading pinned frames to remove."),
+                io.Audio.Input("audio", optional=True, tooltip="Decoded audio from same generated clip."),
+            ],
+            outputs=[io.Image.Output("images"), io.Audio.Output("audio")],
         )
+
+    @classmethod
+    def execute(cls, images, trim_frames=0, audio=None):
+        return io.NodeOutput(*trim_minimax_h3_clip_continuation(images, audio, trim_frames))
+
+
+class UC_MiniMaxH3ClipContinuationCombine(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        image_template = io.Autogrow.TemplatePrefix(io.Image.Input("clip", optional=True), prefix="clip_", min=1, max=100)
+        audio_template = io.Autogrow.TemplatePrefix(io.Audio.Input("audio", optional=True), prefix="audio_", min=1, max=100)
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationCombine",
+            display_name="MiniMax H3 Clip Continuation Combine",
+            category="advanced/conditioning",
+            description="Joins ordered, already-trimmed H3 clips and their synchronized audio into one 24 fps video.",
+            inputs=[io.Autogrow.Input("clips", template=image_template), io.Autogrow.Input("audio_clips", template=audio_template)],
+            outputs=[io.Image.Output("images"), io.Audio.Output("audio"), io.Video.Output("video")],
+        )
+
+    @classmethod
+    def execute(cls, clips: io.Autogrow.Type, audio_clips: io.Autogrow.Type):
+        ordered = lambda values: [value for _name, value in sorted((values or {}).items(), key=lambda pair: int(''.join(filter(str.isdigit, pair[0])) or 0)) if value is not None]
+        frames, audio = combine_minimax_h3_clip_continuations(ordered(clips), ordered(audio_clips))
+        video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
+        return io.NodeOutput(frames, audio, video)
 
 
 class UC_SeedCluster(io.ComfyNode):
