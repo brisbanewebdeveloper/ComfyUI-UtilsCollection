@@ -3,6 +3,7 @@ from typing_extensions import override
 from .nodes.encoder_nodes import *
 from .nodes.embedding_nodes import *
 from .nodes.image_nodes import *
+from .nodes.video_nodes import *
 from .nodes.preset_nodes import *
 from .nodes.vlm_nodes import *
 from .nodes.minimax_h3_vlm_nodes import *
@@ -124,6 +125,8 @@ class SamplingUtils(ComfyExtension):
             UC_ImageToVideoPrompt,
             UC_LoadImagePath,
             UC_LoadImageDirectory,
+            UC_LoadVideoPath,
+            UC_LoadVideoDirectory,
             UC_SampleVideoFramesAsImages,
             UC_MiniMaxH3RefVid,
             UC_ImagesToVideoTimeline,

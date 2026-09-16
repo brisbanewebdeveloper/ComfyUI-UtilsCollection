@@ -8,9 +8,32 @@ It intentionally has no file-decoder or third-party hashing dependency.
 from dataclasses import dataclass
 from enum import Enum
 import math
+import os
 
 import torch
 import torch.nn.functional as F
+
+
+VIDEO_EXTENSIONS = {
+    ".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg",
+    ".mpg", ".mts", ".ts", ".webm", ".wmv",
+}
+
+
+def normalize_video_path(path: str) -> str:
+    if not isinstance(path, str):
+        return ""
+    path = path.strip().replace("\\", "/")
+    return os.path.abspath(os.path.normpath(path)) if path else ""
+
+
+def list_video_files(directory: str) -> list[str]:
+    return sorted(
+        os.path.join(directory, name)
+        for name in os.listdir(directory)
+        if os.path.isfile(os.path.join(directory, name))
+        and os.path.splitext(name)[1].lower() in VIDEO_EXTENSIONS
+    )
 
 
 class VideoCompareType(str, Enum):
