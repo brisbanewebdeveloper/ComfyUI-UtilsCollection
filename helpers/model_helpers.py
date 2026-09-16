@@ -17,6 +17,7 @@ except ImportError:
 from comfy.model_management import throw_exception_if_processing_interrupted
 from ..models.whisper import ModelDimensions, Whisper
 from .whisper_timing_helpers import alignment_heads, add_word_timestamps
+from .video_helpers import VideoCompareType, audio_overlap_similarity, find_video_overlap
 import numpy as np
 import comfy.model_patcher
 import comfy.ops
@@ -487,6 +488,12 @@ def find_minimax_h3_clip_continuation_overlap(
     if isinstance(fps, bool) or not isinstance(fps, numbers.Integral) or fps <= 0:
         raise ValueError("MiniMax H3 Clip Continuation overlap fps must be positive.")
     limit = min(int(maximum_frames), previous.shape[0], current.shape[0] - 1)
+    visual_alignment = find_video_overlap(
+        previous,
+        current,
+        limit,
+        compare_type=VideoCompareType.SAD,
+    )
     visual_previous = _continuation_visual_features(previous)
     visual_current = _continuation_visual_features(current)
     audio_enabled = previous_audio is not None or current_audio is not None
@@ -502,6 +509,8 @@ def find_minimax_h3_clip_continuation_overlap(
     best_overlap = 0
     best_similarity = float("-inf")
     for overlap in range(limit, 0, -1):
+        if overlap != visual_alignment.overlap_frames:
+            continue
         visual_first = visual_previous[-overlap:]
         visual_second = visual_current[:overlap]
         frame_similarity = F.cosine_similarity(visual_first, visual_second, dim=1).clamp(-1, 1)
@@ -512,7 +521,7 @@ def find_minimax_h3_clip_continuation_overlap(
             motion_similarity = 1.0 - (first_motion - second_motion).abs().mean(dim=1).clamp(0, 1)
             sequence_similarity = 0.7 * sequence_similarity + 0.3 * motion_similarity.quantile(0.15).item()
         if audio_enabled:
-            audio_similarity = _continuation_audio_similarity(
+            audio_similarity = audio_overlap_similarity(
                 audio_previous[0], audio_current[0], overlap, fps, audio_previous[1]
             )
             if audio_similarity is None:
@@ -549,24 +558,6 @@ def _continuation_audio_waveform(audio: dict) -> tuple[torch.Tensor, int]:
     ):
         raise ValueError("MiniMax H3 Clip Continuation overlap audio must be mono or stereo with a positive sample rate.")
     return waveform[0].to(torch.float32), sample_rate
-
-
-def _continuation_audio_similarity(
-    previous: torch.Tensor, current: torch.Tensor, overlap: int, fps: int, sample_rate: int,
-) -> float | None:
-    sample_count = round(overlap * sample_rate / fps)
-    if sample_count < max(256, sample_rate // 10):
-        return None
-    first = previous[:, -sample_count:]
-    second = current[:, :sample_count]
-    first = first - first.mean(dim=-1, keepdim=True)
-    second = second - second.mean(dim=-1, keepdim=True)
-    first_norm = first.norm()
-    second_norm = second.norm()
-    if first_norm < 1e-5 or second_norm < 1e-5:
-        return None
-    correlation = F.cosine_similarity(first.reshape(1, -1), second.reshape(1, -1)).item()
-    return max(0.0, min(1.0, (correlation + 1.0) * 0.5))
 
 
 def save_minimax_h3_clip_continuation_media(
