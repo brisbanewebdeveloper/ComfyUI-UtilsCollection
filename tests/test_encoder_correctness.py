@@ -1187,7 +1187,8 @@ def test_minimax_h3_video_latent_modes_do_not_change_qwen_video_presentation():
     assert all(timestamps == presentations[0][1] for _data, timestamps in presentations)
 
 
-def test_clip_continuation_encoder_anchors_tail_end_without_renumbering_pictures():
+@pytest.mark.parametrize("configured_media", [False, True])
+def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictures(configured_media):
     class VideoVAE:
         def __init__(self):
             self.frames = []
@@ -1210,6 +1211,7 @@ def test_clip_continuation_encoder_anchors_tail_end_without_renumbering_pictures
         ref_image_size="none",
         reference_images={"reference_image_1": reference},
         continuation_media={"format_version": 1, "frame_rate": 24, "frames": continuation},
+        media_config=encoder_helpers.build_minimax_h3_media_config(None) if configured_media else None,
         enable_caching="disabled",
     )
     video_item = next(
@@ -1224,7 +1226,12 @@ def test_clip_continuation_encoder_anchors_tail_end_without_renumbering_pictures
     tokens = clip.encoded_tokens[-1]["qwen3vl_32b"][0]
     text = "".join(entry[0] for entry in tokens if isinstance(entry[0], str))
     assert text.index("<Picture 1>") < text.index("<Picture 2>") < text.index("<Video 1>")
-    assert "For the target video, at 00.88s into the target video, <Picture 2> is fully referenced. prompt" in text
+    assert "For the target video, at 00.00s into the target video, <Picture 2> is fully referenced. prompt" in text
+    assert "00.88s" not in text
+    pictures = [entry[0] for entry in tokens if isinstance(entry[0], dict)
+                and entry[0].get("type") == "image" and not entry[0].get("minimax_video_block")]
+    assert len(pictures) == 2
+    assert pictures[-1]["data"].eq(0).all()
     metadata = result.args[0][0][1]
     keyframes = metadata["minimax_keyframes"]
     assert [item["resolved_frame_index"] for item in keyframes] == [0, 21]
@@ -1235,6 +1242,139 @@ def test_clip_continuation_encoder_anchors_tail_end_without_renumbering_pictures
         for call in clip.tokenize_calls
         for item in call["minimax_ref_items"] or []
     )
+
+
+@pytest.mark.parametrize("merge_mode,expected", [
+    ("replace", [0, 0, 17, 21, 34, 51]),
+    ("prepend", [0, 0, 17, 21, 34, 51]),
+    ("temporal fusion", [0, 0, 17, 21, 34, 51]),
+])
+def test_clip_continuation_preserves_all_native_video_keyframes(merge_mode, expected):
+    class VideoVAE:
+        def encode(self, frames):
+            count = 2 if frames.shape[0] == 1 else ((frames.shape[0] - 5) // 17) * 5 + 2
+            return torch.full((1, 4, count, 4, 4), frames.mean())
+
+    clip = _MiniMaxH3TestClip()
+    prompt = "At 00.00s the subject enters; at 02.00s the subject turns."
+    conditioning, _ = encoder_helpers.execute_advanced_minimax_h3_image_to_video(
+        clip, VideoVAE(), prompt, 64, 64, 56,
+        video=torch.ones(56, 64, 64, 3),
+        continuation_media={
+            "format_version": 1, "frame_rate": 24,
+            "frames": torch.zeros(22, 64, 64, 3), "video_merge_mode": merge_mode,
+        },
+        media_config=encoder_helpers.build_minimax_h3_media_config(
+            None, video_latent_mode="even keyframes", video_latent_keyframes=4,
+        ),
+        enable_caching="disabled",
+    )
+    keyframes = conditioning[0][1]["minimax_keyframes"]
+    assert [item["resolved_frame_index"] for item in keyframes] == expected
+    assert conditioning[0][1]["minimax_frame_count"] == 56
+    assert [int(item["latent"].mean()) for item in keyframes] == [0, 1, 1, 0, 1, 1]
+    text = "".join(entry[0] for entry in clip.encoded_tokens[-1]["qwen3vl_32b"][0] if isinstance(entry[0], str))
+    assert prompt in text
+
+
+def test_clip_continuation_temporal_fusion_keeps_text_times_and_fuses_video_only():
+    class VideoClip(_MiniMaxH3TestClip):
+        def encode_from_tokens_scheduled(self, tokens):
+            output = super().encode_from_tokens_scheduled(tokens)
+            tensor = output[0][0]
+            entries = tokens["qwen3vl_32b"][0]
+            spans = encoder_helpers.build_token_to_conditioning_map(entries, tensor)
+            for entry, (start, end) in zip(entries, spans):
+                if isinstance(entry[0], dict) and entry[0].get("minimax_video_block"):
+                    tensor[:, start:end] = float(entry[0]["data"].mean())
+            return output
+
+    class VideoVAE:
+        def encode(self, frames):
+            return torch.full((1, 4, 2, 4, 4), frames.mean())
+
+    clip = VideoClip()
+    prompt = "At 00.00s enter. At 02.00s turn."
+    video = torch.full((56, 64, 64, 3), 0.8)
+    tail = torch.full((22, 64, 64, 3), 0.2)
+    tail[0] = 0.1
+    tail[-1] = 0.3
+    output = encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+        clip=clip, vae=VideoVAE(), prompt=prompt, width=64, height=64, length=56,
+        video=video, continuation_media={
+            "format_version": 1, "frame_rate": 24, "frames": tail,
+            "video_merge_mode": "temporal fusion",
+        }, enable_caching="disabled",
+    )
+    assert len(clip.encoded_tokens) == 2
+    canonical, alternate = [tokens["qwen3vl_32b"][0] for tokens in clip.encoded_tokens]
+    alternate_frames = []
+    for first, second in zip(canonical, alternate):
+        if isinstance(first[0], dict) and first[0].get("minimax_video_block"):
+            assert first[0]["data"].mean().item() == pytest.approx(0.8)
+            alternate_frames.extend(frame.mean().item() for frame in second[0]["data"])
+        else:
+            assert first is second
+    assert sum(abs(value - 0.2) < 1e-5 for value in alternate_frames) == 20
+    assert all(abs(value - 0.2) < 1e-5 or abs(value - 0.8) < 1e-5 for value in alternate_frames)
+    tensor = output.args[0][0][0]
+    spans = encoder_helpers.build_token_to_conditioning_map(canonical, tensor)
+    for first, second, (start, end) in zip(canonical, alternate, spans):
+        if isinstance(first[0], dict) and first[0].get("minimax_video_block"):
+            expected = (first[0]["data"].mean() + second[0]["data"].mean()) / 2
+            torch.testing.assert_close(tensor[:, start:end], torch.full_like(tensor[:, start:end], expected.item()))
+    text = "".join(item[0] for item in canonical if isinstance(item[0], str))
+    assert prompt in text
+    video_item = next(call["minimax_ref_items"][0] for call in clip.tokenize_calls
+                      if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video")
+    assert video_item["timestamps"] == [Fraction(index, 24) for index in [*range(21), 24, 36, 48]]
+    metadata = output.args[0][0][1]
+    assert metadata["minimax_frame_count"] == 56
+    assert [item["resolved_frame_index"] for item in metadata["minimax_keyframes"]] == [0, 21]
+
+
+@pytest.mark.parametrize("token_fusion", [False, True])
+@pytest.mark.parametrize("native_reference", [False, True])
+def test_clip_continuation_temporal_fusion_composes_with_picture_fusion(monkeypatch, token_fusion, native_reference):
+    class VideoVAE:
+        def encode(self, frames):
+            return torch.ones(1, 4, 2, 4, 4)
+
+    clip = _MiniMaxH3TestClip()
+    slots = []
+    if token_fusion:
+        def capture_slots(clip, canonical, sources, *_args, **_kwargs):
+            slots.append(sources)
+            return clip.encode_from_tokens_scheduled(canonical)
+        monkeypatch.setattr(encoder_helpers, "encode_token_fused_visual_slots", capture_slots)
+    image = torch.ones(1, 64, 64, 3)
+    encoder_nodes.UC_MiniMaxH3ClipContinuationEncoder.execute(
+        clip=clip, vae=VideoVAE(), prompt="unchanged timeline", width=64, height=64, length=22,
+        video=torch.ones(22, 64, 64, 3),
+        continuation_media={"format_version": 1, "frame_rate": 24,
+                            "frames": torch.zeros(5, 64, 64, 3), "video_merge_mode": "temporal fusion"},
+        reference_images={"reference_image_1": image} if native_reference else None,
+        fusion_images={"fusion_image_1": image * 0.5}, ref_image_size="none",
+        visual_fusion_config={"visual_fusion_method": "linear"},
+        fusion_method="token_fusion" if token_fusion else "conds_fusion", enable_caching="disabled",
+    )
+    assert len(clip.encoded_tokens) >= 2
+    assert any(
+        entry[0]["data"].min() == 0
+        for tokens in clip.encoded_tokens for entry in tokens["qwen3vl_32b"][0]
+        if isinstance(entry[0], dict) and entry[0].get("minimax_video_block")
+    )
+    if token_fusion:
+        assert len(slots) == 2
+
+
+def test_clip_continuation_keyframe_mapping_preserves_source_guides():
+    latent = torch.ones(1, 4, 5, 4, 4)
+    source = [{"resolved_frame_index": 0, "latent": latent}]
+    shifted = encoder_helpers.align_minimax_h3_continuation_keyframes(source, 22, "prepend")
+    assert source[0]["resolved_frame_index"] == 0
+    assert shifted[0]["resolved_frame_index"] == 22
+    assert shifted[0]["latent"] is latent
 
 
 def test_clip_continuation_encoder_rejects_missing_vae_short_target_and_first_frame():

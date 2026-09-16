@@ -130,8 +130,10 @@ function updatePreview(node, backendValue) {
       widgetIsLinked(node, "start_at_timestamp") ? null : Number(widgetValue(node, "start_at_timestamp")),
       widgetIsLinked(node, "duration_seconds") ? null : Number(widgetValue(node, "duration_seconds")),
       node.__ucH3SourceSeconds ?? null,
+      widgetIsLinked(node, "segment_count") ? null : Number(widgetValue(node, "segment_count") ?? 0),
+      widgetIsLinked(node, "segment_index") ? null : Number(widgetValue(node, "segment_index") ?? 0),
     );
-    node.__ucResolutionPreview = `start frame ${range.start ?? "…"} · end frame ${range.end ?? "…"} · ${range.length ?? "…"} frames`;
+    node.__ucResolutionPreview = `start frame ${range.start ?? "…"} · end frame ${range.end ?? "…"} · ${range.length ?? "…"} frames${range.padding ? ` (${range.padding} padded)` : ""}`;
     fitPreview(node);
     return;
   }
@@ -204,7 +206,7 @@ app.registerExtension({
     const onWidgetChanged = nodeType.prototype.onWidgetChanged;
     nodeType.prototype.onWidgetChanged = function (name) {
       const result = onWidgetChanged?.apply(this, arguments);
-      if (["aspect_ratio", "megapixels", "multiple", "minimum", "duration_seconds", "start_at_timestamp"].includes(name)) updatePreview(this);
+      if (["aspect_ratio", "megapixels", "multiple", "minimum", "duration_seconds", "start_at_timestamp", "segment_count", "segment_index"].includes(name)) updatePreview(this);
       return result;
     };
 
@@ -215,7 +217,7 @@ app.registerExtension({
         const range = message?.h3_reference_range?.[0];
         if (range) {
           this.__ucH3SourceSeconds = range.source_seconds;
-          updatePreview(this, { start: range.start_frame, end: range.start_frame + range.length - 1, length: range.length });
+          updatePreview(this, { start: range.start_frame, end: range.source_end_frame ?? range.start_frame + range.length - 1, length: range.length, padding: range.padded_frames ?? 0 });
         }
         return;
       }

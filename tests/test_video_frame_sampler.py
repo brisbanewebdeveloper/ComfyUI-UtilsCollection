@@ -701,6 +701,64 @@ def test_sampler_rejects_timestamp_shift_between_selection_and_decode(monkeypatc
         )
 
 
+@pytest.mark.parametrize("source_rate,source_count", [(24, 778), (30, 972)])
+def test_h3_indexed_segments_cover_source_without_borrowing_padding(source_rate, source_count):
+    components = types.SimpleNamespace(
+        images=torch.arange(source_count, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3),
+        frame_rate=source_rate,
+        audio={"waveform": torch.arange(round(source_count / source_rate * 32000), dtype=torch.float32).view(1, 1, -1), "sample_rate": 32000},
+    )
+    total = round(source_count / source_rate * 24)
+    for index in range(3):
+        frames, audio, _, _, length, _, preview = image_helpers.prepare_h3_reference_components(
+            components, 0.01, duration_seconds=999, start_at_timestamp=999,
+            spatially_prepared=True, segment_count=3, segment_index=index,
+        )
+        start, stop = index * total // 3, (index + 1) * total // 3
+        assert preview["start_frame"] == start
+        assert preview["source_end_frame"] == stop - 1
+        assert preview["padded_frames"] == length - (stop - start)
+        expected = [min(round(frame * source_rate / 24), source_count - 1) for frame in range(start, stop)]
+        assert frames[:stop - start, 0, 0, 0].tolist() == expected
+        assert frames[stop - start:, 0, 0, 0].eq(expected[-1]).all()
+        audio_stop = min(round(stop / 24 * 32000), components.audio["waveform"].shape[-1])
+        samples = audio_stop - round(start / 24 * 32000)
+        assert audio["waveform"][0, 0, 0] == round(start / 24 * 32000)
+        assert audio["waveform"][0, 0, samples - 1] == audio_stop - 1
+        assert audio["waveform"][..., samples:].eq(0).all()
+
+
+def test_h3_reference_node_selects_zero_based_segment(monkeypatch):
+    components = types.SimpleNamespace(
+        images=torch.arange(72, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3),
+        frame_rate=24, audio=None,
+    )
+    monkeypatch.setattr(utils_nodes, "cached_h3_reference_components", lambda *args: components)
+    output = utils_nodes.UC_MiniMaxH3RefVid.execute(
+        object(), segment_count=3, segment_index=1, enable_whisper=False,
+    )
+    assert output.args[0][0, 0, 0, 0] == 24
+    assert output.args[0][-1, 0, 0, 0] == 47
+    assert output.args[5].get_components().images is output.args[0]
+    assert output.args[5].get_components().audio is output.args[1]
+    with pytest.raises(ValueError, match="segment index"):
+        utils_nodes.UC_MiniMaxH3RefVid.execute(object(), segment_count=3, segment_index=3)
+
+
+def test_h3_segment_count_can_exceed_available_frames():
+    components = types.SimpleNamespace(
+        images=torch.ones(1, 32, 32, 3), frame_rate=24,
+        audio={"waveform": torch.ones(1, 1, 1333), "sample_rate": 32000},
+    )
+    frames, audio, _, _, length, _, preview = image_helpers.prepare_h3_reference_components(
+        components, 0.01, spatially_prepared=True, segment_count=3, segment_index=0,
+    )
+    assert frames.shape[0] == length == 5
+    assert frames.eq(1).all()
+    assert audio["waveform"].eq(0).all()
+    assert preview["padded_frames"] == 5
+
+
 def test_h3_reference_components_round_seconds_and_preserve_audio_start():
     frames = torch.linspace(0, 1, 100).view(100, 1, 1, 1).expand(100, 8, 16, 3)
     waveform = torch.zeros(1, 2, 441000)

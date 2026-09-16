@@ -69,6 +69,21 @@ def minimax_h3_temporal_frame_pairs(
     return blocks
 
 
+def minimax_h3_continuation_frame_pairs(video_count, tail_count, video_indices):
+    """Pair video sources at identical target times; tail endpoints stay native-only."""
+    indices = sorted(set(video_indices) | set(range(1, tail_count - 1)))
+    blocks = []
+    for position in range(0, len(indices), 2):
+        times = (indices[position], indices[min(position + 1, len(indices) - 1)])
+        canonical = tuple(index if index < video_count else video_count + index for index in times)
+        alternate = tuple(
+            video_count + index if 0 < index < tail_count - 1 else canonical[slot]
+            for slot, index in enumerate(times)
+        )
+        blocks.append([canonical] if alternate == canonical else [canonical, alternate])
+    return indices, blocks
+
+
 def _validate_temporal_sources(sources, token_count=None, source_count=None):
     if not sources or any(source.ndim != 2 for source in sources):
         raise ValueError("Temporal sources must have [tokens, dimensions] shape.")

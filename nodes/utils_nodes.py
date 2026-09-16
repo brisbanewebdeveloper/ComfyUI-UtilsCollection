@@ -14,6 +14,7 @@ from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
     load_minimax_h3_clip_continuation_media,
     save_minimax_h3_clip_continuation_media,
+    snapshot_minimax_h3_clip_continuation_media,
     accumulate_minimax_h3_clip_continuations,
     trim_minimax_h3_clip_continuation_batch,
     transcribe_reference_audio,
@@ -43,6 +44,8 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
                 io.Custom("WHISPER_MODEL").Input("whisper_model", optional=True, tooltip="Optional native Whisper Loader output. Transcribes the selected audio in its original language; disconnected skips transcription."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="00.000s", optional=True, tooltip="Timestamp formatting for transcribed audio, matching the timeline nodes."),
                 io.Boolean.Input("enable_whisper", default=True, optional=True, tooltip="When false, skips Whisper transcription and returns an empty transcript. Video and audio outputs are unchanged."),
+                io.Int.Input("segment_count", display_name="Divide into segments (0 = manual)", default=0, min=0, step=1, optional=True, tooltip="0 uses duration/start controls. A positive count divides the whole source into evenly spaced segments and ignores those controls. H3 padding repeats the selected segment's last frame and adds silence, never borrowing from the next segment."),
+                io.Int.Input("segment_index", display_name="Segment index (zero-based)", default=0, min=0, step=1, optional=True, tooltip="Select 0 for the first segment, 1 for the second, through segment_count minus 1. Used only when segment_count is positive."),
             ],
             outputs=[
                 io.Image.Output("frames", tooltip="Prepared 24 fps frames. Connect to H3 Reference to Video's reference-video input."),
@@ -56,9 +59,12 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, video, megapixels=0.5, duration_seconds=0.0, start_at_timestamp=0.0, whisper_model=None, timestamp_format="00.000s", enable_whisper=True):
+    def execute(cls, video, megapixels=0.5, duration_seconds=0.0, start_at_timestamp=0.0, whisper_model=None, timestamp_format="00.000s", enable_whisper=True, segment_count=0, segment_index=0):
         components = cached_h3_reference_components(video, megapixels)
-        frames, audio, width, height, length, _, preview = prepare_h3_reference_components(components, megapixels, duration_seconds, start_at_timestamp, spatially_prepared=True)
+        frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
+            components, megapixels, duration_seconds, start_at_timestamp, spatially_prepared=True,
+            segment_count=segment_count, segment_index=segment_index,
+        )
         transcribed_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
         prepared_video = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)),
@@ -104,7 +110,7 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             inputs=[
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used by Save. Use the same name on both nodes."),
                 io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip. Nothing is loaded."),
-                io.Combo.Input("video_merge_mode", options=["replace", "prepend"], default="replace", tooltip="Choose how loaded continuation frames combine with the encoder's video input. Replace skips video frames already covered by the continuation. Prepend keeps both sequences.", advanced=True),
+                io.Combo.Input("video_merge_mode", options=["replace", "prepend", "temporal fusion"], default="replace", tooltip="Replace substitutes opening Qwen context. Prepend shifts reference video later. Temporal fusion combines saved interior frames with reference frames at the same times through Qwen temporal consensus, preserving the reference timeline and prompt. Fusion requires an additional Qwen encoding lane.", advanced=True),
             ],
             outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
@@ -113,8 +119,8 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
     def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
         if int(clip_index) <= 0:
             return "disabled"
-        if video_merge_mode not in ("replace", "prepend"):
-            raise ValueError("MiniMax H3 continuation video merge mode must be replace or prepend.")
+        if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
+            raise ValueError("Unsupported MiniMax H3 continuation video merge mode.")
         try:
             fingerprint = get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
             return f"{fingerprint}:{video_merge_mode}"
@@ -125,8 +131,8 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
     def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
         if int(clip_index) <= 0:
             return io.NodeOutput(None)
-        if video_merge_mode not in ("replace", "prepend"):
-            raise ValueError("MiniMax H3 continuation video merge mode must be replace or prepend.")
+        if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
+            raise ValueError("Unsupported MiniMax H3 continuation video merge mode.")
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
         media["video_merge_mode"] = video_merge_mode
         return io.NodeOutput(media)
@@ -171,9 +177,11 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
             inputs=[
                 io.Image.Input("images", tooltip="Frames from the clip you just made."),
                 io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip."),
+                MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Connect the same Load output used by this clip's encoder. Saved pixels support temporal alignment without requiring exact equality or limiting either search window. Weak or ambiguous saved context is reported, not used as a rejection gate."),
                 io.Int.Input("target_batches", default=2, min=1, max=99999, step=1, tooltip="How many clips to collect before making one combined clip."),
-                io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="Advanced: matching prioritizes frames with motion at the clip boundary. Keep the default unless the automatic join removes too much or too little.", advanced=True),
-                io.Int.Input("maximum_overlap_frames", display_name="Maximum duplicate frames to check", default=56, min=1, max=99999, step=1, tooltip="Limits how many frames at the join between clips are checked for repeated content."),
+                io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="Advanced: minimum aggregate visual similarity for a sequence of at least two frames. Individual frames may score lower. Silent, short, or unavailable audio does not reject a visual match.", advanced=True),
+                io.Int.Input("maximum_overlap_frames", display_name="Maximum duplicate frames to check", default=56, min=1, max=99999, step=1, tooltip="Search this many ending frames of the preceding output and beginning frames of the new clip. Saved-tail length does not reduce these windows. Large windows require more matching work."),
+                io.Float.Input("near_identical_tolerance", display_name="Near-identical match tolerance (%)", default=1.0, min=0.0, max=5.0, step=0.1, tooltip="Advanced: score margin for competitive alignments and saved-context ambiguity. Prefer longer sequences at one offset; unresolved competing offsets leave clips unchanged with a warning. The cut minimizes seam error, not a fixed midpoint.", advanced=True),
                 io.Boolean.Input(
                     "first_batch_reset",
                     default=False,
@@ -207,11 +215,12 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         return float("nan")
 
     @classmethod
-    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, first_batch_reset=False, auto_accumulate=True, current_entry=1, unique_id=None):
+    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, near_identical_tolerance=1.0, first_batch_reset=False, auto_accumulate=True, current_entry=1, unique_id=None, continuation_media=None):
+        stored_media = snapshot_minimax_h3_clip_continuation_media(continuation_media)
         state_key = str(unique_id)
         state = _MINIMAX_H3_CLIP_ACCUMULATION.get(state_key)
         if first_batch_reset or state is None:
-            state = {"image_batches": [], "audio_batches": []}
+            state = {"image_batches": [], "audio_batches": [], "continuation_batches": []}
             _MINIMAX_H3_CLIP_ACCUMULATION[state_key] = state
         entry_index = 0 if first_batch_reset else (len(state["image_batches"]) if auto_accumulate else int(current_entry) - 1)
         if entry_index < 0 or entry_index > len(state["image_batches"]):
@@ -230,13 +239,17 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         if entry_index == len(state["image_batches"]):
             state["image_batches"].append(images)
             state["audio_batches"].append(stored_audio)
+            state["continuation_batches"].append(stored_media)
         else:
             state["image_batches"][entry_index] = images
             state["audio_batches"][entry_index] = stored_audio
+            state["continuation_batches"][entry_index] = stored_media
         if len(state["image_batches"]) < target_batches:
             return io.NodeOutput(ExecutionBlocker(None), ExecutionBlocker(None))
         image_batches, audio_batches = trim_minimax_h3_clip_continuation_batch(
-            state["image_batches"], state["audio_batches"], overlap_threshold, maximum_overlap_frames
+            state["image_batches"], state["audio_batches"], overlap_threshold, maximum_overlap_frames,
+            near_identical_tolerance,
+            continuation_batches=state["continuation_batches"],
         )
         output = accumulate_minimax_h3_clip_continuations(
             image_batches, audio_batches

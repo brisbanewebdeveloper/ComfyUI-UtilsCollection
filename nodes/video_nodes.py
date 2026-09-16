@@ -2,7 +2,7 @@ import hashlib
 import os
 
 from comfy_api.latest import InputImpl, io
-from ..helpers.video_helpers import VIDEO_EXTENSIONS, list_video_files, normalize_video_path
+from ..helpers.video_helpers import is_video_file, list_video_files, normalize_video_path
 
 
 class UC_LoadVideoPath(io.ComfyNode):
@@ -31,8 +31,8 @@ class UC_LoadVideoPath(io.ComfyNode):
             raise ValueError(
                 f"Invalid video path: {video_path} (resolved to: {normalized_path})"
             )
-        if os.path.splitext(normalized_path)[1].lower() not in VIDEO_EXTENSIONS:
-            raise ValueError(f"Unsupported video file extension: {video_path}")
+        if not is_video_file(normalized_path):
+            raise ValueError(f"File does not contain readable video: {video_path}")
         return io.NodeOutput(InputImpl.VideoFromFile(normalized_path))
 
     @classmethod
@@ -50,8 +50,8 @@ class UC_LoadVideoPath(io.ComfyNode):
             return "Video path cannot be empty"
         if not os.path.isfile(normalized_path):
             return f"Invalid video file: {video_path} (resolved to: {normalized_path})"
-        if os.path.splitext(normalized_path)[1].lower() not in VIDEO_EXTENSIONS:
-            return f"Unsupported video file extension: {video_path}"
+        if not is_video_file(normalized_path):
+            return f"File does not contain readable video: {video_path}"
         return True
 
 

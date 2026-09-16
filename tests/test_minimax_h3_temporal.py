@@ -18,7 +18,25 @@ from utils_collection_test.helpers.minimax_h3_temporal_helpers import (
     fuse_temporal_block,
     encode_temporal_conditioning,
     minimax_h3_temporal_frame_pairs,
+    minimax_h3_continuation_frame_pairs,
 )
+
+
+def test_continuation_pairs_preserve_reference_times_and_every_interior_frame():
+    indices, pairs = minimax_h3_continuation_frame_pairs(56, 22, [0, 12, 24, 36, 48])
+    assert indices == [*range(21), 24, 36, 48]
+    assert pairs[0] == [(0, 1), (0, 57)]
+    assert pairs[-2] == [(20, 24), (76, 24)]
+    assert pairs[-1] == [(36, 48)]
+    tail_indices = [value - 56 for block in pairs if len(block) > 1 for value in block[1] if value >= 56]
+    assert tail_indices == list(range(1, 21))
+
+
+def test_continuation_pairs_keep_context_beyond_short_reference_and_pad_odd_sample():
+    indices, pairs = minimax_h3_continuation_frame_pairs(5, 22, [0])
+    assert indices == list(range(21))
+    assert pairs[-1] == [(25, 25)]
+    assert all(5 not in pair and 26 not in pair for block in pairs for pair in block)
 
 
 @pytest.mark.parametrize(

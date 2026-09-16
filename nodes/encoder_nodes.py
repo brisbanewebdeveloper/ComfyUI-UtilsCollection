@@ -3869,8 +3869,8 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         schema.display_name = "MiniMax H3 Clip Continuation Encoder"
         schema.description = (
             "Uses a saved tail as target frames: frame 0 and the final tail frame are "
-            "native guides, interior frames are Qwen Video context, and the final tail "
-            "frame is an appended semantic Qwen Picture. Saved audio is native-only."
+            "native guides, interior frames are Qwen Video context, and the first tail "
+            "frame is an appended Qwen Picture anchored at 00.00s. Saved audio is native-only."
         )
         video_index = next(index for index, value in enumerate(schema.inputs) if value.id == "video")
         schema.inputs.insert(
@@ -3881,7 +3881,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
                 tooltip=(
                     "Optional output from MiniMax H3 Clip Continuation Load. Tail frame 0 "
                     "owns target frame 0. Interior frames are Qwen-only Video context. The "
-                    "final tail frame is a target-frame guide and appended Qwen Picture."
+                    "final tail frame remains a native guide. The appended Qwen Picture anchors tail frame 0 at 00.00s."
                 ),
             ),
         )

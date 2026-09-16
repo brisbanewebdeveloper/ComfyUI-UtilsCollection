@@ -8,7 +8,21 @@ export function h3VideoLengthFromSeconds(seconds) {
   return frames + ((((5 - (frames % 17)) % 17) + 17) % 17);
 }
 
-export function h3ReferenceFrameRange(startSeconds, durationSeconds, sourceSeconds = null) {
+export function h3ReferenceFrameRange(startSeconds, durationSeconds, sourceSeconds = null, segmentCount = 0, segmentIndex = 0) {
+  if (segmentCount !== 0) {
+    if (!Number.isInteger(segmentCount) || segmentCount < 1
+        || !Number.isInteger(segmentIndex) || segmentIndex < 0 || segmentIndex >= segmentCount
+        || !Number.isFinite(sourceSeconds) || sourceSeconds <= 0) {
+      return { start: null, end: null, length: null };
+    }
+    const value = sourceSeconds * 24;
+    const rounded = Math.round(value);
+    const total = Math.max(1, Math.abs(value % 1) === 0.5 && rounded % 2 !== 0 ? rounded - 1 : rounded);
+    const start = Math.floor(segmentIndex * total / segmentCount);
+    const stop = Math.floor((segmentIndex + 1) * total / segmentCount);
+    const length = h3VideoLengthFromSeconds((stop - start) / 24);
+    return { start, end: stop - 1, length, padding: length - (stop - start) };
+  }
   const start = startSeconds === 0 ? 0 : h3VideoLengthFromSeconds(startSeconds);
   if (start === null) return { start: null, end: null, length: null };
   let duration = durationSeconds;

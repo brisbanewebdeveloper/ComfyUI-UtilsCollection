@@ -2,7 +2,8 @@
 
 This module adapts the complete comparison/correlation portion of the
 ``video-offset-finder`` reference implementation to ComfyUI BHWC tensors.
-It intentionally has no file-decoder or third-party hashing dependency.
+Alignment operates directly on tensors without third-party hashing.
+File discovery uses ComfyUI's PyAV decoder to identify video streams.
 """
 
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from enum import Enum
 import math
 import os
 
+import av
 import torch
 import torch.nn.functional as F
 
@@ -27,12 +29,21 @@ def normalize_video_path(path: str) -> str:
     return os.path.abspath(os.path.normpath(path)) if path else ""
 
 
+def is_video_file(path: str) -> bool:
+    """Identify video content through the same decoder used by VideoFromFile."""
+    try:
+        with av.open(path, mode="r") as container:
+            return bool(container.streams.video)
+    except (av.FFmpegError, OSError):
+        return False
+
+
 def list_video_files(directory: str) -> list[str]:
     return sorted(
         os.path.join(directory, name)
         for name in os.listdir(directory)
         if os.path.isfile(os.path.join(directory, name))
-        and os.path.splitext(name)[1].lower() in VIDEO_EXTENSIONS
+        and is_video_file(os.path.join(directory, name))
     )
 
 
@@ -62,7 +73,7 @@ def _validate_frames(frames: torch.Tensor) -> torch.Tensor:
         or not torch.isfinite(frames).all()
     ):
         raise ValueError("Video alignment frames must be a finite BHWC RGB tensor.")
-    return frames[..., :3].to(torch.float32).clamp(0, 1)
+    return frames[..., :3].to(torch.float32)
 
 
 def _gray(frames: torch.Tensor, height: int, width: int) -> torch.Tensor:
@@ -118,7 +129,7 @@ def _whash(frames: torch.Tensor, hash_size: int) -> torch.Tensor:
 
 
 def _sad(frames: torch.Tensor, width: int = 64, height: int = 64) -> torch.Tensor:
-    return (_gray(frames, height, width) * 255.0).round().to(torch.int16).flatten(1)
+    return (_gray(frames, height, width) * 255.0).round().flatten(1)
 
 
 def compute_video_signatures(
@@ -129,8 +140,10 @@ def compute_video_signatures(
     """Compute one native signature row per BHWC video frame."""
     frames = _validate_frames(frames)
     compare_type = VideoCompareType(compare_type)
-    if isinstance(hash_size, bool) or not isinstance(hash_size, int) or hash_size < 2:
-        raise ValueError("Video alignment hash_size must be an integer of at least 2.")
+    if compare_type == VideoCompareType.SAD:
+        return _sad(frames)
+    if isinstance(hash_size, bool) or not isinstance(hash_size, int) or hash_size < 1:
+        raise ValueError("Video alignment hash_size must be a positive integer.")
     if compare_type == VideoCompareType.PHASH:
         return _phash(frames, hash_size)
     if compare_type == VideoCompareType.DHASH:
@@ -153,13 +166,13 @@ def _candidate_offsets(
     if reference_count < 1 or query_count < 1:
         raise ValueError("Cannot correlate empty video signatures.")
     shortest = min(reference_count, query_count)
-    required = min(shortest, max(min_overlap_frames, math.ceil(shortest * min_overlap_fraction)))
+    required = max(1, min_overlap_frames, math.ceil(shortest * min_overlap_fraction))
     lower_bound = -query_count + required if min_offset_frames is None else min_offset_frames
     upper_bound = reference_count - required if max_offset_frames is None else max_offset_frames
     lower = max(-query_count + required, lower_bound)
     upper = min(reference_count - required, upper_bound)
     if lower > upper:
-        raise ValueError("No video offsets satisfy the overlap bounds.")
+        return range(0), required
     return range(lower, upper + 1), required
 
 
@@ -174,10 +187,8 @@ def cross_correlate_video_signatures(
 ) -> VideoCorrelationResult:
     """Find the globally best temporal offset and report ambiguity."""
     compare_type = VideoCompareType(compare_type)
-    reference = reference.to(torch.uint8) if compare_type != VideoCompareType.SAD else reference.to(torch.int16)
+    reference = reference.to(torch.uint8) if compare_type != VideoCompareType.SAD else reference.to(torch.float32)
     query = query.to(reference.dtype)
-    if not 0 < min_overlap_fraction <= 1:
-        raise ValueError("min_overlap_fraction must be in the interval (0, 1].")
     offsets, _ = _candidate_offsets(
         reference.shape[0], query.shape[0], min_overlap_fraction,
         min_overlap_frames, min_offset_frames, max_offset_frames,
@@ -197,7 +208,7 @@ def cross_correlate_video_signatures(
             distance = (first != second).to(torch.float32).mean(dim=1)
         candidates.append((float(distance.mean().item()), offset, overlap))
     if not candidates:
-        raise ValueError("No valid video alignment candidates were found.")
+        return VideoCorrelationResult(0, float("inf"), None, 0)
     candidates.sort(key=lambda item: (item[0], -item[2], abs(item[1])))
     best_distance, best_offset, best_overlap = candidates[0]
     return VideoCorrelationResult(
@@ -208,25 +219,23 @@ def cross_correlate_video_signatures(
     )
 
 
-def find_video_overlap(
+def rank_video_overlap_candidates(
     previous: torch.Tensor,
     current: torch.Tensor,
     maximum_overlap_frames: int,
     compare_type: VideoCompareType | str = VideoCompareType.PHASH,
     hash_size: int = 16,
-) -> VideoCorrelationResult:
-    """Find the best previous-tail/current-head overlap.
+) -> list[tuple[int, float]]:
+    """Rank previous-tail/current-head overlaps using inexpensive signatures.
 
-    Unlike whole-video offset search, a boundary join has an explicit
-    suffix/prefix relationship. Every admissible overlap is therefore scored
-    independently, while the result still reports the runner-up distance for
-    ambiguity detection.
+    Callers can validate the ranked candidates with more expensive visual or
+    audio comparisons without recomputing the initial signatures.
     """
     previous = _validate_frames(previous)
     current = _validate_frames(current)
     maximum_overlap_frames = min(maximum_overlap_frames, previous.shape[0], current.shape[0] - 1)
     if maximum_overlap_frames < 1:
-        return VideoCorrelationResult(0, float("inf"), None, 0)
+        return []
     previous_signatures = compute_video_signatures(previous, compare_type, hash_size)
     current_signatures = compute_video_signatures(current, compare_type, hash_size)
     candidates: list[tuple[float, int]] = []
@@ -238,12 +247,29 @@ def find_video_overlap(
         else:
             distance = (first != second).to(torch.float32).mean().item()
         candidates.append((float(distance), overlap))
-    candidates.sort(key=lambda item: (item[0], -item[1]))
-    best_distance, best_overlap = candidates[0]
+    return [(overlap, distance) for distance, overlap in sorted(
+        candidates, key=lambda item: (item[0], -item[1])
+    )]
+
+
+def find_video_overlap(
+    previous: torch.Tensor,
+    current: torch.Tensor,
+    maximum_overlap_frames: int,
+    compare_type: VideoCompareType | str = VideoCompareType.PHASH,
+    hash_size: int = 16,
+) -> VideoCorrelationResult:
+    """Find the best previous-tail/current-head overlap."""
+    candidates = rank_video_overlap_candidates(
+        previous, current, maximum_overlap_frames, compare_type, hash_size
+    )
+    if not candidates:
+        return VideoCorrelationResult(0, float("inf"), None, 0)
+    best_overlap, best_distance = candidates[0]
     return VideoCorrelationResult(
         best_overlap,
         best_distance,
-        candidates[1][0] if len(candidates) > 1 else None,
+        candidates[1][1] if len(candidates) > 1 else None,
         best_overlap,
     )
 
