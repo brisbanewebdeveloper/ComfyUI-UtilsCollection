@@ -455,7 +455,11 @@ def trim_minimax_h3_clip_continuation_batch(
     trimmed_audio = [audio_batches[0]]
     for images, audio in zip(image_batches[1:], audio_batches[1:]):
         overlap = find_minimax_h3_clip_continuation_overlap(
-            torch.cat(trimmed_images, dim=0), images, threshold, maximum_frames
+            torch.cat(trimmed_images, dim=0), images, threshold, maximum_frames,
+            previous_audio=accumulate_minimax_h3_clip_continuations(
+                trimmed_images, trimmed_audio
+            )[1],
+            current_audio=audio,
         )
         if overlap:
             images, audio = trim_minimax_h3_clip_continuation(images, audio, overlap)
@@ -466,53 +470,103 @@ def trim_minimax_h3_clip_continuation_batch(
 
 def find_minimax_h3_clip_continuation_overlap(
     previous: torch.Tensor, current: torch.Tensor, threshold: int, maximum_frames: int = 56,
+    previous_audio: dict | None = None, current_audio: dict | None = None,
+    fps: int = 24,
 ) -> int:
-    """Return the strongest temporally consistent previous-tail/current-head overlap."""
+    """Return the strongest temporally consistent audiovisual overlap.
+
+    Visual matching uses frame-level RGB and motion signatures instead of a
+    single grayscale SSIM score. When both clips contain audio, normalized
+    waveform correlation is a second independent gate; silent or too-short
+    audio windows remain neutral rather than producing a false perfect match.
+    """
     if isinstance(threshold, bool) or not isinstance(threshold, numbers.Real) or not 0.0 <= float(threshold) <= 100.0:
         raise ValueError("MiniMax H3 Clip Continuation overlap threshold must be from 0.0 to 100.0.")
     if not torch.is_tensor(previous) or not torch.is_tensor(current) or previous.ndim != 4 or current.ndim != 4 or tuple(previous.shape[1:]) != tuple(current.shape[1:]):
         raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
+    if isinstance(fps, bool) or not isinstance(fps, numbers.Integral) or fps <= 0:
+        raise ValueError("MiniMax H3 Clip Continuation overlap fps must be positive.")
     limit = min(int(maximum_frames), previous.shape[0], current.shape[0] - 1)
+    visual_previous = _continuation_visual_features(previous)
+    visual_current = _continuation_visual_features(current)
+    audio_enabled = previous_audio is not None or current_audio is not None
+    if audio_enabled and (previous_audio is None or current_audio is None):
+        audio_enabled = False
+    audio_previous = _continuation_audio_waveform(previous_audio) if audio_enabled else None
+    audio_current = _continuation_audio_waveform(current_audio) if audio_enabled else None
+    if audio_enabled and (
+        audio_previous[1] != audio_current[1]
+        or audio_previous[0].shape[0] != audio_current[0].shape[0]
+    ):
+        raise ValueError("MiniMax H3 Clip Continuation overlap audio must have matching sample rates and channels.")
     best_overlap = 0
     best_similarity = float("-inf")
     for overlap in range(limit, 0, -1):
-        first = previous[-overlap:, ..., :3].to(torch.float32).movedim(-1, 1)
-        second = current[:overlap, ..., :3].to(torch.float32).movedim(-1, 1)
-        first = F.interpolate(first, size=(64, 64), mode="area")
-        second = F.interpolate(second, size=(64, 64), mode="area")
-        first = (0.2126 * first[:, :1] + 0.7152 * first[:, 1:2] + 0.0722 * first[:, 2:3]).clamp(0, 1)
-        second = (0.2126 * second[:, :1] + 0.7152 * second[:, 1:2] + 0.0722 * second[:, 2:3]).clamp(0, 1)
-        first_mean = F.avg_pool2d(first, 7, stride=1, padding=3)
-        second_mean = F.avg_pool2d(second, 7, stride=1, padding=3)
-        first_var = F.avg_pool2d(first.square(), 7, stride=1, padding=3) - first_mean.square()
-        second_var = F.avg_pool2d(second.square(), 7, stride=1, padding=3) - second_mean.square()
-        covariance = F.avg_pool2d(first * second, 7, stride=1, padding=3) - first_mean * second_mean
-        similarity = ((2 * first_mean * second_mean + 0.01 ** 2) * (2 * covariance + 0.03 ** 2)) / ((first_mean.square() + second_mean.square() + 0.01 ** 2) * (first_var + second_var + 0.03 ** 2))
+        visual_first = visual_previous[-overlap:]
+        visual_second = visual_current[:overlap]
+        frame_similarity = F.cosine_similarity(visual_first, visual_second, dim=1).clamp(-1, 1)
+        sequence_similarity = frame_similarity.clamp_min(0).quantile(0.15).item()
         if overlap > 1:
-            motion_weight = first.std(dim=0, correction=0) + second.std(dim=0, correction=0)
-            if motion_weight.max() > 1e-6:
-                motion_weight = motion_weight / motion_weight.mean()
-                frame_similarity = (similarity * motion_weight).flatten(1).sum(dim=1) / motion_weight.sum()
-            else:
-                frame_similarity = similarity.flatten(1).mean(dim=1)
-        else:
-            frame_similarity = similarity.flatten(1).mean(dim=1)
-        if overlap > 1:
-            frame_motion = (first[1:] - first[:-1]).abs().mean(dim=(1, 2, 3))
-            frame_motion += (second[1:] - second[:-1]).abs().mean(dim=(1, 2, 3))
-            frame_weight = torch.zeros_like(frame_similarity)
-            frame_weight[:-1] += frame_motion
-            frame_weight[1:] += frame_motion
-            if frame_weight.max() > 1e-6:
-                sequence_similarity = (frame_similarity * frame_weight).sum().div(frame_weight.sum()).item()
-            else:
-                sequence_similarity = frame_similarity.quantile(0.1).item()
-        else:
-            sequence_similarity = frame_similarity.item()
+            first_motion = visual_first[1:] - visual_first[:-1]
+            second_motion = visual_second[1:] - visual_second[:-1]
+            motion_similarity = 1.0 - (first_motion - second_motion).abs().mean(dim=1).clamp(0, 1)
+            sequence_similarity = 0.7 * sequence_similarity + 0.3 * motion_similarity.quantile(0.15).item()
+        if audio_enabled:
+            audio_similarity = _continuation_audio_similarity(
+                audio_previous[0], audio_current[0], overlap, fps, audio_previous[1]
+            )
+            if audio_similarity is None:
+                continue
+            sequence_similarity = 0.6 * sequence_similarity + 0.4 * audio_similarity
+            minimum_modality_score = float(threshold) / 100.0 * 0.8
+            if audio_similarity < minimum_modality_score:
+                continue
         if sequence_similarity * 100 >= float(threshold) and sequence_similarity > best_similarity:
             best_overlap = overlap
             best_similarity = sequence_similarity
     return best_overlap
+
+
+def _continuation_visual_features(frames: torch.Tensor) -> torch.Tensor:
+    """Build compact per-frame RGB/edge signatures for exact overlap matching."""
+    samples = frames[..., :3].to(torch.float32).movedim(-1, 1)
+    samples = F.interpolate(samples, size=(24, 24), mode="area").clamp(0, 1)
+    gray = 0.2126 * samples[:, :1] + 0.7152 * samples[:, 1:2] + 0.0722 * samples[:, 2:3]
+    dx = gray[..., :, 1:] - gray[..., :, :-1]
+    dy = gray[..., 1:, :] - gray[..., :-1, :]
+    dx = F.pad(dx, (0, 1, 0, 0))
+    dy = F.pad(dy, (0, 0, 0, 1))
+    feature = torch.cat((samples, gray, dx, dy, torch.ones_like(gray)), dim=1).flatten(1)
+    return F.normalize(feature, dim=1, eps=1e-6)
+
+
+def _continuation_audio_waveform(audio: dict) -> tuple[torch.Tensor, int]:
+    waveform = audio.get("waveform") if isinstance(audio, dict) else None
+    sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+    if (
+        not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1
+        or waveform.shape[1] not in {1, 2} or not isinstance(sample_rate, int) or sample_rate <= 0
+    ):
+        raise ValueError("MiniMax H3 Clip Continuation overlap audio must be mono or stereo with a positive sample rate.")
+    return waveform[0].to(torch.float32), sample_rate
+
+
+def _continuation_audio_similarity(
+    previous: torch.Tensor, current: torch.Tensor, overlap: int, fps: int, sample_rate: int,
+) -> float | None:
+    sample_count = round(overlap * sample_rate / fps)
+    if sample_count < max(256, sample_rate // 10):
+        return None
+    first = previous[:, -sample_count:]
+    second = current[:, :sample_count]
+    first = first - first.mean(dim=-1, keepdim=True)
+    second = second - second.mean(dim=-1, keepdim=True)
+    first_norm = first.norm()
+    second_norm = second.norm()
+    if first_norm < 1e-5 or second_norm < 1e-5:
+        return None
+    correlation = F.cosine_similarity(first.reshape(1, -1), second.reshape(1, -1)).item()
+    return max(0.0, min(1.0, (correlation + 1.0) * 0.5))
 
 
 def save_minimax_h3_clip_continuation_media(

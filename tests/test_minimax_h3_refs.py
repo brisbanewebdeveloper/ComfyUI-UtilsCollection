@@ -309,6 +309,26 @@ def test_clip_continuation_overlap_prioritizes_motion_over_static_scenery():
     assert model_helpers.find_minimax_h3_clip_continuation_overlap(previous, current, threshold=90, maximum_frames=4) == 2
 
 
+def test_clip_continuation_overlap_requires_audio_when_audio_is_available():
+    previous = torch.zeros(16, 8, 8, 3)
+    current = torch.zeros(20, 8, 8, 3)
+    generator = torch.Generator().manual_seed(7)
+    previous_audio_waveform = torch.rand(1, 1, 160, generator=generator)
+    current_audio_waveform = torch.cat(
+        (torch.rand(1, 1, 120, generator=generator), torch.rand(1, 1, 40, generator=generator)),
+        dim=-1,
+    )
+    overlap = model_helpers.find_minimax_h3_clip_continuation_overlap(
+        previous,
+        current,
+        threshold=88,
+        maximum_frames=12,
+        previous_audio={"waveform": previous_audio_waveform, "sample_rate": 240},
+        current_audio={"waveform": current_audio_waveform, "sample_rate": 240},
+    )
+    assert overlap == 0
+
+
 def test_refined_compression_can_create_gradients_inside_inference_mode():
     previous_grad = torch.is_grad_enabled()
     with torch.inference_mode(True):
