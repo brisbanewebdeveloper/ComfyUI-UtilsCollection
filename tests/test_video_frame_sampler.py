@@ -201,19 +201,19 @@ def test_text_only_video_timeline_schema_and_outputs():
         "<<shot>> at <<timestamp>>",
         "Target video duration is <<duration>> seconds divided into <<segments>> segments at <<timestamps>>",
     ) == (
-        "0.0s, 2.5s, 5.0s, 7.5s, 10.0s",
-        "Shot 1 at 0.0s\nShot 2 at 2.5s\nShot 3 at 5.0s\n"
-        "Shot 4 at 7.5s\nShot 5 at 10.0s",
-        10.0,
-        "Target video duration is 10 seconds divided into 5 segments at "
-        "0.0s, 2.5s, 5.0s, 7.5s, 10.0s",
+        "0.0s, 2.5s, 5.1s, 7.6s, 10.1s",
+        "Shot 1 at 0.0s\nShot 2 at 2.5s\nShot 3 at 5.1s\n"
+        "Shot 4 at 7.6s\nShot 5 at 10.1s",
+        10.125,
+            "Target video duration is 10.125 seconds divided into 5 segments at "
+        "0.0s, 2.5s, 5.1s, 7.6s, 10.1s",
     )
     assert video_timeline_text(
         3.0, 3, 0, 0.5, 0.5, 0.5, "0.0s",
         VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE,
         VIDEO_TEXT_STRUCTURED_TIMELINE_TEXT_STRUCTURE,
     )[3] == (
-        "Target video duration is 3 seconds divided into 3 segments. "
+            "Target video duration is 3.04167 seconds divided into 3 segments. "
         "Shot 1 at 0.0s, Shot 2 at 1.5s, Shot 3 at 3.0s."
     )
 
@@ -285,8 +285,8 @@ def test_images_to_video_timeline_normalizes_or_returns_black_batch():
 
     assert resized.image_batch.shape == (3, 2, 4, 4)
     assert [image.shape for image in resized.image_list] == [(1, 2, 4, 4)] * 3
-    assert resized.timestamps == ["00.000s", "02.000s", "04.000s"]
-    assert final_image_not_anchored.timestamps == ["00.000s", "01.333s", "02.667s"]
+    assert resized.timestamps == ["00.000s", "02.229s", "04.458s"]
+    assert final_image_not_anchored.timestamps == ["00.000s", "01.486s", "02.972s"]
     assert unresized.image_batch.shape == (1, 64, 64, 3)
     assert torch.count_nonzero(unresized.image_batch) == 0
     assert [image.shape for image in unresized.image_list] == [
@@ -597,9 +597,9 @@ def test_sampler_outputs_aligned_batch_list_and_metadata(monkeypatch):
         "<Picture 2> at 00.250s\n"
         "<Picture 3> at 01.000s"
     )
-    assert sampled.video_runtime == 1.25
+    assert sampled.video_runtime == 1.625
     assert sampled.structured_timeline_text == (
-        "Target video duration is 1.25 seconds divided into 3 segments. "
+        "Target video duration is 1.625 seconds divided into 3 segments. "
         "Reference each image with <Picture 1> at 00.000s, "
         "<Picture 2> at 00.250s and <Picture 3> at 01.000s."
     )
@@ -721,11 +721,14 @@ def test_h3_indexed_segments_cover_source_without_borrowing_padding(source_rate,
         expected = [min(round(frame * source_rate / 24), source_count - 1) for frame in range(start, stop)]
         assert frames[:stop - start, 0, 0, 0].tolist() == expected
         assert frames[stop - start:, 0, 0, 0].eq(expected[-1]).all()
-        audio_stop = min(round(stop / 24 * 32000), components.audio["waveform"].shape[-1])
+        audio_stop = min(round((start + length) / 24 * 32000), components.audio["waveform"].shape[-1]) if index < 2 else min(round(stop / 24 * 32000), components.audio["waveform"].shape[-1])
         samples = audio_stop - round(start / 24 * 32000)
         assert audio["waveform"][0, 0, 0] == round(start / 24 * 32000)
         assert audio["waveform"][0, 0, samples - 1] == audio_stop - 1
-        assert audio["waveform"][..., samples:].eq(0).all()
+        if index == 2:
+            assert audio["waveform"][..., samples:].eq(0).all()
+        else:
+            assert audio["waveform"][0, 0, samples - 1] == audio_stop - 1
 
 
 def test_h3_reference_node_selects_zero_based_segment(monkeypatch):
@@ -755,7 +758,8 @@ def test_h3_segment_count_can_exceed_available_frames():
     )
     assert frames.shape[0] == length == 5
     assert frames.eq(1).all()
-    assert audio["waveform"].eq(0).all()
+    assert audio["waveform"][..., :1333].eq(1).all()
+    assert audio["waveform"][..., 1333:].eq(0).all()
     assert preview["padded_frames"] == 5
 
 

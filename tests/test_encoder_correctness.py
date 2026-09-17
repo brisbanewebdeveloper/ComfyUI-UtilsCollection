@@ -988,7 +988,7 @@ def test_advanced_minimax_h3_media_config_uses_default_two_fps_presentation(
         ] == [0, 17]
         assert "minimax_refs" not in conditioning[0][1]
     else:
-        assert conditioning[0][1]["minimax_refs"][0]["kind"] == "video"
+        assert "minimax_refs" not in conditioning[0][1]
 
 
 def test_minimax_h3_video_sample_indices_support_non_divisor_rates():
@@ -1544,8 +1544,8 @@ def test_advanced_minimax_h3_keeps_reference_pictures_and_video_together(
     entries = clip.encoded_tokens[-1]["qwen3vl_32b"][0]
     text = "".join(entry[0] for entry in entries if isinstance(entry[0], str))
     assert text.index("<Picture 1>") < text.index("<Video 1>") < text.index("prompt")
-    kinds = [reference["kind"] for reference in conditioning[0][1]["minimax_refs"]]
-    assert kinds == ["image", "video"]
+    expected_kinds = ["image", "video"] if connect_media_config else ["image"]
+    assert [reference["kind"] for reference in conditioning[0][1].get("minimax_refs", [])] == expected_kinds
 
 
 def test_advanced_minimax_h3_default_media_keeps_all_pictures_with_video():
@@ -2090,7 +2090,7 @@ def test_advanced_minimax_h3_reference_save_exports_each_visual_span(monkeypatch
     monkeypatch.setattr(
         encoder_helpers,
         "save_source_visual_embeddings",
-        lambda *args: exported.append(args),
+        lambda *args, cache=None: exported.append(args),
     )
 
     UC_AdvancedMiniMaxH3ImageToVideo.execute(
@@ -2114,7 +2114,7 @@ def test_advanced_minimax_h3_reference_save_exports_each_visual_span(monkeypatch
     )
 
     assert len(exported) == 1
-    _, tokens, _config, key, _device, visual_indices, _cache = exported[0]
+    _, tokens, _config, key, _device, visual_indices = exported[0]
     assert key == "qwen3vl_8b"
     assert visual_indices == [0, 1]
     assert sum(encoder_helpers.is_image_token(entry) for entry in tokens["qwen3vl_32b"][0]) == 2
@@ -3113,7 +3113,7 @@ def test_consensus_node_passes_original_tensors_to_blender(monkeypatch):
 
     monkeypatch.setattr(encoder_helpers.comfy.model_management, "get_torch_device", lambda: first.device)
     monkeypatch.setattr(encoder_helpers.comfy.model_management, "intermediate_dtype", lambda: torch.float32)
-    monkeypatch.setattr("utils_collection_encoder_test.encoder_nodes.blend_text_vectors", fake_blend)
+    monkeypatch.setattr(encoder_nodes, "blend_text_vectors", fake_blend)
 
     output = UC_ConditioningConsensusBlend.execute(
         {
@@ -3408,9 +3408,10 @@ def test_visual_fusion_encoder_formula_defaults_are_blank():
         assert inspect.signature(node.execute).parameters["formula"].default == ""
 
     schema = encoder_nodes.UC_AdvancedVisualConditioningEncode.define_schema()
-    assert [value.id for value in schema.inputs][-2:] == [
+    assert [value.id for value in schema.inputs][-3:] == [
         "semantic_anchor",
         "image_inputs",
+        "fusion_method",
     ]
     assert {value.id: value for value in schema.inputs}["semantic_anchor"].default is False
-    assert list(inspect.signature(encoder_nodes.UC_AdvancedVisualConditioningEncode.execute).parameters)[-1] == "semantic_anchor"
+    assert list(inspect.signature(encoder_nodes.UC_AdvancedVisualConditioningEncode.execute).parameters)[-1] == "fusion_method"

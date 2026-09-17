@@ -1291,10 +1291,10 @@ def prepare_h3_reference_components(components, megapixels: float, duration_seco
         sample_rate = int(soundtrack["sample_rate"])
         if sample_rate <= 0:
             raise ValueError("Reference audio must have a positive sample rate.")
-        selected_frames = frame_count if segment_end is None else segment_end - start_frame
+        selected_frames = frame_count if segment_end is None or segment_index < segment_count - 1 else segment_end - start_frame
         sample_count = round(selected_frames / 24 * sample_rate)
         start_sample = round(start_seconds * sample_rate)
-        if segment_end is not None:
+        if segment_end is not None and segment_index == segment_count - 1:
             sample_count = round(segment_end / 24 * sample_rate) - start_sample
         audio_samples = soundtrack["waveform"][..., start_sample:start_sample + sample_count]
         if sample_rate != 32000 and audio_samples.numel():

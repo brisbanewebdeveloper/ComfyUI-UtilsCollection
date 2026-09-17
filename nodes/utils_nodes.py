@@ -44,7 +44,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
                 io.Custom("WHISPER_MODEL").Input("whisper_model", optional=True, tooltip="Optional native Whisper Loader output. Transcribes the selected audio in its original language; disconnected skips transcription."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="00.000s", optional=True, tooltip="Timestamp formatting for transcribed audio, matching the timeline nodes."),
                 io.Boolean.Input("enable_whisper", default=True, optional=True, tooltip="When false, skips Whisper transcription and returns an empty transcript. Video and audio outputs are unchanged."),
-                io.Int.Input("segment_count", display_name="Divide into segments (0 = manual)", default=0, min=0, step=1, optional=True, tooltip="0 uses duration/start controls. A positive count divides the whole source into evenly spaced segments and ignores those controls. H3 padding repeats the selected segment's last frame and adds silence, never borrowing from the next segment."),
+                io.Int.Input("segment_count", display_name="Divide into segments (0 = manual)", default=0, min=0, step=1, optional=True, tooltip="0 uses duration/start controls. A positive count divides the whole source into evenly spaced segments and ignores those controls. H3 padding repeats the selected segment's last frame; non-final segments retain continuous source audio through padding, and only the final segment may add silence."),
                 io.Int.Input("segment_index", display_name="Segment index (zero-based)", default=0, min=0, step=1, optional=True, tooltip="Select 0 for the first segment, 1 for the second, through segment_count minus 1. Used only when segment_count is positive."),
             ],
             outputs=[
@@ -181,6 +181,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
                 io.Int.Input("target_batches", default=2, min=1, max=99999, step=1, tooltip="How many clips to collect before making one combined clip."),
                 io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="Advanced: minimum aggregate visual similarity for a sequence of at least two frames. Individual frames may score lower. Silent, short, or unavailable audio does not reject a visual match.", advanced=True),
                 io.Int.Input("maximum_overlap_frames", display_name="Maximum duplicate frames to check", default=56, min=1, max=99999, step=1, tooltip="Search this many ending frames of the preceding output and beginning frames of the new clip. Saved-tail length does not reduce these windows. Large windows require more matching work."),
+                io.Float.Input("continuation_prune_range", display_name="Continuation prune range (%)", default=50.0, min=0.0, max=100.0, step=1.0, tooltip="Initial frames removed from both clip boundaries = saved continuation frames × this percentage ÷ 100. Alignment can remove additional frames."),
                 io.Float.Input("near_identical_tolerance", display_name="Near-identical match tolerance (%)", default=1.0, min=0.0, max=5.0, step=0.1, tooltip="Advanced: score margin for competitive alignments and saved-context ambiguity. Prefer longer sequences at one offset; unresolved competing offsets leave clips unchanged with a warning. The cut minimizes seam error, not a fixed midpoint.", advanced=True),
                 io.Boolean.Input(
                     "first_batch_reset",
@@ -215,7 +216,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         return float("nan")
 
     @classmethod
-    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, near_identical_tolerance=1.0, first_batch_reset=False, auto_accumulate=True, current_entry=1, unique_id=None, continuation_media=None):
+    def execute(cls, images, audio=None, target_batches=2, overlap_threshold=88.0, maximum_overlap_frames=56, continuation_prune_range=50.0, near_identical_tolerance=1.0, first_batch_reset=False, auto_accumulate=True, current_entry=1, unique_id=None, continuation_media=None):
         stored_media = snapshot_minimax_h3_clip_continuation_media(continuation_media)
         state_key = str(unique_id)
         state = _MINIMAX_H3_CLIP_ACCUMULATION.get(state_key)
@@ -250,6 +251,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
             state["image_batches"], state["audio_batches"], overlap_threshold, maximum_overlap_frames,
             near_identical_tolerance,
             continuation_batches=state["continuation_batches"],
+            continuation_prune_range=float(continuation_prune_range),
         )
         output = accumulate_minimax_h3_clip_continuations(
             image_batches, audio_batches

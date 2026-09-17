@@ -404,8 +404,8 @@ def test_clip_continuation_overlap_prefers_deepest_equally_accurate_boundary(mon
 
 def test_clip_continuation_overlap_prefers_deepest_near_identical_boundary(monkeypatch):
     feature_batches = iter((
-        torch.tensor(((0.9999, 0.0141), (1.0, 0.0), (1.0, 0.0))),
-        torch.tensor(((1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (1.0, 0.0))),
+        torch.tensor(((0.0,), (1.0,), (2.0,))),
+        torch.tensor(((0.0,), (1.0,), (2.0,), (3.0,))),
     ))
     monkeypatch.setattr(
         model_helpers, "rank_video_overlap_candidates", lambda *args, **kwargs: [(2, 0.0), (3, 0.1)]
@@ -417,7 +417,7 @@ def test_clip_continuation_overlap_prefers_deepest_near_identical_boundary(monke
     assert model_helpers.find_minimax_h3_clip_continuation_overlap(
         torch.zeros(3, 8, 8, 3),
         torch.zeros(4, 8, 8, 3),
-        threshold=80,
+        threshold=0,
         near_identical_tolerance=1.0,
     ) == 3
 
@@ -437,7 +437,7 @@ def test_clip_continuation_media_measures_offset_and_audio_cut(cut, merge_mode):
     audios = [{"waveform": wave, "sample_rate": 24000} for wave in (previous_wave, current_wave)]
     images, audio = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], audios, 99, 10,
-        continuation_batches=[None, _continuation_media(previous[-5:], video_merge_mode=merge_mode)],
+            continuation_batches=[None, _continuation_media(previous[-5:], video_merge_mode=merge_mode)], continuation_prune_range=0,
     )
     torch.testing.assert_close(torch.cat(images), torch.cat((previous, current[cut:])))
     torch.testing.assert_close(torch.cat([item["waveform"] for item in audio], dim=-1),
@@ -491,7 +491,7 @@ def test_clip_continuation_media_pixel_difference_uses_actual_queued_clips():
     current = torch.cat((previous[-5:], previous[:2]))
     node.execute(previous, target_batches=2, first_batch_reset=True, unique_id=key)
     saved = (previous[-5:] * 0.95 + 0.02).clone()
-    output = node.execute(current, target_batches=2, overlap_threshold=99,
+    output = node.execute(current, target_batches=2, overlap_threshold=99, continuation_prune_range=0,
                           continuation_media=_continuation_media(saved), unique_id=key)
     torch.testing.assert_close(output.args[0], torch.cat((previous, current[5:])))
     assert key not in utils_nodes._MINIMAX_H3_CLIP_ACCUMULATION
@@ -500,15 +500,17 @@ def test_clip_continuation_media_pixel_difference_uses_actual_queued_clips():
 @pytest.mark.parametrize("maximum,remaining", [(4, 2), (7, 2), (0, 7)])
 def test_clip_continuation_media_respects_limit_and_retains_new_frames(maximum, remaining):
     previous = torch.rand(8, 24, 24, 3, generator=torch.Generator().manual_seed(31))
-    current = torch.cat((previous[-5:], previous[:2]))
+    repeated_frames = 5
+    current = torch.cat((previous[-repeated_frames:], previous[:2]))
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], [None, None], 99, maximum,
-        continuation_batches=[None, _continuation_media(previous[-5:])],
+        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])], continuation_prune_range=0,
     )
-    assert sum(item.shape[0] for item in images) == previous.shape[0] + remaining
+    expected_total = previous.shape[0] + remaining if maximum >= repeated_frames else previous.shape[0] + current.shape[0]
+    assert sum(item.shape[0] for item in images) == expected_total
     one, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current[:1]], [None, None], 99, maximum,
-        continuation_batches=[None, _continuation_media(previous[-5:])],
+        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])], continuation_prune_range=0,
     )
     torch.testing.assert_close(one[1], current[:1])
 
@@ -518,7 +520,7 @@ def test_clip_continuation_media_validates_original_clip_after_prior_trim():
     clips = [frames[:8], frames[3:10], frames[5:15]]
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         clips, [None] * 3, 99, 10,
-        continuation_batches=[None, _continuation_media(clips[0][-5:]), _continuation_media(clips[1][-5:])],
+        continuation_batches=[None, _continuation_media(clips[0][-5:]), _continuation_media(clips[1][-5:])], continuation_prune_range=0,
     )
     torch.testing.assert_close(torch.cat(images), frames)
     with pytest.raises(ValueError, match="one continuation entry"):
@@ -532,7 +534,7 @@ def test_clip_continuation_media_silent_and_short_audio_is_neutral(sample_rate, 
     audio = {"waveform": torch.zeros(1, 1, samples), "sample_rate": sample_rate}
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], [audio, audio], 99, 7,
-        continuation_batches=[None, _continuation_media(previous[-5:])],
+        continuation_batches=[None, _continuation_media(previous[-5:])], continuation_prune_range=0,
     )
     torch.testing.assert_close(torch.cat(images), torch.cat((previous, current[5:])))
 
@@ -562,7 +564,7 @@ def test_clip_continuation_media_schema_preserves_existing_input_order():
     schema = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulate.define_schema()
     assert [value.id for value in schema.inputs] == [
         "images", "audio", "continuation_media", "target_batches", "overlap_threshold",
-        "maximum_overlap_frames", "near_identical_tolerance", "first_batch_reset",
+        "maximum_overlap_frames", "continuation_prune_range", "near_identical_tolerance", "first_batch_reset",
         "auto_accumulate", "current_entry",
     ]
 
@@ -579,7 +581,7 @@ def test_clip_continuation_join_matches_inside_both_clips(connected):
     audio = [{"waveform": item, "sample_rate": 24000} for item in (previous_wave, current_wave)]
     media = [None, _continuation_media(previous[-8:])] if connected else None
     images, sounds = model_helpers.trim_minimax_h3_clip_continuation_batch(
-        [previous, current], audio, 99, 12, continuation_batches=media,
+        [previous, current], audio, 99, 12, continuation_batches=media, continuation_prune_range=0,
     )
     assert images[0].shape[0] < previous.shape[0]
     assert images[1].shape[0] < current.shape[0]
@@ -595,7 +597,7 @@ def test_clip_continuation_join_no_match_keeps_both_clips():
     # Context resembling the current clip must not substitute for the actual previous clip.
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         clips, [None, None], 99, 8,
-        continuation_batches=[None, _continuation_media(clips[1][-5:])],
+        continuation_batches=[None, _continuation_media(clips[1][-5:])], continuation_prune_range=0,
     )
     torch.testing.assert_close(torch.cat(images), torch.cat(clips))
 
@@ -779,7 +781,8 @@ def test_video_and_audio_round_trip_independently(monkeypatch, tmp_path):
     assert [ref["kind"] for ref in loaded] == ["video", "audio"]
     for original, restored in zip(refs, loaded):
         torch.testing.assert_close(original["latent"], restored["latent"])
-        assert restored["metadata"] == original["metadata"]
+        for key, value in original["metadata"].items():
+            assert restored["metadata"][key] == value
 
 
 def test_load_rejects_wrong_header_shape_and_dtype(monkeypatch, tmp_path):

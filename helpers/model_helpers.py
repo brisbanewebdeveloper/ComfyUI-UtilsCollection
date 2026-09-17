@@ -500,6 +500,7 @@ def align_minimax_h3_clip_continuation_join(
     previous: torch.Tensor, current: torch.Tensor, threshold: float, maximum_frames: int,
     near_identical_tolerance: float = 1.0, *, continuation_frames=None,
     previous_audio=None, current_audio=None, fps: int = 24,
+    minimum_overlap_frames: int = 0,
 ) -> tuple[int, int] | None:
     """Score local temporal sequences, then choose an aligned two-sided seam."""
     logger = logging.getLogger(__name__)
@@ -507,6 +508,13 @@ def align_minimax_h3_clip_continuation_join(
         raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
     reference_count = min(int(maximum_frames), previous.shape[0])
     query_count = min(int(maximum_frames), current.shape[0])
+    minimum_overlap = int(minimum_overlap_frames)
+    if continuation_frames is not None:
+        context_candidates = rank_minimax_h3_continuation_media_candidates(
+            continuation_frames, current, maximum_frames, near_identical_tolerance
+        )
+        if context_candidates:
+            minimum_overlap = min(overlap for overlap, _distance in context_candidates)
     if min(reference_count, query_count) < 2:
         logger.warning("H3 join unchanged: search windows contain fewer than two frames.")
         return None
@@ -548,6 +556,8 @@ def align_minimax_h3_clip_continuation_join(
     for offset in range(-query_count + 2, reference_count - 1):
         first_start, second_start = max(offset, 0), max(-offset, 0)
         count = min(reference_count - first_start, query_count - second_start)
+        if count < minimum_overlap:
+            continue
         first = reference_features[first_start:first_start + count]
         second = query_features[second_start:second_start + count]
         hashes_first = reference_signatures[first_start:first_start + count]
@@ -743,6 +753,7 @@ def trim_minimax_h3_clip_continuation_batch(
     threshold: float, maximum_frames: int,
     near_identical_tolerance: float = 1.0,
     *, continuation_batches: Sequence[dict | None] | None = None,
+    continuation_prune_range: float = 50.0,
 ) -> tuple[list[torch.Tensor], list[dict | None]]:
     """Trim detected continuation overlap once, after a complete batch is collected."""
     if not image_batches or len(image_batches) != len(audio_batches):
@@ -757,14 +768,26 @@ def trim_minimax_h3_clip_continuation_batch(
         frames = None
         if media is not None:
             frames = validate_minimax_h3_clip_continuation_media(media)
+        prune_range = float(continuation_prune_range)
+        if not 0.0 <= prune_range <= 100.0:
+            raise ValueError("MiniMax H3 continuation prune range must be from 0 to 100 percent.")
+        initial_prune = 0
+        search_previous, search_images = previous, images
+        previous_audio = accumulate_minimax_h3_clip_continuations(trimmed_images, trimmed_audio)[1]
+        search_previous_audio, search_audio = previous_audio, audio
+        if frames is not None and prune_range:
+            initial_prune = min(previous.shape[0] - 1, images.shape[0] - 1, round(frames.shape[0] * prune_range / 100.0))
+            search_previous, search_previous_audio = trim_minimax_h3_clip_continuation(previous, previous_audio, 0, initial_prune)
+            search_images, search_audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune, 0)
         join = align_minimax_h3_clip_continuation_join(
-            previous, images, threshold, maximum_frames,
-            previous_audio=accumulate_minimax_h3_clip_continuations(
-                trimmed_images, trimmed_audio
-            )[1],
-            current_audio=audio,
+            search_previous, search_images, threshold, maximum_frames,
+            previous_audio=search_previous_audio,
+            current_audio=search_audio,
             near_identical_tolerance=near_identical_tolerance,
             continuation_frames=frames,
+            minimum_overlap_frames=(
+                round(frames.shape[0] * prune_range / 100.0) if frames is not None else 0
+            ),
         )
         if join is not None:
             previous_keep, current_skip = join
@@ -776,7 +799,17 @@ def trim_minimax_h3_clip_continuation_batch(
                 trimmed_images[-1], trimmed_audio[-1] = trim_minimax_h3_clip_continuation(
                     trimmed_images[-1], trimmed_audio[-1], 0, remove
                 )
-            images, audio = trim_minimax_h3_clip_continuation(images, audio, current_skip)
+            images, audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune + current_skip)
+        elif initial_prune:
+            remove = initial_prune
+            while remove >= trimmed_images[-1].shape[0]:
+                remove -= trimmed_images.pop().shape[0]
+                trimmed_audio.pop()
+            if remove:
+                trimmed_images[-1], trimmed_audio[-1] = trim_minimax_h3_clip_continuation(
+                    trimmed_images[-1], trimmed_audio[-1], 0, remove
+                )
+            images, audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune, 0)
         trimmed_images.append(images)
         trimmed_audio.append(audio)
     return trimmed_images, trimmed_audio
@@ -800,6 +833,8 @@ def find_minimax_h3_clip_continuation_overlap(
         raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
     if isinstance(fps, bool) or not isinstance(fps, numbers.Real) or fps <= 0:
         raise ValueError("MiniMax H3 Clip Continuation overlap fps must be positive.")
+    if not isinstance(near_identical_tolerance, numbers.Real) or near_identical_tolerance < 0:
+        return 0
     limit = min(int(maximum_frames), previous.shape[0], current.shape[0] - 1)
     if candidate_overlaps is None:
         candidate_overlaps = rank_video_overlap_candidates(
@@ -833,11 +868,15 @@ def find_minimax_h3_clip_continuation_overlap(
         visual_second = visual_current[:overlap]
         frame_similarity = F.cosine_similarity(visual_first, visual_second, dim=1).clamp(-1, 1)
         sequence_similarity = frame_similarity.clamp_min(0).quantile(0.15).item()
+        if sequence_similarity * 100 < float(threshold):
+            continue
         if overlap > 1:
             first_motion = visual_first[1:] - visual_first[:-1]
             second_motion = visual_second[1:] - visual_second[:-1]
             motion_similarity = 1.0 - (first_motion - second_motion).abs().mean(dim=1).clamp(0, 1)
-            sequence_similarity = 0.7 * sequence_similarity + 0.3 * motion_similarity.quantile(0.15).item()
+            # Multi-frame overlap is a temporal contract: static scenery must
+            # not dominate the score, so compare motion signatures directly.
+            sequence_similarity = motion_similarity.clamp_min(0).quantile(0.15).item()
         if sequence_similarity * 100 < float(threshold):
             continue
         if audio_enabled:
@@ -853,12 +892,7 @@ def find_minimax_h3_clip_continuation_overlap(
         valid_candidates.append((overlap, sequence_similarity))
     if not valid_candidates:
         return 0
-    best_similarity = max(similarity for _, similarity in valid_candidates)
-    similarity_floor = best_similarity - float(near_identical_tolerance) / 100.0
-    return max(
-        (overlap for overlap, similarity in valid_candidates if similarity >= similarity_floor),
-        default=0,
-    )
+    return max(valid_candidates, key=lambda item: (item[1], item[0]), default=(0, 0.0))[0]
 
 
 def _continuation_visual_features(frames: torch.Tensor) -> torch.Tensor:
