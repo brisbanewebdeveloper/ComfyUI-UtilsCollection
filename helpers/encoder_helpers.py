@@ -665,12 +665,12 @@ def minimax_h3_qwen_video_samples(
     if merge_mode == "temporal fusion" and continuation_frames is not None and video_frames is not None:
         return prepare_minimax_h3_continuation_fusion_video(continuation_frames, video_frames, video_fps)[:2]
     if continuation_frames is not None:
-        interior_frames = continuation_frames[1:-1]
+        interior_frames = continuation_frames[1:]
         if interior_frames.shape[0]:
             samples.append(interior_frames)
             timestamps.extend(
                 Fraction(index, 24)
-                for index in range(1, continuation_frames.shape[0] - 1)
+                for index in range(1, continuation_frames.shape[0])
             )
         offset = Fraction(continuation_frames.shape[0], 24)
     if video_frames is not None:
@@ -4184,6 +4184,12 @@ def execute_advanced_minimax_h3_image_to_video(
     if audio_reference is not None:
         references.append(audio_reference)
     if positioned_video_keyframes:
+        if continuation_frames is not None:
+            merge_mode = continuation_media.get("video_merge_mode", "replace") if continuation_media is not None else "replace"
+            if merge_mode in ("replace", "prepend"):
+                positioned_video_keyframes = align_minimax_h3_continuation_keyframes(
+                    positioned_video_keyframes, continuation_frames.shape[0], merge_mode
+                )
         keyframes.extend(positioned_video_keyframes)
         keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
     if continuation_audio_reference is not None:

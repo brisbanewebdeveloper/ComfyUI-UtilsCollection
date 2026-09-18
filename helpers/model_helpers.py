@@ -659,93 +659,12 @@ def find_minimax_h3_clip_continuation_join(
     near_identical_tolerance: float = 1.0, *, continuation_frames=None,
     previous_audio=None, current_audio=None, fps: int = 24,
 ) -> tuple[int, int] | None:
-    """Locate a shared interior sequence and return both sides of its splice."""
-    if tuple(previous.shape[1:]) != tuple(current.shape[1:]):
-        raise ValueError("MiniMax H3 Clip Continuation overlap matching requires image batches with matching geometry.")
-    context_count = previous.shape[0] if continuation_frames is None else continuation_frames.shape[0]
-    reference_count = min(int(maximum_frames), context_count, previous.shape[0])
-    query_count = min(int(maximum_frames), current.shape[0])
-    if min(reference_count, query_count) < 2:
-        return None
-    # Saved context can differ from decoded output; score the pixels being joined.
-    reference = previous[-reference_count:]
-    query = current[:query_count]
-    origin = previous.shape[0] - reference_count
-    compare_type = MINIMAX_H3_CONTINUATION_CANDIDATE_COMPARE_TYPE
-    reference_signatures = compute_video_signatures(reference, compare_type)
-    query_signatures = compute_video_signatures(query, compare_type)
-    reference_features = _continuation_visual_features(reference)
-    query_features = _continuation_visual_features(query)
-    audio_first = _continuation_audio_waveform(previous_audio) if previous_audio is not None else None
-    audio_second = _continuation_audio_waveform(current_audio) if current_audio is not None else None
-    if audio_first is not None and audio_second is not None and (
-        audio_first[1] != audio_second[1] or audio_first[0].shape[0] != audio_second[0].shape[0]
-    ):
-        raise ValueError("MiniMax H3 Clip Continuation overlap audio must have matching sample rates and channels.")
-    candidates = []
-    minimum = float(threshold) / 100.0
-    for offset in range(-query_count + 2, reference_count - 1):
-        first_start, second_start = max(offset, 0), max(-offset, 0)
-        count = min(reference_count - first_start, query_count - second_start)
-        first = reference_features[first_start:first_start + count]
-        second = query_features[second_start:second_start + count]
-        hashes_first = reference_signatures[first_start:first_start + count]
-        hashes_second = query_signatures[second_start:second_start + count]
-        hash_similarity = 1.0 - (hashes_first != hashes_second).float().mean(dim=1)
-        frame_similarity = F.cosine_similarity(first, second, dim=1).clamp(0, 1)
-        matches = ((hash_similarity >= minimum) & (frame_similarity >= minimum)).tolist()
-        run_start = None
-        for stop, matched in enumerate([*matches, False]):
-            if matched:
-                if run_start is None:
-                    run_start = stop
-                continue
-            if run_start is None:
-                continue
-            start, run_start = run_start, None
-            length = stop - start
-            if length < 2:
-                continue
-            first_motion = first[start + 1:stop] - first[start:stop - 1]
-            second_motion = second[start + 1:stop] - second[start:stop - 1]
-            motion = 1.0 - (first_motion - second_motion).abs().mean(dim=1).clamp(0, 1)
-            visual_score = 0.7 * frame_similarity[start:stop].quantile(0.15).item() + 0.3 * motion.quantile(0.15).item()
-            if visual_score < minimum:
-                continue
-            correlation = cross_correlate_video_signatures(
-                hashes_first[start:stop], hashes_second[start:stop], compare_type,
-                min_offset_frames=0, max_offset_frames=0,
-            )
-            score = min(visual_score, 1.0 - correlation.distance)
-            previous_start = origin + first_start + start
-            current_start = second_start + start
-            if audio_first is not None and audio_second is not None:
-                rate = audio_first[1]
-                samples = round(length * rate / fps)
-                left_start = round(previous_start * rate / fps)
-                right_start = round(current_start * rate / fps)
-                left = audio_first[0][:, left_start:left_start + samples]
-                right = audio_second[0][:, right_start:right_start + samples]
-                if left.shape[-1] != samples or right.shape[-1] != samples:
-                    continue
-                similarity = audio_overlap_similarity(left, right, length, fps, rate)
-                if similarity is None or similarity < minimum * 0.8:
-                    continue
-                score = 0.6 * score + 0.4 * similarity
-            midpoint = (length + 1) // 2
-            previous_keep, current_skip = previous_start + midpoint, current_start + midpoint
-            if previous_keep < 1 or current_skip >= current.shape[0]:
-                continue
-            candidates.append((score, length, previous_keep, current_skip))
-    if not candidates:
-        return None
-    floor = max(item[0] for item in candidates) - float(near_identical_tolerance) / 100.0
-    chosen = max(
-        (item for item in candidates if item[0] >= floor),
-        key=lambda item: (item[1], item[0], item[2], -item[3]),
-        default=None,
+    """Forward legacy join to the active seam alignment implementation."""
+    return align_minimax_h3_clip_continuation_join(
+        previous, current, threshold, maximum_frames,
+        near_identical_tolerance, continuation_frames=continuation_frames,
+        previous_audio=previous_audio, current_audio=current_audio, fps=fps,
     )
-    return None if chosen is None else (chosen[2], chosen[3])
 
 
 def trim_minimax_h3_clip_continuation_batch(
@@ -753,7 +672,7 @@ def trim_minimax_h3_clip_continuation_batch(
     threshold: float, maximum_frames: int,
     near_identical_tolerance: float = 1.0,
     *, continuation_batches: Sequence[dict | None] | None = None,
-    continuation_prune_range: float = 50.0,
+    continuation_prune_range: float = 0.0,
 ) -> tuple[list[torch.Tensor], list[dict | None]]:
     """Trim detected continuation overlap once, after a complete batch is collected."""
     if not image_batches or len(image_batches) != len(audio_batches):
@@ -773,20 +692,24 @@ def trim_minimax_h3_clip_continuation_batch(
             raise ValueError("MiniMax H3 continuation prune range must be from 0 to 100 percent.")
         initial_prune = 0
         search_previous, search_images = previous, images
+        search_frames = frames
         previous_audio = accumulate_minimax_h3_clip_continuations(trimmed_images, trimmed_audio)[1]
         search_previous_audio, search_audio = previous_audio, audio
-        if frames is not None and prune_range:
-            initial_prune = min(previous.shape[0] - 1, images.shape[0] - 1, round(frames.shape[0] * prune_range / 100.0))
-            search_previous, search_previous_audio = trim_minimax_h3_clip_continuation(previous, previous_audio, 0, initial_prune)
-            search_images, search_audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune, 0)
+        if frames is not None and prune_range > 0:
+            initial_prune = min(previous.shape[0] - 1, images.shape[0] - 1, round(frames.shape[0] * (prune_range / 2) / 100.0))
+            if initial_prune:
+                search_previous, search_previous_audio = trim_minimax_h3_clip_continuation(previous, previous_audio, 0, initial_prune)
+                search_images, search_audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune, 0)
+                search_frames = frames[:-initial_prune]
         join = align_minimax_h3_clip_continuation_join(
             search_previous, search_images, threshold, maximum_frames,
             previous_audio=search_previous_audio,
             current_audio=search_audio,
             near_identical_tolerance=near_identical_tolerance,
-            continuation_frames=frames,
+            continuation_frames=search_frames,
             minimum_overlap_frames=(
-                round(frames.shape[0] * prune_range / 100.0) if frames is not None else 0
+                max(2, round(frames.shape[0] * max(0.0, 100.0 - prune_range) / 100.0))
+                if frames is not None and prune_range > 0 else 0
             ),
         )
         if join is not None:
@@ -800,16 +723,6 @@ def trim_minimax_h3_clip_continuation_batch(
                     trimmed_images[-1], trimmed_audio[-1], 0, remove
                 )
             images, audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune + current_skip)
-        elif initial_prune:
-            remove = initial_prune
-            while remove >= trimmed_images[-1].shape[0]:
-                remove -= trimmed_images.pop().shape[0]
-                trimmed_audio.pop()
-            if remove:
-                trimmed_images[-1], trimmed_audio[-1] = trim_minimax_h3_clip_continuation(
-                    trimmed_images[-1], trimmed_audio[-1], 0, remove
-                )
-            images, audio = trim_minimax_h3_clip_continuation(images, audio, initial_prune, 0)
         trimmed_images.append(images)
         trimmed_audio.append(audio)
     return trimmed_images, trimmed_audio

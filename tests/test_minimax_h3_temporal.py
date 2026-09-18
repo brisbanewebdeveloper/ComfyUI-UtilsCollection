@@ -24,19 +24,20 @@ from utils_collection_test.helpers.minimax_h3_temporal_helpers import (
 
 def test_continuation_pairs_preserve_reference_times_and_every_interior_frame():
     indices, pairs = minimax_h3_continuation_frame_pairs(56, 22, [0, 12, 24, 36, 48])
-    assert indices == [*range(21), 24, 36, 48]
+    assert indices == [*range(22), 24, 36, 48]
     assert pairs[0] == [(0, 1), (0, 57)]
-    assert pairs[-2] == [(20, 24), (76, 24)]
-    assert pairs[-1] == [(36, 48)]
+    assert pairs[-3] == [(20, 21), (76, 77)]
+    assert pairs[-2] == [(24, 36)]
+    assert pairs[-1] == [(48, 48)]
     tail_indices = [value - 56 for block in pairs if len(block) > 1 for value in block[1] if value >= 56]
-    assert tail_indices == list(range(1, 21))
+    assert tail_indices == list(range(1, 22))
 
 
 def test_continuation_pairs_keep_context_beyond_short_reference_and_pad_odd_sample():
     indices, pairs = minimax_h3_continuation_frame_pairs(5, 22, [0])
-    assert indices == list(range(21))
-    assert pairs[-1] == [(25, 25)]
-    assert all(5 not in pair and 26 not in pair for block in pairs for pair in block)
+    assert indices == list(range(22))
+    assert pairs[-1] == [(25, 26)]
+    assert all(5 not in pair and 27 not in pair for block in pairs for pair in block)
 
 
 @pytest.mark.parametrize(

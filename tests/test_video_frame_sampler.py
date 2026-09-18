@@ -709,26 +709,30 @@ def test_h3_indexed_segments_cover_source_without_borrowing_padding(source_rate,
         audio={"waveform": torch.arange(round(source_count / source_rate * 32000), dtype=torch.float32).view(1, 1, -1), "sample_rate": 32000},
     )
     total = round(source_count / source_rate * 24)
+    starts = [0, 260, 520]
+    stops = [260, 520, total]
+    lengths = [260, 260, 260]
+    paddings = [0, 0, 2]
     for index in range(3):
         frames, audio, _, _, length, _, preview = image_helpers.prepare_h3_reference_components(
             components, 0.01, duration_seconds=999, start_at_timestamp=999,
             spatially_prepared=True, segment_count=3, segment_index=index,
         )
-        start, stop = index * total // 3, (index + 1) * total // 3
+        start, stop = starts[index], stops[index]
         assert preview["start_frame"] == start
         assert preview["source_end_frame"] == stop - 1
-        assert preview["padded_frames"] == length - (stop - start)
+        assert preview["padded_frames"] == paddings[index]
+        assert length == lengths[index]
         expected = [min(round(frame * source_rate / 24), source_count - 1) for frame in range(start, stop)]
         assert frames[:stop - start, 0, 0, 0].tolist() == expected
-        assert frames[stop - start:, 0, 0, 0].eq(expected[-1]).all()
-        audio_stop = min(round((start + length) / 24 * 32000), components.audio["waveform"].shape[-1]) if index < 2 else min(round(stop / 24 * 32000), components.audio["waveform"].shape[-1])
+        if paddings[index]:
+            assert frames[stop - start:, 0, 0, 0].eq(expected[-1]).all()
+        audio_stop = min(round(stop / 24 * 32000), components.audio["waveform"].shape[-1])
         samples = audio_stop - round(start / 24 * 32000)
         assert audio["waveform"][0, 0, 0] == round(start / 24 * 32000)
         assert audio["waveform"][0, 0, samples - 1] == audio_stop - 1
-        if index == 2:
+        if paddings[index]:
             assert audio["waveform"][..., samples:].eq(0).all()
-        else:
-            assert audio["waveform"][0, 0, samples - 1] == audio_stop - 1
 
 
 def test_h3_reference_node_selects_zero_based_segment(monkeypatch):
@@ -740,12 +744,53 @@ def test_h3_reference_node_selects_zero_based_segment(monkeypatch):
     output = utils_nodes.UC_MiniMaxH3RefVid.execute(
         object(), segment_count=3, segment_index=1, enable_whisper=False,
     )
-    assert output.args[0][0, 0, 0, 0] == 24
-    assert output.args[0][-1, 0, 0, 0] == 47
+    assert output.args[0][0, 0, 0, 0] == 22
+    assert output.args[0][-1, 0, 0, 0] == 43
     assert output.args[5].get_components().images is output.args[0]
     assert output.args[5].get_components().audio is output.args[1]
     with pytest.raises(ValueError, match="segment index"):
         utils_nodes.UC_MiniMaxH3RefVid.execute(object(), segment_count=3, segment_index=3)
+
+
+def test_h3_reference_node_is_changed_tracks_segment_and_continuation():
+    node = utils_nodes.UC_MiniMaxH3RefVid
+    val0 = node.IS_CHANGED(object(), segment_count=3, segment_index=0)
+    val1 = node.IS_CHANGED(object(), segment_count=3, segment_index=1)
+    assert val0 != val1
+    cont = {"format_version": 1, "frame_rate": 24, "frames": torch.zeros(5, 16, 16, 3), "video_merge_mode": "replace"}
+    val_cont = node.IS_CHANGED(object(), segment_count=3, segment_index=0, continuation_media=cont)
+    assert val0 != val_cont
+
+
+@pytest.mark.parametrize("merge_mode", ["replace", "prepend"])
+def test_h3_reference_node_merges_continuation_media(monkeypatch, merge_mode):
+    components = types.SimpleNamespace(
+        images=torch.arange(72, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3),
+        frame_rate=24,
+        audio={"waveform": torch.arange(72000, dtype=torch.float32).view(1, 1, -1), "sample_rate": 24000},
+    )
+    monkeypatch.setattr(utils_nodes, "cached_h3_reference_components", lambda *args: components)
+    cont_frames = torch.full((5, 32, 32, 3), 99.0)
+    cont_audio = {"waveform": torch.full((1, 1, 10000), 88.0), "sample_rate": 32000}
+    continuation = {
+        "format_version": 1, "frame_rate": 24,
+        "frames": cont_frames, "audio": cont_audio,
+        "video_merge_mode": merge_mode,
+    }
+    output = utils_nodes.UC_MiniMaxH3RefVid.execute(
+        object(), segment_count=3, segment_index=0, enable_whisper=False, continuation_media=continuation,
+    )
+    frames = output.args[0]
+    assert frames[:5].eq(99.0).all()
+    if merge_mode == "replace":
+        assert frames[5, 0, 0, 0] == 5.0
+        assert frames.shape[0] == 22
+    else:
+        assert frames[5, 0, 0, 0] == 0.0
+        assert frames.shape[0] == 27
+    audio = output.args[1]
+    tail_samples = round(5 / 24 * 32000)
+    torch.testing.assert_close(audio["waveform"][..., :tail_samples], torch.full((1, 1, tail_samples), 88.0))
 
 
 def test_h3_segment_count_can_exceed_available_frames():
@@ -760,7 +805,7 @@ def test_h3_segment_count_can_exceed_available_frames():
     assert frames.eq(1).all()
     assert audio["waveform"][..., :1333].eq(1).all()
     assert audio["waveform"][..., 1333:].eq(0).all()
-    assert preview["padded_frames"] == 5
+    assert preview["padded_frames"] == 4
 
 
 def test_h3_reference_components_round_seconds_and_preserve_audio_start():

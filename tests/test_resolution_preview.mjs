@@ -16,9 +16,9 @@ test("H3 reference range preserves zero start and resolves remaining duration", 
 });
 
 test("indexed H3 segments share exact boundaries and report padding", () => {
-  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 0), { start: 0, end: 258, length: 260, padding: 1 });
-  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 1), { start: 259, end: 517, length: 260, padding: 1 });
-  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 2), { start: 518, end: 777, length: 260, padding: 0 });
+  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 0), { start: 0, end: 259, length: 260, padding: 0 });
+  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 1), { start: 260, end: 519, length: 260, padding: 0 });
+  assert.deepEqual(h3ReferenceFrameRange(99, 99, 32.4, 3, 2), { start: 520, end: 777, length: 260, padding: 2 });
   assert.deepEqual(h3ReferenceFrameRange(0, 0, null, 3, 0), { start: null, end: null, length: null });
   assert.deepEqual(h3ReferenceFrameRange(0, 0, 32.4, 3, 3), { start: null, end: null, length: null });
 });

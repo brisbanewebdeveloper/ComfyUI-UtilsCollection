@@ -1220,9 +1220,9 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
         if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video"
     )
     assert [float(frame.mean()) for frame in video_item["data"]] == pytest.approx(
-        [index / 21 for index in range(1, 21)]
+        [index / 21 for index in [*range(1, 22), 21]]
     )
-    assert video_item["timestamps"] == [Fraction(index, 24) for index in range(1, 21)]
+    assert video_item["timestamps"] == [Fraction(index, 24) for index in [*range(1, 22), 21]]
     tokens = clip.encoded_tokens[-1]["qwen3vl_32b"][0]
     text = "".join(entry[0] for entry in tokens if isinstance(entry[0], str))
     assert text.index("<Picture 1>") < text.index("<Picture 2>") < text.index("<Video 1>")
@@ -1244,12 +1244,12 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
     )
 
 
-@pytest.mark.parametrize("merge_mode,expected", [
-    ("replace", [0, 0, 17, 21, 34, 51]),
-    ("prepend", [0, 0, 17, 21, 34, 51]),
-    ("temporal fusion", [0, 0, 17, 21, 34, 51]),
+@pytest.mark.parametrize("merge_mode,expected,expected_means", [
+    ("replace", [0, 21, 34, 51], [0, 0, 1, 1]),
+    ("prepend", [0, 21, 22, 39, 56, 73], [0, 0, 1, 1, 1, 1]),
+    ("temporal fusion", [0, 0, 17, 21, 34, 51], [0, 1, 1, 0, 1, 1]),
 ])
-def test_clip_continuation_preserves_all_native_video_keyframes(merge_mode, expected):
+def test_clip_continuation_preserves_all_native_video_keyframes(merge_mode, expected, expected_means):
     class VideoVAE:
         def encode(self, frames):
             count = 2 if frames.shape[0] == 1 else ((frames.shape[0] - 5) // 17) * 5 + 2
@@ -1272,7 +1272,7 @@ def test_clip_continuation_preserves_all_native_video_keyframes(merge_mode, expe
     keyframes = conditioning[0][1]["minimax_keyframes"]
     assert [item["resolved_frame_index"] for item in keyframes] == expected
     assert conditioning[0][1]["minimax_frame_count"] == 56
-    assert [int(item["latent"].mean()) for item in keyframes] == [0, 1, 1, 0, 1, 1]
+    assert [int(item["latent"].mean()) for item in keyframes] == expected_means
     text = "".join(entry[0] for entry in clip.encoded_tokens[-1]["qwen3vl_32b"][0] if isinstance(entry[0], str))
     assert prompt in text
 
@@ -1316,7 +1316,8 @@ def test_clip_continuation_temporal_fusion_keeps_text_times_and_fuses_video_only
         else:
             assert first is second
     assert sum(abs(value - 0.2) < 1e-5 for value in alternate_frames) == 20
-    assert all(abs(value - 0.2) < 1e-5 or abs(value - 0.8) < 1e-5 for value in alternate_frames)
+    assert sum(abs(value - 0.3) < 1e-5 for value in alternate_frames) == 1
+    assert all(abs(value - 0.2) < 1e-5 or abs(value - 0.3) < 1e-5 or abs(value - 0.8) < 1e-5 for value in alternate_frames)
     tensor = output.args[0][0][0]
     spans = encoder_helpers.build_token_to_conditioning_map(canonical, tensor)
     for first, second, (start, end) in zip(canonical, alternate, spans):
@@ -1327,7 +1328,7 @@ def test_clip_continuation_temporal_fusion_keeps_text_times_and_fuses_video_only
     assert prompt in text
     video_item = next(call["minimax_ref_items"][0] for call in clip.tokenize_calls
                       if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video")
-    assert video_item["timestamps"] == [Fraction(index, 24) for index in [*range(21), 24, 36, 48]]
+    assert video_item["timestamps"] == [Fraction(index, 24) for index in [*range(22), 24, 36, 48, 48]]
     metadata = output.args[0][0][1]
     assert metadata["minimax_frame_count"] == 56
     assert [item["resolved_frame_index"] for item in metadata["minimax_keyframes"]] == [0, 21]
@@ -1445,20 +1446,20 @@ def test_clip_continuation_qwen_video_keeps_interior_tail_before_ordinary_video(
     frames, timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2
     )
-    assert frames.shape == (22, 64, 96, 3)
-    torch.testing.assert_close(frames[:20], continuation[1:-1])
-    torch.testing.assert_close(frames[20:], torch.ones(2, 64, 96, 3))
+    assert frames.shape == (23, 64, 96, 3)
+    torch.testing.assert_close(frames[:21], continuation[1:])
+    torch.testing.assert_close(frames[21:], torch.ones(2, 64, 96, 3))
 
     prepended, prepended_timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2, "prepend"
     )
-    assert prepended.shape == (24, 64, 96, 3)
+    assert prepended.shape == (25, 64, 96, 3)
     assert prepended_timestamps == [
-        *[Fraction(index, 24) for index in range(1, 21)],
+        *[Fraction(index, 24) for index in range(1, 22)],
         Fraction(22, 24), Fraction(34, 24), Fraction(46, 24), Fraction(58, 24),
     ]
     assert timestamps == [
-        *[Fraction(index, 24) for index in range(1, 21)],
+        *[Fraction(index, 24) for index in range(1, 22)],
         Fraction(22, 24), Fraction(34, 24),
     ]
 

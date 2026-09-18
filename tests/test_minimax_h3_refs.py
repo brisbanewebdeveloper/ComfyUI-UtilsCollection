@@ -422,6 +422,16 @@ def test_clip_continuation_overlap_prefers_deepest_near_identical_boundary(monke
     ) == 3
 
 
+def test_clip_continuation_overlap_static_dissimilar_scenes_rejected():
+    previous = torch.zeros(5, 8, 8, 3)
+    previous[..., 0] = 1.0
+    current = torch.zeros(5, 8, 8, 3)
+    current[..., 2] = 1.0
+    assert model_helpers.find_minimax_h3_clip_continuation_overlap(
+        previous, current, threshold=80,
+    ) == 0
+
+
 def _continuation_media(frames, **metadata):
     return {"format_version": 1, "frame_rate": 24, "frames": frames, **metadata}
 
@@ -437,7 +447,7 @@ def test_clip_continuation_media_measures_offset_and_audio_cut(cut, merge_mode):
     audios = [{"waveform": wave, "sample_rate": 24000} for wave in (previous_wave, current_wave)]
     images, audio = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], audios, 99, 10,
-            continuation_batches=[None, _continuation_media(previous[-5:], video_merge_mode=merge_mode)], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(previous[-5:], video_merge_mode=merge_mode)],
     )
     torch.testing.assert_close(torch.cat(images), torch.cat((previous, current[cut:])))
     torch.testing.assert_close(torch.cat([item["waveform"] for item in audio], dim=-1),
@@ -491,7 +501,7 @@ def test_clip_continuation_media_pixel_difference_uses_actual_queued_clips():
     current = torch.cat((previous[-5:], previous[:2]))
     node.execute(previous, target_batches=2, first_batch_reset=True, unique_id=key)
     saved = (previous[-5:] * 0.95 + 0.02).clone()
-    output = node.execute(current, target_batches=2, overlap_threshold=99, continuation_prune_range=0,
+    output = node.execute(current, target_batches=2, overlap_threshold=99,
                           continuation_media=_continuation_media(saved), unique_id=key)
     torch.testing.assert_close(output.args[0], torch.cat((previous, current[5:])))
     assert key not in utils_nodes._MINIMAX_H3_CLIP_ACCUMULATION
@@ -504,13 +514,13 @@ def test_clip_continuation_media_respects_limit_and_retains_new_frames(maximum, 
     current = torch.cat((previous[-repeated_frames:], previous[:2]))
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], [None, None], 99, maximum,
-        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])],
     )
     expected_total = previous.shape[0] + remaining if maximum >= repeated_frames else previous.shape[0] + current.shape[0]
     assert sum(item.shape[0] for item in images) == expected_total
     one, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current[:1]], [None, None], 99, maximum,
-        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(previous[-repeated_frames:])],
     )
     torch.testing.assert_close(one[1], current[:1])
 
@@ -520,7 +530,7 @@ def test_clip_continuation_media_validates_original_clip_after_prior_trim():
     clips = [frames[:8], frames[3:10], frames[5:15]]
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         clips, [None] * 3, 99, 10,
-        continuation_batches=[None, _continuation_media(clips[0][-5:]), _continuation_media(clips[1][-5:])], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(clips[0][-5:]), _continuation_media(clips[1][-5:])],
     )
     torch.testing.assert_close(torch.cat(images), frames)
     with pytest.raises(ValueError, match="one continuation entry"):
@@ -534,7 +544,7 @@ def test_clip_continuation_media_silent_and_short_audio_is_neutral(sample_rate, 
     audio = {"waveform": torch.zeros(1, 1, samples), "sample_rate": sample_rate}
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         [previous, current], [audio, audio], 99, 7,
-        continuation_batches=[None, _continuation_media(previous[-5:])], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(previous[-5:])],
     )
     torch.testing.assert_close(torch.cat(images), torch.cat((previous, current[5:])))
 
@@ -581,7 +591,7 @@ def test_clip_continuation_join_matches_inside_both_clips(connected):
     audio = [{"waveform": item, "sample_rate": 24000} for item in (previous_wave, current_wave)]
     media = [None, _continuation_media(previous[-8:])] if connected else None
     images, sounds = model_helpers.trim_minimax_h3_clip_continuation_batch(
-        [previous, current], audio, 99, 12, continuation_batches=media, continuation_prune_range=0,
+        [previous, current], audio, 99, 12, continuation_batches=media,
     )
     assert images[0].shape[0] < previous.shape[0]
     assert images[1].shape[0] < current.shape[0]
@@ -597,9 +607,22 @@ def test_clip_continuation_join_no_match_keeps_both_clips():
     # Context resembling the current clip must not substitute for the actual previous clip.
     images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
         clips, [None, None], 99, 8,
-        continuation_batches=[None, _continuation_media(clips[1][-5:])], continuation_prune_range=0,
+        continuation_batches=[None, _continuation_media(clips[1][-5:])],
     )
     torch.testing.assert_close(torch.cat(images), torch.cat(clips))
+
+
+def test_clip_continuation_prune_range_preserves_overlap_and_aligns():
+    generator = torch.Generator().manual_seed(77)
+    timeline = torch.rand(18, 24, 24, 3, generator=generator)
+    previous = timeline[:12]
+    current = timeline[6:]
+    images, _ = model_helpers.trim_minimax_h3_clip_continuation_batch(
+        [previous, current], [None, None], 99, 10,
+        continuation_batches=[None, _continuation_media(previous[-6:])],
+        continuation_prune_range=30.0,
+    )
+    torch.testing.assert_close(torch.cat(images), timeline)
 
 
 def test_clip_continuation_join_saved_pixels_resolve_competing_offsets(caplog):

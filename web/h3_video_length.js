@@ -18,10 +18,21 @@ export function h3ReferenceFrameRange(startSeconds, durationSeconds, sourceSecon
     const value = sourceSeconds * 24;
     const rounded = Math.round(value);
     const total = Math.max(1, Math.abs(value % 1) === 0.5 && rounded % 2 !== 0 ? rounded - 1 : rounded);
-    const start = Math.floor(segmentIndex * total / segmentCount);
-    const stop = Math.floor((segmentIndex + 1) * total / segmentCount);
-    const length = h3VideoLengthFromSeconds((stop - start) / 24);
-    return { start, end: stop - 1, length, padding: length - (stop - start) };
+    const targetF = total / segmentCount;
+    let k = Math.max(0, Math.round((targetF - 5) / 17));
+    while (k > 0 && (segmentCount - 1) * (5 + 17 * k) >= total) {
+      k--;
+    }
+    const nonFinalLength = 5 + 17 * k;
+    const start = segmentIndex * nonFinalLength;
+    if (segmentIndex < segmentCount - 1) {
+      const length = nonFinalLength;
+      const stop = Math.min(total, start + length);
+      return { start, end: stop - 1, length, padding: length - (stop - start) };
+    }
+    const remaining = Math.max(1, total - start);
+    const length = h3VideoLengthFromSeconds(remaining / 24);
+    return { start, end: total - 1, length, padding: length - remaining };
   }
   const start = startSeconds === 0 ? 0 : h3VideoLengthFromSeconds(startSeconds);
   if (start === null) return { start: null, end: null, length: null };
