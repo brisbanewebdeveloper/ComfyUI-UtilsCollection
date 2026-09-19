@@ -21,6 +21,54 @@ from utils_collection_whisper_test.helpers import whisper_timing_helpers as timi
 from utils_collection_whisper_test.models.whisper import MultiHeadAttention
 
 
+@pytest.mark.parametrize("num_languages,translate,transcribe,timestamp", [(99, 50358, 50359, 50364), (100, 50359, 50360, 50365)])
+def test_removed_language_preserves_checkpoint_token_ids(num_languages, translate, transcribe, timestamp):
+    tokenizer = helpers.whisper_get_tokenizer(True, num_languages=num_languages)
+    expected = {
+        "<|startoftranscript|>": 50258,
+        "<|su|>": 50357,
+        "<|translate|>": translate,
+        "<|transcribe|>": transcribe,
+        "<|0.00|>": timestamp,
+    }
+    for token, token_id in expected.items():
+        assert tokenizer.encoding.encode_single_token(token) == token_id
+    if num_languages == 100:
+        cantonese = helpers.whisper_get_tokenizer(True, num_languages=100, language="yue")
+        assert cantonese.sot_sequence == (50258, 50358, 50360)
+        assert "yue" in cantonese.all_language_codes
+    else:
+        assert "yue" not in tokenizer.all_language_codes
+        with pytest.raises(ValueError, match="checkpoint does not support language"):
+            helpers.run_whisper(types.SimpleNamespace(model=types.SimpleNamespace(num_languages=99)), None, "transcribe", "yue")
+
+
+@pytest.mark.parametrize("num_languages", [99, 100])
+def test_sundanese_is_rejected_and_excluded_from_detection(num_languages):
+    tokenizer = helpers.whisper_get_tokenizer(True, num_languages=num_languages)
+    language = tokenizer.encoding.decode([50357]).strip("<|>")
+    assert language not in helpers.WHISPER_LANGUAGES
+    for requested in (language, "sundanese"):
+        with pytest.raises(ValueError, match="Unsupported language"):
+            helpers.whisper_get_tokenizer(True, num_languages=num_languages, language=requested)
+        with pytest.raises(ValueError, match="Unknown Whisper language"):
+            helpers.run_whisper(None, None, "transcribe", requested)
+    with pytest.raises(KeyError, match="not found in tokenizer"):
+        tokenizer.to_language_token(language)
+
+    def logits(tokens, mel):
+        scores = torch.zeros(1, 1, tokenizer.encoding.n_vocab)
+        scores[..., 50357] = 100
+        scores[..., tokenizer.language_token] = 10
+        return scores
+
+    model = types.SimpleNamespace(dims=types.SimpleNamespace(n_audio_ctx=2, n_audio_state=3), logits=logits)
+    detected, probabilities = helpers.detect_whisper_language(model, torch.zeros(1, 2, 3), tokenizer)
+    assert detected.tolist() == [tokenizer.language_token]
+    assert language not in probabilities[0]
+    assert ("yue" in probabilities[0]) == (num_languages == 100)
+
+
 def test_alignment_scores_do_not_change_native_attention_output():
     attention = MultiHeadAttention(8, 2, torch.nn)
     x = torch.arange(24, dtype=torch.float32).reshape(1, 3, 8) / 24

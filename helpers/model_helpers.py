@@ -1688,9 +1688,12 @@ WHISPER_LANGUAGES = {
     "ha": "hausa",
     "ba": "bashkir",
     "jw": "javanese",
-    "su": "sundanese",
     "yue": "cantonese",
 }
+
+# Checkpoint vocabulary retains the unsupported Sundanese slot before Cantonese.
+WHISPER_LANGUAGE_TOKENS = tuple(f"<|{code}|>" for code in WHISPER_LANGUAGES)
+WHISPER_LANGUAGE_TOKENS = (*WHISPER_LANGUAGE_TOKENS[:98], "<|su|>", *WHISPER_LANGUAGE_TOKENS[98:])
 
 # language code lookup by name, with a few language aliases
 WHISPER_TO_LANGUAGE_CODE = {
@@ -1781,10 +1784,9 @@ class WhisperTokenizer:
         translate: int = self.special_tokens["<|translate|>"]
         transcribe: int = self.special_tokens["<|transcribe|>"]
 
-        langs = tuple(WHISPER_LANGUAGES.keys())[: self.num_languages]
         sot_sequence = [sot]
         if self.language is not None:
-            sot_sequence.append(sot + 1 + langs.index(self.language))
+            sot_sequence.append(self.to_language_token(self.language))
         if self.task is not None:
             task_token: int = transcribe if self.task == "transcribe" else translate
             sot_sequence.append(task_token)
@@ -1850,7 +1852,7 @@ class WhisperTokenizer:
         return self.to_language_token(self.language)
 
     def to_language_token(self, language):
-        if token := self.special_tokens.get(f"<|{language}|>", None):
+        if language in WHISPER_LANGUAGES and (token := self.special_tokens.get(f"<|{language}|>", None)):
             return token
 
         raise KeyError(f"Language {language} not found in tokenizer.")
@@ -1924,7 +1926,7 @@ def whisper_get_encoding(name: str = "gpt2", num_languages: int = 99):
     specials = [
         "<|endoftext|>",
         "<|startoftranscript|>",
-        *[f"<|{lang}|>" for lang in list(WHISPER_LANGUAGES.keys())[:num_languages]],
+        *WHISPER_LANGUAGE_TOKENS[:num_languages],
         "<|translate|>",
         "<|transcribe|>",
         "<|startoflm|>",
@@ -3104,7 +3106,7 @@ def run_whisper(patcher, audio, task, language, word_timestamps=False):
         raise ValueError(f"Unknown Whisper task: {task}")
     if language != "auto" and language not in WHISPER_LANGUAGES:
         raise ValueError(f"Unknown Whisper language: {language}")
-    if language != "auto" and list(WHISPER_LANGUAGES).index(language) >= patcher.model.num_languages:
+    if language != "auto" and WHISPER_LANGUAGE_TOKENS.index(f"<|{language}|>") >= patcher.model.num_languages:
         raise ValueError(f"Whisper checkpoint does not support language: {language}")
     recordings = prepare_whisper_audio(audio)
     comfy.model_management.load_models_gpu([patcher])
