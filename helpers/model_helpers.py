@@ -458,11 +458,13 @@ def snapshot_minimax_h3_clip_continuation_media(media: dict | None) -> dict | No
         return None
     frames = validate_minimax_h3_clip_continuation_media(media)
     snapshot = dict(media)
-    snapshot["frames"] = frames.detach().cpu().clone()
+    snapshot["frames"] = frames.detach().cpu().clone() if frames is not None else None
     if media.get("audio") is not None:
         _continuation_audio_waveform(media["audio"])
         snapshot["audio"] = dict(media["audio"])
         snapshot["audio"]["waveform"] = media["audio"]["waveform"].detach().cpu().clone()
+    else:
+        snapshot["audio"] = None
     return snapshot
 
 
@@ -833,19 +835,43 @@ def _continuation_audio_waveform(audio: dict) -> tuple[torch.Tensor, int]:
 
 
 def save_minimax_h3_clip_continuation_media(
-    frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int, audio: dict | None = None,
+    frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int,
+    audio: dict | None = None, padded_frames: int = 0,
 ) -> str:
     if isinstance(tail_frames, bool) or not isinstance(tail_frames, numbers.Integral) or tail_frames not in {5, 22, 39, 56}:
         raise ValueError("MiniMax H3 Clip Continuation tail frames must be 5, 22, 39, or 56.")
+    pad = int(padded_frames) if padded_frames is not None else 0
+    if pad < 0:
+        raise ValueError("Padded frames must be non-negative.")
     media = {"format_version": 1, "frame_rate": 24, "frames": frames}
     frames = validate_minimax_h3_clip_continuation_media(media)
-    if frames.shape[0] < tail_frames:
+    if pad == 0 and frames.shape[0] > tail_frames:
+        last_frame = frames[-1]
+        auto_pad = 0
+        for i in range(2, min(frames.shape[0] - tail_frames + 1, 18)):
+            if (frames[-i] == last_frame).all():
+                auto_pad = i - 1
+            else:
+                break
+        if auto_pad > 0:
+            is_silent = True
+            if audio is not None and isinstance(audio.get("waveform"), torch.Tensor):
+                rate = audio.get("sample_rate", 32000)
+                pad_s = round(auto_pad * rate / 24)
+                if pad_s > 0 and audio["waveform"][..., -pad_s:].abs().max() > 1e-4:
+                    is_silent = False
+            if is_silent:
+                pad = auto_pad
+    if frames.shape[0] < tail_frames + pad:
+        detail = f"needs {tail_frames} frames" if not pad else f"needs {tail_frames + pad} frames ({tail_frames} tail + {pad} padded)"
         raise ValueError(
-            f"MiniMax H3 Clip Continuation needs {tail_frames} frames but received {frames.shape[0]}."
+            f"MiniMax H3 Clip Continuation {detail} but received {frames.shape[0]}."
         )
     path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tail = frames[-tail_frames:].detach().cpu().contiguous()
+    stop_idx = frames.shape[0] - pad
+    start_idx = stop_idx - tail_frames
+    tail = frames[start_idx:stop_idx].detach().cpu().contiguous()
     audio_tail = None
     audio_rate = None
     if audio is not None:
@@ -853,8 +879,17 @@ def save_minimax_h3_clip_continuation_media(
         audio_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
         if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(audio_rate, int) or audio_rate <= 0:
             raise ValueError("MiniMax H3 Clip Continuation audio must be one mono or stereo waveform with a positive sample rate.")
-        sample_count = round(tail_frames * audio_rate / 24)
-        audio_tail = waveform[..., -sample_count:].detach().cpu().contiguous()
+        if audio_rate == 32000:
+            sample_count = round((tail_frames / 24) * 40) * 800
+            pad_samples = round((pad / 24) * 40) * 800
+        else:
+            sample_count = round(tail_frames * audio_rate / 24)
+            pad_samples = round(pad * audio_rate / 24)
+        active_wave = waveform[..., :-pad_samples] if pad_samples and waveform.shape[-1] > pad_samples else waveform
+        if active_wave.shape[-1] >= sample_count:
+            audio_tail = active_wave[..., -sample_count:].detach().cpu().contiguous()
+        else:
+            audio_tail = F.pad(active_wave, (sample_count - active_wave.shape[-1], 0)).detach().cpu().contiguous()
     metadata = {
         MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY: json.dumps(
             {
@@ -863,6 +898,7 @@ def save_minimax_h3_clip_continuation_media(
                 "shape": list(tail.shape),
                 "audio_shape": list(audio_tail.shape) if audio_tail is not None else None,
                 "audio_sample_rate": audio_rate,
+                "padded_frames": pad,
             },
             separators=(",", ":"), sort_keys=True,
         )
@@ -957,6 +993,8 @@ def _load_minimax_h3_clip_continuation_media_path(path: Path) -> dict:
         if metadata.get("audio_shape") != list(audio.shape) or metadata.get("audio_sample_rate") is None:
             raise ValueError("MiniMax H3 Clip Continuation file has invalid audio metadata.")
         result["audio"] = {"waveform": audio, "sample_rate": metadata["audio_sample_rate"]}
+    if "padded_frames" in metadata:
+        result["padded_frames"] = metadata["padded_frames"]
     return result
 
 

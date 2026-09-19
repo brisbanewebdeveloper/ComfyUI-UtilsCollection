@@ -787,10 +787,161 @@ def test_h3_reference_node_merges_continuation_media(monkeypatch, merge_mode):
         assert frames.shape[0] == 22
     else:
         assert frames[5, 0, 0, 0] == 0.0
-        assert frames.shape[0] == 27
+        assert frames.shape[0] == 22
     audio = output.args[1]
     tail_samples = round(5 / 24 * 32000)
     torch.testing.assert_close(audio["waveform"][..., :tail_samples], torch.full((1, 1, tail_samples), 88.0))
+
+
+def test_h3_reference_node_audio_only_continuation_media(monkeypatch):
+    components = types.SimpleNamespace(
+        images=torch.arange(72, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3),
+        frame_rate=24,
+        audio={"waveform": torch.arange(72000, dtype=torch.float32).view(1, 1, -1), "sample_rate": 24000},
+    )
+    monkeypatch.setattr(utils_nodes, "cached_h3_reference_components", lambda *args: components)
+    cont_audio = {"waveform": torch.full((1, 1, 10000), 88.0), "sample_rate": 32000}
+    continuation = {
+        "format_version": 1, "frame_rate": 24,
+        "frames": None, "audio": cont_audio,
+        "video_merge_mode": "replace",
+    }
+    output = utils_nodes.UC_MiniMaxH3RefVid.execute(
+        object(), segment_count=3, segment_index=0, enable_whisper=False, continuation_media=continuation,
+    )
+    frames = output.args[0]
+    assert frames[0, 0, 0, 0] == 0.0
+    audio = output.args[1]
+    assert audio["waveform"][0, 0, 0] == 88.0
+
+
+def test_h3_reference_node_video_only_continuation_prepends_source_audio(monkeypatch):
+    components = types.SimpleNamespace(
+        images=torch.arange(72, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3),
+        frame_rate=24,
+        audio={"waveform": torch.arange(72000, dtype=torch.float32).view(1, 1, -1), "sample_rate": 24000},
+    )
+    monkeypatch.setattr(utils_nodes, "cached_h3_reference_components", lambda *args: components)
+    cont_frames = torch.full((5, 32, 32, 3), 99.0)
+    continuation = {
+        "format_version": 1, "frame_rate": 24,
+        "frames": cont_frames, "audio": None,
+        "video_merge_mode": "prepend",
+    }
+    output = utils_nodes.UC_MiniMaxH3RefVid.execute(
+        object(), segment_count=3, segment_index=1, enable_whisper=False, continuation_media=continuation,
+    )
+    frames = output.args[0]
+    assert frames[:5].eq(99.0).all()
+    assert frames[5, 0, 0, 0] == 22.0
+    audio = output.args[1]
+    assert audio["waveform"][0, 0, 0] > 0
+    assert not audio["waveform"].eq(0).all()
+
+
+@pytest.mark.parametrize("tail", [5, 22, 39, 56])
+def test_h3_reference_node_prepend_continuation_zero_padding(tail):
+    components = types.SimpleNamespace(
+        images=torch.zeros(240, 32, 32, 3), frame_rate=24, audio=None,
+    )
+    cont_frames = torch.zeros(tail, 32, 32, 3)
+    continuation = {
+        "format_version": 1, "frame_rate": 24, "frames": cont_frames,
+        "video_merge_mode": "prepend",
+    }
+    frames, audio, _, _, length, _, preview = image_helpers.prepare_h3_reference_components(
+        components, 0.5, segment_count=5, segment_index=1,
+        continuation_media=continuation, spatially_prepared=True,
+    )
+    assert (frames.shape[0] - 5) % 17 == 0
+    assert frames.shape[0] == length
+    assert preview["padded_frames"] == 0
+
+
+def test_h3_reference_components_fifty_second_five_segments_chain():
+    total_frames = 1199
+    source_rate = 24.0
+    images = torch.arange(total_frames, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3)
+    waveform = torch.arange(round(total_frames / 24 * 32000), dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    components = types.SimpleNamespace(images=images, frame_rate=source_rate, audio={"waveform": waveform, "sample_rate": 32000})
+
+    prev_end = -1
+    for seg_idx in range(5):
+        cont = None
+        if seg_idx > 0:
+            cont = {
+                "format_version": 1, "frame_rate": 24,
+                "frames": torch.full((22, 32, 32, 3), 999.0),
+                "audio": {"waveform": torch.full((1, 2, 29600), 999.0), "sample_rate": 32000},
+                "video_merge_mode": "prepend",
+            }
+        frames, audio, _, _, length, _, preview = image_helpers.prepare_h3_reference_components(
+            components, 0.5, segment_count=5, segment_index=seg_idx,
+            continuation_media=cont, spatially_prepared=True,
+        )
+        start = preview["start_frame"]
+        end = preview["source_end_frame"]
+        if seg_idx < 4:
+            assert preview["padded_frames"] == 0
+            assert (length - 5) % 17 == 0
+        if seg_idx == 0:
+            assert start == 0
+            assert end == 242
+            assert length == 243
+        else:
+            assert start == prev_end + 1
+            if seg_idx < 4:
+                assert length == 260
+        prev_end = end
+    assert prev_end == 1198
+
+
+def test_h3_reference_components_windowed_decoding_matches_full():
+    total_frames = 1199
+    source_rate = 24.0
+    full_seconds = total_frames / source_rate
+    images = torch.arange(total_frames, dtype=torch.float32).view(-1, 1, 1, 1).expand(-1, 32, 32, 3)
+    waveform = torch.arange(round(full_seconds * 32000), dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    full_comp = types.SimpleNamespace(images=images, frame_rate=source_rate, audio={"waveform": waveform, "sample_rate": 32000})
+
+    for sc in (5, 6):
+        for si in range(sc):
+            cont = None
+            if si > 0:
+                cont = {
+                    "format_version": 1, "frame_rate": 24,
+                    "frames": torch.full((22, 32, 32, 3), 999.0),
+                    "audio": None,
+                    "video_merge_mode": "prepend",
+                }
+            # Full reference components call
+            f_frames, f_audio, _, _, f_length, _, f_prev = image_helpers.prepare_h3_reference_components(
+                full_comp, 0.5, segment_count=sc, segment_index=si,
+                continuation_media=cont, spatially_prepared=True,
+            )
+            # Simulated windowed reference components call
+            sf, fc, se, pt = image_helpers.resolve_h3_reference_window(full_seconds, 0.0, 0.0, sc, si, cont)
+            end_frame = se if se is not None else min(total_frames, sf + fc)
+            needs_prep = pt > 0 and (cont is None or cont.get("audio") is None)
+            dec_start = max(0, sf - pt) if needs_prep else sf
+            w_images = images[dec_start:end_frame]
+            start_s = round(dec_start / 24 * 32000)
+            end_s = round(end_frame / 24 * 32000)
+            w_waveform = waveform[..., start_s:end_s]
+            w_comp = types.SimpleNamespace(images=w_images, frame_rate=source_rate, audio={"waveform": w_waveform, "sample_rate": 32000})
+
+            w_frames, w_audio, _, _, w_length, _, w_prev = image_helpers.prepare_h3_reference_components(
+                w_comp, 0.5, segment_count=sc, segment_index=si,
+                continuation_media=cont, spatially_prepared=True,
+                full_source_seconds=full_seconds,
+                window_start_frame=dec_start,
+            )
+            assert f_length == w_length
+            assert (w_length - 5) % 17 == 0
+            assert f_prev["padded_frames"] == w_prev["padded_frames"]
+            assert f_prev["start_frame"] == w_prev["start_frame"]
+            assert torch.equal(f_frames, w_frames)
+            assert torch.equal(f_audio["waveform"], w_audio["waveform"])
 
 
 def test_h3_segment_count_can_exceed_available_frames():

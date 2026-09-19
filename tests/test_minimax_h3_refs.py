@@ -134,6 +134,118 @@ def test_clip_continuation_save_load_overwrite_and_fingerprint(monkeypatch, tmp_
     )
 
 
+def test_clip_continuation_save_audio_aligns_to_h3_audio_blocks(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    frames = torch.zeros(56, 8, 8, 3)
+    audio = {"waveform": torch.ones(1, 2, 74400), "sample_rate": 32000}
+    model_helpers.save_minimax_h3_clip_continuation_media(
+        frames, 22, "h3_clip_continuation/clip", 1, audio=audio,
+    )
+    loaded = model_helpers.load_minimax_h3_clip_continuation_media(
+        "h3_clip_continuation/clip", 1,
+    )
+    assert loaded["audio"]["waveform"].shape == (1, 2, 29600)
+    assert loaded["audio"]["sample_rate"] == 32000
+
+
+def test_clip_continuation_load_media_type_filtering(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    frames = torch.zeros(22, 8, 8, 3)
+    audio = {"waveform": torch.ones(1, 2, 29600), "sample_rate": 32000}
+    model_helpers.save_minimax_h3_clip_continuation_media(
+        frames, 22, "h3_clip_continuation/clip", 1, audio=audio,
+    )
+    load_node = utils_nodes.UC_MiniMaxH3ClipContinuationLoad
+    both = load_node.execute("h3_clip_continuation/clip", 1, "replace", "video+audio").args[0]
+    assert both["frames"] is not None
+    assert both["audio"] is not None
+
+    video_only = load_node.execute("h3_clip_continuation/clip", 1, "replace", "video only").args[0]
+    assert video_only["frames"] is not None
+    assert video_only["audio"] is None
+
+    audio_only = load_node.execute("h3_clip_continuation/clip", 1, "replace", "audio only").args[0]
+    assert audio_only["frames"] is None
+    assert audio_only["audio"] is not None
+
+
+def test_clip_continuation_unpack_node(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    schema = utils_nodes.UC_MiniMaxH3ClipContinuationUnpack.define_schema()
+    assert [out.id for out in schema.outputs] == ["images", "audio"]
+
+    frames = torch.ones(22, 16, 16, 3)
+    audio = {"waveform": torch.ones(1, 2, 29600), "sample_rate": 32000}
+    media = {
+        "format_version": 1, "frame_rate": 24,
+        "frames": frames, "audio": audio,
+    }
+    unpack_node = utils_nodes.UC_MiniMaxH3ClipContinuationUnpack
+    out_images, out_audio = unpack_node.execute(continuation_media=media).args
+    torch.testing.assert_close(out_images, frames)
+    torch.testing.assert_close(out_audio["waveform"], audio["waveform"])
+
+    video_only_images, video_only_audio = unpack_node.execute(continuation_media=media, media_type="video only").args
+    torch.testing.assert_close(video_only_images, frames)
+    assert video_only_audio is None
+
+    audio_only_images, audio_only_audio = unpack_node.execute(continuation_media=media, media_type="audio only").args
+    assert audio_only_images is None
+    torch.testing.assert_close(audio_only_audio["waveform"], audio["waveform"])
+
+    model_helpers.save_minimax_h3_clip_continuation_media(
+        frames, 22, "h3_clip_continuation/unpack_test", 1, audio=audio,
+    )
+    loaded_images, loaded_audio = unpack_node.execute(
+        continuation_media=None, filename_prefix="h3_clip_continuation/unpack_test", clip_index=1,
+    ).args
+    torch.testing.assert_close(loaded_images, frames)
+    assert loaded_audio["waveform"].shape == (1, 2, 29600)
+
+
+@pytest.mark.parametrize("tail", [5, 22, 39, 56])
+def test_clip_continuation_save_skips_trailing_padded_frames(monkeypatch, tmp_path, tail):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    frames = torch.arange(58, dtype=torch.float32).view(58, 1, 1, 1).expand(58, 8, 8, 3)
+    pad_frames = torch.full((12, 8, 8, 3), 999.0)
+    full_frames = torch.cat((frames, pad_frames), dim=0)
+    pad_samples = round(12 / 24 * 40) * 800
+    tail_samples = round(tail / 24 * 40) * 800
+    audio_active = torch.arange(100000, dtype=torch.float32).view(1, 1, -1).repeat(1, 2, 1)
+    audio_pad = torch.full((1, 2, pad_samples), -999.0)
+    full_audio = {"waveform": torch.cat((audio_active, audio_pad), dim=-1), "sample_rate": 32000}
+
+    path = model_helpers.save_minimax_h3_clip_continuation_media(
+        full_frames, tail, f"h3_clip_continuation/clip_{tail}", 1,
+        audio=full_audio, padded_frames=12,
+    )
+    loaded = model_helpers.load_minimax_h3_clip_continuation_media(
+        f"h3_clip_continuation/clip_{tail}", 1,
+    )
+    assert loaded["frames"].shape[0] == tail
+    assert not loaded["frames"].eq(999.0).any()
+    torch.testing.assert_close(loaded["frames"], frames[-tail:])
+    assert loaded["audio"]["waveform"].shape == (1, 2, tail_samples)
+    assert not loaded["audio"]["waveform"].eq(-999.0).any()
+    torch.testing.assert_close(loaded["audio"]["waveform"], audio_active[..., -tail_samples:])
+
+
+def test_clip_continuation_save_node_accepts_padded_frames(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    schema = utils_nodes.UC_MiniMaxH3ClipContinuationSave.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert inputs["padded_frames"].default == 0
+    frames = torch.arange(34, dtype=torch.float32).view(34, 1, 1, 1).expand(34, 8, 8, 3)
+    pad = torch.full((12, 8, 8, 3), 777.0)
+    output = utils_nodes.UC_MiniMaxH3ClipContinuationSave.execute(
+        torch.cat((frames, pad), dim=0), tail_frames="22", filename_prefix="h3_clip_continuation/save_pad",
+        clip_index=1, padded_frames=12,
+    )
+    loaded = model_helpers.load_minimax_h3_clip_continuation_media("h3_clip_continuation/save_pad", 1)
+    assert loaded["frames"].shape[0] == 22
+    assert not loaded["frames"].eq(777.0).any()
+
+
 def test_clip_continuation_rejects_short_tail_and_output_escape(monkeypatch, tmp_path):
     monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
     with pytest.raises(ValueError, match="needs 22 frames"):
@@ -201,6 +313,8 @@ def test_clip_continuation_accumulate_blocks_then_joins_and_resets():
     assert inputs["current_entry"].display_name == "Clip number"
     load_schema = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.define_schema()
     load_inputs = {value.id: value for value in load_schema.inputs}
+    assert load_inputs["media_type"].default == "video+audio"
+    assert load_inputs["media_type"].options == ["video+audio", "video only", "audio only"]
     assert load_inputs["video_merge_mode"].default == "replace"
     assert load_inputs["video_merge_mode"].options == ["replace", "prepend", "temporal fusion"]
     first_images = torch.zeros(2, 8, 8, 3)

@@ -1159,6 +1159,9 @@ def cached_video_components(video, preparation=None, prepare=None):
         # Migrate frame-by-frame, never materializing the old multi-GB tensor.
         components = read_legacy_components(legacy, source_key)
     elif preparation is not None and preparation.get("resize") == "h3-bicubic-center-v2":
+        if hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
+            components = video.get_components()
+            return prepare(components) if prepare is not None else components
         _write_streamed_h3_components(path, key, video, preparation["megapixels"], storage)
         return _read_components(path, key)
     else:
@@ -1229,7 +1232,71 @@ def cached_h3_reference_components(video, megapixels):
     return cached_video_components(video, {"megapixels": megapixels, "resize": "h3-bicubic-center-v2"}, prepare)
 
 
-def prepare_h3_reference_components(components, megapixels: float, duration_seconds: float = 0.0, start_at_timestamp: float = 0.0, *, spatially_prepared=False, segment_count: int = 0, segment_index: int = 0, continuation_media: dict | None = None):
+def resolve_h3_reference_window(
+    source_seconds: float, duration_seconds: float = 0.0, start_at_timestamp: float = 0.0,
+    segment_count: int = 0, segment_index: int = 0, continuation_media: dict | None = None,
+) -> tuple[int, int, int | None, int]:
+    """Calculate start_frame, frame_count, segment_end, prepended_t for an H3 segment."""
+    prepended_t = 0
+    trimmed_pad = 0
+    if continuation_media is not None:
+        trimmed_pad = int(continuation_media.get("padded_frames", 0) or 0)
+        if continuation_media.get("video_merge_mode", "replace") == "prepend":
+            from .encoder_helpers import validate_minimax_h3_clip_continuation_media
+            c_frames = validate_minimax_h3_clip_continuation_media(continuation_media)
+            if c_frames is not None:
+                prepended_t = c_frames.shape[0]
+
+    if segment_count:
+        if segment_count < 0 or not 0 <= segment_index < segment_count:
+            raise ValueError("Segment count must be positive and segment index must be between 0 and count minus 1.")
+        total_frames = max(1, round(source_seconds * 24))
+        target_f = total_frames / segment_count
+        k0 = max(0, round((target_f - 5) / 17))
+        while k0 > 0 and (segment_count - 1) * (5 + 17 * k0) >= total_frames:
+            k0 -= 1
+        L0 = 5 + 17 * k0
+
+        if prepended_t > 0:
+            R = (5 - prepended_t) % 17
+            k = max(0, round((target_f - R) / 17))
+            if R == 0 and k == 0:
+                k = 1
+            while (R > 0 and k > 0 or R == 0 and k > 1) and (L0 + (segment_count - 2) * (R + 17 * k) >= total_frames):
+                k -= 1
+            non_final_length = R + 17 * k
+            raw_start = 0 if segment_index == 0 else L0 + (segment_index - 1) * non_final_length
+        else:
+            non_final_length = L0
+            raw_start = segment_index * non_final_length
+
+        start_frame = max(0, min(total_frames - 1, raw_start - trimmed_pad))
+        if segment_index < segment_count - 1:
+            frame_count = non_final_length
+            segment_end = min(total_frames, start_frame + frame_count)
+        else:
+            remaining_frames = max(1, total_frames - start_frame)
+            frame_count = h3_video_length_from_seconds((remaining_frames + prepended_t) / 24) - prepended_t
+            segment_end = total_frames
+    else:
+        start_frame = h3_video_length_from_seconds(start_at_timestamp) if start_at_timestamp > 0 else 0
+        start_seconds = start_frame / 24
+        if start_seconds >= source_seconds:
+            raise ValueError("Start timestamp rounds past the end of the reference video.")
+        selected_seconds = source_seconds - start_seconds
+        if duration_seconds > 0:
+            selected_seconds = min(selected_seconds, duration_seconds)
+        frame_count = h3_video_length_from_seconds(selected_seconds)
+        segment_end = None
+    return start_frame, frame_count, segment_end, prepended_t
+
+
+def prepare_h3_reference_components(
+    components, megapixels: float, duration_seconds: float = 0.0, start_at_timestamp: float = 0.0,
+    *, spatially_prepared=False, segment_count: int = 0, segment_index: int = 0,
+    continuation_media: dict | None = None, full_source_seconds: float | None = None,
+    window_start_frame: int = 0,
+):
     """Prepare already-decoded components while retaining source audio provenance at the caller."""
     source_frames = components.images
     source_rate = float(components.frame_rate)
@@ -1245,40 +1312,17 @@ def prepare_h3_reference_components(components, megapixels: float, duration_seco
         raise ValueError("Start timestamp must be zero or a positive number of seconds.")
 
     source_count = source_frames.shape[0]
-    source_seconds = source_count / source_rate
-    segment_end = None
-    if segment_count:
-        if segment_count < 0 or not 0 <= segment_index < segment_count:
-            raise ValueError("Segment count must be positive and segment index must be between 0 and count minus 1.")
-        total_frames = max(1, round(source_seconds * 24))
-        target_f = total_frames / segment_count
-        k = max(0, round((target_f - 5) / 17))
-        while k > 0 and (segment_count - 1) * (5 + 17 * k) >= total_frames:
-            k -= 1
-        non_final_length = 5 + 17 * k
-        start_frame = segment_index * non_final_length
-        if segment_index < segment_count - 1:
-            frame_count = non_final_length
-            segment_end = min(total_frames, start_frame + frame_count)
-        else:
-            remaining_frames = max(1, total_frames - start_frame)
-            frame_count = h3_video_length_from_seconds(remaining_frames / 24)
-            segment_end = total_frames
-    else:
-        start_frame = h3_video_length_from_seconds(start_at_timestamp) if start_at_timestamp > 0 else 0
-        start_seconds = start_frame / 24
-        if start_seconds >= source_seconds:
-            raise ValueError("Start timestamp rounds past the end of the reference video.")
-        selected_seconds = source_seconds - start_seconds
-        if duration_seconds > 0:
-            selected_seconds = min(selected_seconds, duration_seconds)
-        frame_count = h3_video_length_from_seconds(selected_seconds)
-        segment_end = None
+    effective_source_seconds = full_source_seconds if full_source_seconds is not None else (source_count / source_rate)
+    start_frame, frame_count, segment_end, prepended_t = resolve_h3_reference_window(
+        effective_source_seconds, duration_seconds, start_at_timestamp, segment_count, segment_index, continuation_media
+    )
     start_seconds = start_frame / 24
+    window_start_seconds = window_start_frame / 24
     frame_positions = range(start_frame, start_frame + frame_count)
     if segment_end is not None:
         frame_positions = [min(position, max(start_frame, segment_end - 1)) for position in frame_positions]
-    frame_indices = [min(round(position * source_rate / 24), source_count - 1) for position in frame_positions]
+    local_positions = [position - window_start_frame for position in frame_positions]
+    frame_indices = [min(max(0, round(position * source_rate / 24)), source_count - 1) for position in local_positions]
     video_frames = source_frames[frame_indices]
     prepared_frames = video_frames
 
@@ -1306,9 +1350,9 @@ def prepare_h3_reference_components(components, megapixels: float, duration_seco
             raise ValueError("Reference audio must have a positive sample rate.")
         selected_frames = frame_count if segment_end is None else segment_end - start_frame
         sample_count = round(selected_frames / 24 * sample_rate)
-        start_sample = round(start_seconds * sample_rate)
+        start_sample = round(start_frame / 24 * sample_rate) - round(window_start_frame / 24 * sample_rate)
         if segment_end is not None:
-            sample_count = round(segment_end / 24 * sample_rate) - start_sample
+            sample_count = (round(segment_end / 24 * sample_rate) - round(window_start_frame / 24 * sample_rate)) - start_sample
         audio_samples = soundtrack["waveform"][..., start_sample:start_sample + sample_count]
         if sample_rate != 32000 and audio_samples.numel():
             audio_samples = torchaudio.functional.resample(audio_samples, sample_rate, 32000)
@@ -1317,17 +1361,28 @@ def prepare_h3_reference_components(components, megapixels: float, duration_seco
         audio_samples = torch.nn.functional.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
     else:
         audio_samples = torch.zeros(1, 2, aligned_samples)
-    preview = {"start_frame": start_frame, "length": frame_count, "source_seconds": source_seconds}
+    preview = {"start_frame": start_frame, "length": frame_count, "source_seconds": effective_source_seconds}
     if segment_end is not None:
         preview.update(source_end_frame=segment_end - 1, padded_frames=frame_count - (segment_end - start_frame))
     if continuation_media is not None:
         from .encoder_helpers import validate_minimax_h3_clip_continuation_media
         cont_frames = validate_minimax_h3_clip_continuation_media(continuation_media)
         merge_mode = continuation_media.get("video_merge_mode", "replace")
-        if cont_frames.shape[1:3] != (output_height, output_width):
-            cont_frames = resize_nchw(
-                cont_frames.movedim(-1, 1), output_width, output_height, "lanczos", "center"
-            ).clamp(0.0, 1.0).movedim(1, -1).contiguous()
+        if cont_frames is not None:
+            if cont_frames.shape[1:3] != (output_height, output_width):
+                cont_frames = resize_nchw(
+                    cont_frames.movedim(-1, 1), output_width, output_height, "lanczos", "center"
+                ).clamp(0.0, 1.0).movedim(1, -1).contiguous()
+            if merge_mode == "replace":
+                tail_count = min(cont_frames.shape[0], prepared_frames.shape[0])
+                prepared_frames = torch.cat((cont_frames[:tail_count], prepared_frames[tail_count:]), dim=0)
+                video_frames = prepared_frames
+            elif merge_mode == "prepend":
+                prepared_frames = torch.cat((cont_frames, prepared_frames), dim=0)
+                video_frames = prepared_frames
+                frame_count = prepared_frames.shape[0]
+                preview["length"] = frame_count
+
         cont_audio = continuation_media.get("audio")
         cont_waveform = None
         if cont_audio is not None and cont_audio.get("waveform") is not None and cont_audio["waveform"].numel() > 0:
@@ -1340,28 +1395,40 @@ def prepare_h3_reference_components(components, megapixels: float, duration_seco
             elif cont_waveform.shape[1] == 2 and audio_samples.shape[1] == 1:
                 cont_waveform = cont_waveform.mean(dim=1, keepdim=True)
 
-        if merge_mode == "replace":
-            tail_count = min(cont_frames.shape[0], prepared_frames.shape[0])
-            prepared_frames = torch.cat((cont_frames[:tail_count], prepared_frames[tail_count:]), dim=0)
-            video_frames = prepared_frames
-            if cont_waveform is not None and audio_samples.numel() > 0:
-                tail_samples = min(round(tail_count / 24 * 32000), audio_samples.shape[-1], cont_waveform.shape[-1])
+            if merge_mode == "replace":
+                tail_frames_count = cont_frames.shape[0] if cont_frames is not None else round(cont_waveform.shape[-1] * 24 / 32000)
+                tail_samples = min(round(tail_frames_count / 24 * 32000), audio_samples.shape[-1], cont_waveform.shape[-1])
                 audio_samples = torch.cat((cont_waveform[..., :tail_samples], audio_samples[..., tail_samples:]), dim=-1)
-        elif merge_mode == "prepend":
-            prepared_frames = torch.cat((cont_frames, prepared_frames), dim=0)
-            video_frames = prepared_frames
-            frame_count = prepared_frames.shape[0]
-            if cont_waveform is not None:
-                cont_samples = round(cont_frames.shape[0] / 24 * 32000)
-                cont_padded = torch.nn.functional.pad(cont_waveform[..., :cont_samples], (0, max(0, cont_samples - cont_waveform.shape[-1])))
-                audio_samples = torch.cat((cont_padded, audio_samples), dim=-1)
-            else:
-                cont_silence = torch.zeros(1, audio_samples.shape[1], round(cont_frames.shape[0] / 24 * 32000))
-                audio_samples = torch.cat((cont_silence, audio_samples), dim=-1)
-            audio_window = round(frame_count / 24 * 32000)
-            aligned_samples = ((audio_window + 799) // 800) * 800
-            audio_samples = audio_samples[..., :audio_window]
-            audio_samples = torch.nn.functional.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
+            elif merge_mode == "prepend":
+                cont_samples = cont_waveform.shape[-1]
+                audio_samples = torch.cat((cont_waveform, audio_samples), dim=-1)
+                audio_window = round(frame_count / 24 * 32000)
+                aligned_samples = ((audio_window + 799) // 800) * 800
+                audio_samples = audio_samples[..., :audio_window]
+                audio_samples = torch.nn.functional.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
+            preview["length"] = frame_count
+        elif cont_audio is None and merge_mode == "prepend" and cont_frames is not None:
+            # Video only continuation prepended: source audio supplies prepended duration from source video
+            prepended_frames_count = cont_frames.shape[0]
+            if soundtrack is not None and soundtrack.get("waveform") is not None and soundtrack["waveform"].numel() > 0:
+                sample_rate = int(soundtrack["sample_rate"])
+                source_audio_start = max(0, start_frame - prepended_frames_count)
+                prep_samples = round((start_frame - source_audio_start) / 24 * sample_rate)
+                if prep_samples > 0:
+                    start_s = round(source_audio_start / 24 * sample_rate) - round(window_start_frame / 24 * sample_rate)
+                    stop_s = round(start_frame / 24 * sample_rate) - round(window_start_frame / 24 * sample_rate)
+                    prep_wave = soundtrack["waveform"][..., start_s:stop_s]
+                    if sample_rate != 32000 and prep_wave.numel():
+                        prep_wave = torchaudio.functional.resample(prep_wave, sample_rate, 32000)
+                    if prep_wave.shape[1] == 1 and audio_samples.shape[1] == 2:
+                        prep_wave = prep_wave.repeat(1, 2, 1)
+                    elif prep_wave.shape[1] == 2 and audio_samples.shape[1] == 1:
+                        prep_wave = prep_wave.mean(dim=1, keepdim=True)
+                    audio_samples = torch.cat((prep_wave, audio_samples), dim=-1)
+                    audio_window = round(frame_count / 24 * 32000)
+                    aligned_samples = ((audio_window + 799) // 800) * 800
+                    audio_samples = audio_samples[..., :audio_window]
+                    audio_samples = torch.nn.functional.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
             preview["length"] = frame_count
     prepared_audio = {"waveform": audio_samples, "sample_rate": 32000}
     return prepared_frames, prepared_audio, output_width, output_height, frame_count, video_frames, preview

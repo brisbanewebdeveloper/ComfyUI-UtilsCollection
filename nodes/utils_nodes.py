@@ -9,7 +9,7 @@ from comfy_execution.graph import ExecutionBlocker
 from comfy_api.latest import InputImpl, Types, io
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from ..helpers.helper_functions import to_video_prompt
-from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, video_source_hash, VIDEO_FRAME_TIMESTAMP_FORMATS
+from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, video_source_hash, resolve_h3_reference_window, VIDEO_FRAME_TIMESTAMP_FORMATS
 from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
     load_minimax_h3_clip_continuation_media,
@@ -66,17 +66,50 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
         if continuation_media is not None:
             frames = continuation_media.get("frames")
             f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
-            continuation_id = f"{f_hash}:{continuation_media.get('video_merge_mode', '')}"
+            audio_entry = continuation_media.get("audio")
+            a_hash = ""
+            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+                w = audio_entry["waveform"]
+                a_hash = f"{w.shape}:{float(w.mean())}"
+            continuation_id = f"{f_hash}:{a_hash}:{continuation_media.get('video_merge_mode', '')}:{continuation_media.get('media_type', '')}"
         return f"{video_hash}:{megapixels}:{duration_seconds}:{start_at_timestamp}:{timestamp_format}:{enable_whisper}:{segment_count}:{segment_index}:{id(whisper_model)}:{continuation_id}"
 
     @classmethod
     def execute(cls, video, megapixels=0.5, duration_seconds=0.0, start_at_timestamp=0.0, whisper_model=None, timestamp_format="00.000s", enable_whisper=True, segment_count=0, segment_index=0, continuation_media=None):
-        components = cached_h3_reference_components(video, megapixels)
-        frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
-            components, megapixels, duration_seconds, start_at_timestamp, spatially_prepared=True,
-            segment_count=segment_count, segment_index=segment_index,
-            continuation_media=continuation_media,
-        )
+        components = None
+        if type(video) is InputImpl.VideoFromFile:
+            try:
+                source_seconds = float(video.get_duration())
+                start_frame, frame_count, segment_end, prepended_t = resolve_h3_reference_window(
+                    source_seconds, duration_seconds, start_at_timestamp, segment_count, segment_index, continuation_media
+                )
+                total_frames = max(1, round(source_seconds * 24))
+                end_frame = segment_end if segment_end is not None else min(total_frames, start_frame + frame_count)
+                needs_prep_audio = (
+                    prepended_t > 0
+                    and (continuation_media is None or continuation_media.get("audio") is None)
+                )
+                decode_start = max(0, start_frame - prepended_t) if needs_prep_audio else start_frame
+                start_sec = decode_start / 24.0
+                dur_sec = max(1, end_frame - decode_start) / 24.0
+                windowed_video = InputImpl.VideoFromFile(video.get_stream_source(), start_time=start_sec, duration=dur_sec)
+                components = windowed_video.get_components()
+                frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
+                    components, megapixels, duration_seconds=duration_seconds, start_at_timestamp=start_at_timestamp,
+                    spatially_prepared=False, segment_count=segment_count, segment_index=segment_index,
+                    continuation_media=continuation_media,
+                    full_source_seconds=source_seconds,
+                    window_start_frame=decode_start,
+                )
+            except Exception:
+                components = None
+        if components is None:
+            components = cached_h3_reference_components(video, megapixels)
+            frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
+                components, megapixels, duration_seconds, start_at_timestamp, spatially_prepared=True,
+                segment_count=segment_count, segment_index=segment_index,
+                continuation_media=continuation_media,
+            )
         transcribed_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
         prepared_video = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)),
@@ -98,15 +131,16 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
                 io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="How many ending frames to keep for the next clip."),
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used to pair this node with Load. Use the same name on both nodes."),
                 io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Number for this clip. Start with 1, then increase by 1 for each new clip. Re-running a number replaces that clip."),
+                io.Int.Input("padded_frames", default=0, min=0, max=99999, step=1, optional=True, tooltip="Trailing padded frames to skip at the end of the clip (e.g. from H3 duration rounding or final segment padding). Tail frames will be extracted from active content immediately before this padding."),
             ],
             outputs=[io.String.Output("path")],
             is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1):
+    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0):
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, clip_index, audio=audio
+            images, int(tail_frames), filename_prefix, clip_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0,
         )
         return io.NodeOutput(path)
 
@@ -122,32 +156,98 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             inputs=[
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used by Save. Use the same name on both nodes."),
                 io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip. Nothing is loaded."),
+                io.Combo.Input("media_type", options=["video+audio", "video only", "audio only"], default="video+audio", tooltip="Select which continuation components to load. Video only ignores saved audio; audio only ignores saved video frames."),
                 io.Combo.Input("video_merge_mode", options=["replace", "prepend", "temporal fusion"], default="replace", tooltip="Replace substitutes opening Qwen context. Prepend shifts reference video later. Temporal fusion combines saved interior frames with reference frames at the same times through Qwen temporal consensus, preserving the reference timeline and prompt. Fusion requires an additional Qwen encoding lane.", advanced=True),
             ],
             outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
         )
 
     @classmethod
-    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
+    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio"):
         if int(clip_index) <= 0:
             return "disabled"
         if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
             raise ValueError("Unsupported MiniMax H3 continuation video merge mode.")
+        if media_type not in ("video+audio", "video only", "audio only"):
+            raise ValueError("Unsupported MiniMax H3 continuation media type.")
         try:
             fingerprint = get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
-            return f"{fingerprint}:{video_merge_mode}"
+            return f"{fingerprint}:{video_merge_mode}:{media_type}"
         except FileNotFoundError:
             return float("nan")
 
     @classmethod
-    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace"):
+    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio"):
         if int(clip_index) <= 0:
             return io.NodeOutput(None)
         if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
             raise ValueError("Unsupported MiniMax H3 continuation video merge mode.")
+        if media_type not in ("video+audio", "video only", "audio only"):
+            raise ValueError("Unsupported MiniMax H3 continuation media type.")
         media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
         media["video_merge_mode"] = video_merge_mode
+        media["media_type"] = media_type
+        if media_type == "video only":
+            media["audio"] = None
+        elif media_type == "audio only":
+            media["frames"] = None
         return io.NodeOutput(media)
+
+
+class UC_MiniMaxH3ClipContinuationUnpack(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationUnpack",
+            display_name="MiniMax H3 Clip Continuation Unpack",
+            category="advanced/conditioning",
+            description="Extracts raw images and audio directly from continuation_media, or loads them from a saved file.",
+            inputs=[
+                MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Connect continuation_media from MiniMax H3 Clip Continuation Load."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", optional=True, tooltip="File name used by Save. Used when continuation_media is disconnected."),
+                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, optional=True, tooltip="Which clip to load directly when continuation_media is disconnected. 0 returns nothing."),
+                io.Combo.Input("media_type", options=["video+audio", "video only", "audio only"], default="video+audio", optional=True, tooltip="Select which continuation components to output."),
+            ],
+            outputs=[
+                io.Image.Output("images", tooltip="Continuation video frames."),
+                io.Audio.Output("audio", tooltip="Continuation audio track."),
+            ],
+        )
+
+    @classmethod
+    def IS_CHANGED(cls, continuation_media=None, filename_prefix="h3_clip_continuation/clip", clip_index=0, media_type="video+audio"):
+        if continuation_media is not None:
+            frames = continuation_media.get("frames")
+            f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
+            audio_entry = continuation_media.get("audio")
+            a_hash = ""
+            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+                w = audio_entry["waveform"]
+                a_hash = f"{w.shape}:{float(w.mean())}"
+            return f"media:{f_hash}:{a_hash}:{media_type}"
+        if int(clip_index) <= 0:
+            return "disabled"
+        try:
+            fingerprint = get_minimax_h3_clip_continuation_fingerprint(filename_prefix, int(clip_index))
+            return f"{fingerprint}:{media_type}"
+        except FileNotFoundError:
+            return float("nan")
+
+    @classmethod
+    def execute(cls, continuation_media=None, filename_prefix="h3_clip_continuation/clip", clip_index=0, media_type="video+audio"):
+        media = continuation_media
+        if media is None:
+            if int(clip_index) <= 0:
+                return io.NodeOutput(None, None)
+            try:
+                media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+            except Exception:
+                return io.NodeOutput(None, None)
+        if not isinstance(media, dict):
+            return io.NodeOutput(None, None)
+        frames = media.get("frames") if media_type in ("video+audio", "video only") else None
+        audio = media.get("audio") if media_type in ("video+audio", "audio only") else None
+        return io.NodeOutput(frames, audio)
 
 
 class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
