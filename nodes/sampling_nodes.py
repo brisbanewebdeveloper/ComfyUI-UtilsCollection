@@ -15,22 +15,37 @@ class UC_H3LoopSampler(io.ComfyNode):
             category="utils/sampling",
             description="Samples long-form MiniMax H3 AV latents by windowed chunks with carry preservation.",
             inputs=[
-                io.Noise.Input("noise"),
-                io.Guider.Input("guider"),
-                io.Sampler.Input("sampler"),
-                io.Sigmas.Input("sigmas"),
+                io.Noise.Input(
+                    "noise",
+                    tooltip="Noise generator (such as RandomNoise) used to seed each chunk.",
+                ),
+                io.Guider.Input(
+                    "guider",
+                    tooltip="Main guidance settings (such as BasicGuider or CFGGuider). Controls prompt strength and negative conditioning.",
+                ),
+                io.Sampler.Input(
+                    "sampler",
+                    tooltip="Sampling method (such as Euler or UniPC) used to denoise each video chunk.",
+                ),
+                io.Sigmas.Input(
+                    "sigmas",
+                    tooltip="Step schedule controlling denoising speed and total step count.",
+                ),
                 io.Conditioning.Input(
                     "conditioning",
-                    tooltip="Base positive conditioning. If a list of conditionings or cond_set is supplied, chunks consume them sequentially.",
+                    tooltip="Text prompt and style guidance for generation. Connect a single prompt to reuse across the entire clip, or a prompt sequence to describe each chunk as the scene progresses.",
                 ),
-                io.Latent.Input("latent", tooltip="Full target H3 joint AV latent (e.g. from empty AV latent)."),
+                io.Latent.Input(
+                    "latent",
+                    tooltip="Blank joint video and audio canvas (from Empty MiniMax H3 Latent) sized for the total clip length.",
+                ),
                 io.Int.Input(
                     "chunk_frames",
                     default=124,
                     min=0,
                     max=3600,
                     step=17,
-                    tooltip="Frame count per chunk. 0 samples the whole clip in one chunk.",
+                    tooltip="Length of each generation chunk in frames. Set to 0 to generate the whole video in one single pass.",
                 ),
                 io.Int.Input(
                     "overlap_frames",
@@ -38,13 +53,13 @@ class UC_H3LoopSampler(io.ComfyNode):
                     min=0,
                     max=720,
                     step=17,
-                    tooltip="Overlap frame count between consecutive chunks.",
+                    tooltip="Number of shared frames between adjacent chunks to ensure seamless transitions.",
                 ),
                 io.Combo.Input(
                     "carry_mode",
                     options=["mask", "none"],
                     default="mask",
-                    tooltip="Preserve tail of previous chunk into next chunk using noise mask.",
+                    tooltip="How to handle seam transitions. 'mask' pins the tail of the previous chunk so motion continues smoothly without sudden jumps.",
                 ),
                 io.Float.Input(
                     "overlap_strength_video",
@@ -52,7 +67,7 @@ class UC_H3LoopSampler(io.ComfyNode):
                     min=0.0,
                     max=1.0,
                     step=0.01,
-                    tooltip="1.0 keeps previous video frames unchanged; lower values allow re-denoising.",
+                    tooltip="How firmly earlier video frames are kept in overlapping seams. 1.0 keeps them exact, while lower values gently re-blend them.",
                 ),
                 io.Float.Input(
                     "overlap_strength_audio",
@@ -60,7 +75,7 @@ class UC_H3LoopSampler(io.ComfyNode):
                     min=0.0,
                     max=1.0,
                     step=0.01,
-                    tooltip="1.0 keeps previous audio unchanged; 0.9 allows smooth transition blend.",
+                    tooltip="How firmly earlier audio is kept across seams. 0.9 allows a smooth crossfade into newly generated audio.",
                 ),
                 io.Int.Input(
                     "sampling_start_step",
@@ -69,7 +84,7 @@ class UC_H3LoopSampler(io.ComfyNode):
                     max=1000,
                     step=1,
                     optional=True,
-                    tooltip="Absolute starting step index in sigma schedule.",
+                    tooltip="First step to begin sampling from. 0 starts from scratch, while higher steps refine existing content.",
                 ),
                 io.Int.Input(
                     "sampling_end_step",
@@ -78,7 +93,7 @@ class UC_H3LoopSampler(io.ComfyNode):
                     max=1000,
                     step=1,
                     optional=True,
-                    tooltip="Absolute ending step index in sigma schedule.",
+                    tooltip="Step where sampling stops. Lower this to pause early and hand off to a second pass.",
                 ),
                 io.Int.Input(
                     "phase2_start_step",
@@ -87,17 +102,42 @@ class UC_H3LoopSampler(io.ComfyNode):
                     max=1000,
                     step=1,
                     optional=True,
-                    tooltip="Step index to switch to phase-2 sampler/guider.",
+                    tooltip="Step number where the second sampler or guider takes over. 0 disables the second phase.",
                 ),
-                io.Sampler.Input("phase2_sampler", optional=True),
-                io.Guider.Input("phase2_guider", optional=True),
-                io.Mask.Input("denoise_mask", optional=True, tooltip="Optional whole-clip video denoise mask."),
-                io.Mask.Input("audio_denoise_mask", optional=True, tooltip="Optional whole-clip audio denoise mask."),
+                io.Sampler.Input(
+                    "phase2_sampler",
+                    optional=True,
+                    tooltip="Optional second sampler method used after phase2_start_step for two-stage generation.",
+                ),
+                io.Guider.Input(
+                    "phase2_guider",
+                    optional=True,
+                    tooltip="Optional second guidance configuration used after phase2_start_step.",
+                ),
+                io.Mask.Input(
+                    "denoise_mask",
+                    optional=True,
+                    tooltip="Optional video mask. White areas generate new video and black areas stay frozen from the input latent.",
+                ),
+                io.Mask.Input(
+                    "audio_denoise_mask",
+                    optional=True,
+                    tooltip="Optional audio mask. White areas generate new audio and black areas keep the input audio unchanged.",
+                ),
             ],
             outputs=[
-                io.Latent.Output("latent"),
-                io.Int.Output("chunks_rendered"),
-                io.String.Output("report"),
+                io.Latent.Output(
+                    "latent",
+                    tooltip="Finished full-length video and audio clip ready for VAE decoding.",
+                ),
+                io.Int.Output(
+                    "chunks_rendered",
+                    tooltip="Total number of chunks rendered to assemble the full clip.",
+                ),
+                io.String.Output(
+                    "report",
+                    tooltip="Summary log showing chunk frame ranges, carried frames, and timings.",
+                ),
             ],
         )
 
