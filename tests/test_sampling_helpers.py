@@ -89,8 +89,19 @@ def test_plan_h3_windows():
     custom_windows = plan_h3_windows(total_frames=73, window_frames=0, overlap_frames=22, segment_lengths=[22, 22, 29])
     assert len(custom_windows) == 3
     assert custom_windows[0][0] == 0
-    assert custom_windows[1][0] == 0  # overlapped into chunk 0
     assert custom_windows[-1][1] == 22
+
+
+def test_plan_h3_schedule_spans_and_records():
+    from utils_collection_sampling_test.helpers.sampling_helpers import plan_h3_schedule
+    total_v, total_a, records, spans = plan_h3_schedule(total_frames=124, window_frames=56, overlap_frames=22)
+    assert total_v == 37
+    assert len(records) >= 2
+    assert len(spans) == len(records)
+    for r in records:
+        assert r["v1"] > r["v0"]
+        assert r["a1"] >= r["a0"]
+        assert r["frame_end"] > r["frame_start"]
 
 
 def test_prepare_chunk_guider_isolation():

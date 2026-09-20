@@ -350,6 +350,13 @@ class UC_H3RefVideoSegments(io.ComfyNode):
                     optional=True,
                     tooltip="Positive count divides the source into that many sequential H3-sized segments. 0 uses duration_seconds and start_at_timestamp.",
                 ),
+                io.Combo.Input(
+                    "overlap_duration",
+                    options=list(H3_OVERLAP_SECONDS_OPTIONS),
+                    default="0.92s (22 frames)",
+                    optional=True,
+                    tooltip="Shared time window between adjacent segments ensuring reference windows match the looping sampler overlap.",
+                ),
                 io.Custom("WHISPER_MODEL").Input(
                     "whisper_model",
                     optional=True,
@@ -414,10 +421,12 @@ class UC_H3RefVideoSegments(io.ComfyNode):
         duration_seconds=0.0,
         start_at_timestamp=0.0,
         segment_count=0,
+        overlap_duration="0.92s (22 frames)",
         whisper_model=None,
         timestamp_format="00.000s",
         enable_whisper=True,
     ) -> io.NodeOutput:
+        of = parse_h3_seconds_option(overlap_duration, 22)
         (
             frames_list,
             audio_list,
@@ -432,6 +441,7 @@ class UC_H3RefVideoSegments(io.ComfyNode):
             duration_seconds=duration_seconds,
             start_at_timestamp=start_at_timestamp,
             segment_count=segment_count,
+            overlap_frames=of,
             whisper_model=whisper_model,
             timestamp_format=timestamp_format,
             enable_whisper=enable_whisper,

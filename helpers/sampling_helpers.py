@@ -200,22 +200,46 @@ def check_core_any_index_guides() -> bool:
         return False
 
 
-def plan_h3_windows(
-    total_frames: int,
-    window_frames: int,
-    overlap_frames: int,
-    segment_lengths: Optional[Sequence[int]] = None,
-) -> list[tuple[int, int]]:
-    """Plan H3 window intervals on latent grid (start_idx, end_idx) inclusive-exclusive.
+def chunk_noise(noise: Any, index: int) -> Any:
+    """Return a unique noise object per chunk with index added to seed.
     
-    If segment_lengths is provided, directly uses those segment frame counts converted to latents.
-    Otherwise, computes overlapping sliding windows ensuring step stride maintains 5-group phase alignment.
+    Prevents identical noise initialization across chunks which causes motion stutter and seam rewinds.
+    """
+    if index == 0 or noise is None or not hasattr(noise, "seed"):
+        return noise
+    n = copy.copy(noise)
+    try:
+        n.seed = int(noise.seed) + index
+    except Exception:
+        pass
+    return n
+
+
+def plan_h3_schedule(
+    total_frames: int,
+    window_frames: int = 124,
+    overlap_frames: int = 22,
+    segment_lengths: Optional[Sequence[int]] = None,
+) -> tuple[int, int, list[dict[str, Any]], list[tuple[int, int]]]:
+    """Single authoritative scheduler for MiniMax H3 windowed sampling and reference slicing.
+    
+    Returns:
+        (total_latents, total_audio_latents, window_records, frame_spans)
+        where each window_record is a dict:
+            {
+                'chunk_index': int,
+                'v0': int, 'v1': int,
+                'a0': int, 'a1': int,
+                'carried_v': int, 'carried_a': int,
+                'frame_start': int, 'frame_end': int,
+            }
+        and frame_spans is a list of (start_frame, end_frame) inclusive pixel ranges.
     """
     total_f = h3_snap_frame_count(int(total_frames))
-    total_latents = h3_frames_to_latents(total_f)
-    if total_latents <= H3_LATENT_BASE:
-        return [(0, total_latents)]
+    total_v = h3_frames_to_latents(total_f)
+    total_a = h3_frames_to_audio_t(total_f)
 
+    # 1. Determine latent window bounds (v0, v1)
     if segment_lengths:
         if isinstance(segment_lengths, (int, float)):
             segment_lengths = [int(segment_lengths)]
@@ -230,71 +254,114 @@ def plan_h3_windows(
             raw_ov = h3_frames_to_latents(int(overlap_frames))
             ov_latents = h3_snap_latent_t(raw_ov) if raw_ov >= H3_LATENT_BASE else 0
 
-        windows = []
+        raw_windows = []
         curr_f = 0
         for i, seg_f in enumerate(segment_lengths):
             seg_len = int(seg_f)
             start_f = curr_f
             end_f = min(total_f, curr_f + seg_len)
             nominal_v0 = h3_frames_to_latents(start_f) if start_f > 0 else 0
-            v1 = min(total_latents, h3_frames_to_latents(end_f))
+            v1 = min(total_v, h3_frames_to_latents(end_f))
 
-            # Apply overlap carry into the window start if not the first chunk
             v0 = nominal_v0
             if i > 0 and ov_latents > 0:
                 v0 = max(0, nominal_v0 - ov_latents)
 
             if v1 > v0:
-                windows.append((v0, v1))
+                raw_windows.append((v0, v1))
             curr_f = end_f
             if curr_f >= total_f:
                 break
-        if windows:
-            return windows
+    else:
+        w_frames = max(H3_FRAME_BASE, int(window_frames)) if window_frames > 0 else total_f
+        w_latents = min(total_v, h3_snap_latent_t(h3_frames_to_latents(w_frames)))
+        if w_latents <= H3_LATENT_BASE or w_latents >= total_v:
+            raw_windows = [(0, total_v)]
+        else:
+            ov_latents = 0
+            if overlap_frames > 0:
+                raw_ov = h3_frames_to_latents(int(overlap_frames))
+                ov_latents = h3_snap_latent_t(raw_ov) if raw_ov >= H3_LATENT_BASE else 0
+                ov_latents = min(ov_latents, max(0, w_latents - H3_LATENT_GROUP))
 
-    w_frames = max(H3_FRAME_BASE, int(window_frames)) if window_frames > 0 else total_f
-    w_latents = min(total_latents, h3_snap_latent_t(h3_frames_to_latents(w_frames)))
-    if w_latents <= H3_LATENT_BASE or w_latents >= total_latents:
-        return [(0, total_latents)]
+            step = max(H3_LATENT_GROUP, w_latents - ov_latents)
+            step = (step // H3_LATENT_GROUP) * H3_LATENT_GROUP
+            if step < H3_LATENT_GROUP:
+                step = H3_LATENT_GROUP
 
-    ov_latents = 0
-    if overlap_frames > 0:
-        raw_ov = h3_frames_to_latents(int(overlap_frames))
-        ov_latents = h3_snap_latent_t(raw_ov) if raw_ov >= H3_LATENT_BASE else 0
-        ov_latents = min(ov_latents, max(0, w_latents - H3_LATENT_GROUP))
+            raw_windows = []
+            start = 0
+            while start < total_v:
+                end = min(total_v, start + w_latents)
+                raw_windows.append((start, end))
+                if end >= total_v:
+                    break
+                start += step
+                if start + w_latents > total_v:
+                    final_start = max(0, total_v - w_latents)
+                    if final_start > raw_windows[-1][0]:
+                        raw_windows.append((final_start, total_v))
+                    break
 
-    step = max(H3_LATENT_GROUP, w_latents - ov_latents)
-    # Align step to multiple of H3_LATENT_GROUP (5) to maintain phase
-    step = (step // H3_LATENT_GROUP) * H3_LATENT_GROUP
-    if step < H3_LATENT_GROUP:
-        step = H3_LATENT_GROUP
+    # 2. Build detailed records with exact audio alignment and carry calculations
+    window_records = []
+    frame_spans = []
 
-    windows = []
-    start = 0
-    while start < total_latents:
-        end = min(total_latents, start + w_latents)
-        windows.append((start, end))
-        if end >= total_latents:
-            break
-        start += step
-        if start + w_latents > total_latents:
-            final_start = max(0, total_latents - w_latents)
-            if final_start > windows[-1][0]:
-                windows.append((final_start, total_latents))
-            break
+    for i, (v0, v1) in enumerate(raw_windows):
+        f_start = h3_frame_at_latent(v0)
+        f_end = min(total_f, h3_frame_at_latent(v1))
 
-    return windows
+        a0 = h3_audio_idx_at_video_latent(v0, total_v, total_a)
+        a1 = h3_audio_idx_at_video_latent(v1, total_v, total_a)
+
+        # Clamped actual tail carry: previous window's true reach minus this window's start
+        prev_end = raw_windows[i - 1][1] if i > 0 else 0
+        carried_v = min(max(0, prev_end - v0), v1 - v0) if i > 0 else 0
+        carried_a = (h3_audio_idx_at_video_latent(v0 + carried_v, total_v, total_a) - a0) if carried_v > 0 else 0
+
+        window_records.append({
+            "chunk_index": i,
+            "v0": v0,
+            "v1": v1,
+            "a0": a0,
+            "a1": a1,
+            "carried_v": carried_v,
+            "carried_a": carried_a,
+            "frame_start": f_start,
+            "frame_end": f_end,
+        })
+        frame_spans.append((f_start, f_end))
+
+    return total_v, total_a, window_records, frame_spans
+
+
+def plan_h3_windows(
+    total_frames: int,
+    window_frames: int,
+    overlap_frames: int,
+    segment_lengths: Optional[Sequence[int]] = None,
+) -> list[tuple[int, int]]:
+    """Backward compatible wrapper around plan_h3_schedule."""
+    _, _, records, _ = plan_h3_schedule(
+        total_frames=total_frames,
+        window_frames=window_frames,
+        overlap_frames=overlap_frames,
+        segment_lengths=segment_lengths,
+    )
+    return [(r["v0"], r["v1"]) for r in records]
 
 
 def prepare_chunk_guider(guider: Any, positive_cond: Any, frame0: Optional[int] = None) -> Any:
-    """Create isolated clone of guider with swapped positive cond and h3_ctrl_frame0."""
+    """Create isolated clone of guider with swapped positive cond and timeline frame0 offsets."""
     chunk_g = copy.copy(guider)
     chunk_g.original_conds = dict(guider.original_conds)
 
     if frame0 is not None:
         opts = dict(getattr(guider, "model_options", {}) or {})
         t_opts = dict(opts.get("transformer_options", {}))
+        # Set both custom and standard H3 control offsets so motion/control models track time correctly
         t_opts["h3_ctrl_frame0"] = int(frame0)
+        t_opts["mmh3_control_frame0"] = int(frame0)
         opts["transformer_options"] = t_opts
         chunk_g.model_options = opts
 
@@ -501,13 +568,13 @@ def start_sampling_loop(
             master_a = expanded_a
             total_a = target_a
 
-    windows = plan_h3_windows(
+    total_v, total_a, window_records, _ = plan_h3_schedule(
         total_frames=total_f,
         window_frames=chunk_frames,
         overlap_frames=overlap_frames,
         segment_lengths=segment_lengths,
     )
-    num_chunks = len(windows)
+    num_chunks = len(window_records)
 
     out_v = master_v.clone()
     out_a = None if master_a is None else master_a.clone()
@@ -515,17 +582,13 @@ def start_sampling_loop(
 
     lines = [
         f"Sampling {num_chunks} chunk(s) over {total_v} latents ({total_f} frames, {total_f / float(H3_FPS):.2f}s), "
-        f"carry mode: {carry_mode}"
+        f"carry mode: {carry_mode}, audio mode: {audio_mode}"
     ]
 
-    for i, (v0, v1) in enumerate(windows):
-        a0 = h3_audio_idx_at_video_latent(v0, total_v, total_a)
-        a1 = h3_audio_idx_at_video_latent(v1, total_v, total_a)
-
-        # Actual carry from previous window
-        prev_end = windows[i - 1][1] if i > 0 else 0
-        carried_v = min(max(0, prev_end - v0), v1 - v0) if i > 0 else 0
-        carried_a = (h3_audio_idx_at_video_latent(v0 + carried_v, total_v, total_a) - a0) if carried_v > 0 else 0
+    for i, w in enumerate(window_records):
+        v0, v1 = w["v0"], w["v1"]
+        a0, a1 = w["a0"], w["a1"]
+        carried_v, carried_a = w["carried_v"], w["carried_a"]
 
         sub_v = out_v[:, :, v0:v1].clone()
         sub_a = None if out_a is None else out_a[:, :, :, a0:a1].clone()
@@ -586,8 +649,11 @@ def start_sampling_loop(
         if chunk_g2 is not None:
             reset_model_caches(chunk_g2)
 
+        # Generate unique noise per chunk to prevent repeated motion loops
+        c_noise = chunk_noise(noise, i)
+
         sampled = run_chunk_sampling(
-            noise,
+            c_noise,
             chunk_g,
             sampler,
             sigmas,
@@ -604,7 +670,7 @@ def start_sampling_loop(
         if out_a is not None and res_a is not None:
             out_a[:, :, :, a0:a1] = res_a.to(out_a.dtype)
 
-        lines.append(f"  chunk {i}: prompt {cond_idx}, latents {v0}-{v1}, carried {carried_v}")
+        lines.append(f"  chunk {i}: prompt {cond_idx}, frames {w['frame_start']}-{w['frame_end']} (latents {v0}-{v1}), carried {carried_v}")
 
     # Restore clean input audio if audio_mode is 'preserve_input'
     if audio_mode == "preserve_input" and master_a is not None:
@@ -621,11 +687,12 @@ def split_h3_video_components_into_segments(
     duration_seconds: float = 0.0,
     start_at_timestamp: float = 0.0,
     segment_count: int = 0,
+    overlap_frames: int = 22,
     whisper_model: Any = None,
     timestamp_format: str = "00.000s",
     enable_whisper: bool = True,
 ) -> tuple[list[torch.Tensor], list[dict[str, Any]], int, int, list[int], list[Any], list[str]]:
-    """Split reference video components across sequential segments, returning lists."""
+    """Split reference video components across planned H3 schedule windows, returning lists."""
     from fractions import Fraction
     from comfy_api.latest import InputImpl, Types
     from .image_helpers import cached_h3_reference_components, prepare_h3_reference_components, h3_video_length_from_seconds
@@ -636,23 +703,23 @@ def split_h3_video_components_into_segments(
     source_rate = float(components.frame_rate)
     source_count = source_frames.shape[0]
     source_seconds = source_count / source_rate
+    total_frames = max(1, round(source_seconds * 24))
 
-    # If segment_count is specified, divide into that many equal H3 segments
-    # If segment_count is 0, use duration_seconds to step across available duration
+    # If segment_count is provided, derive window_frames to divide evenly into segment_count windows
     if segment_count > 0:
-        segment_indices = list(range(segment_count))
-        use_fixed_segments = True
+        target_f = total_frames / segment_count
+        window_frames = h3_snap_frame_count(round(target_f))
+    elif duration_seconds > 0:
+        window_frames = h3_video_length_from_seconds(duration_seconds)
     else:
-        dur = float(duration_seconds) if duration_seconds > 0 else 5.17
-        start_sec = float(start_at_timestamp) if start_at_timestamp > 0 else 0.0
-        remaining_sec = max(0.0, source_seconds - start_sec)
-        num_segments = max(1, int(round(remaining_sec / dur)))
-        segment_indices = []
-        curr = start_sec
-        while curr < source_seconds:
-            segment_indices.append((curr, dur))
-            curr += dur
-        use_fixed_segments = False
+        window_frames = 124
+
+    # Use the single authoritative schedule planner so window frame spans match the sampler 1:1
+    _, _, window_records, _ = plan_h3_schedule(
+        total_frames=total_frames,
+        window_frames=window_frames,
+        overlap_frames=overlap_frames,
+    )
 
     frames_list = []
     audio_list = []
@@ -662,41 +729,27 @@ def split_h3_video_components_into_segments(
     out_w = 0
     out_h = 0
 
-    if use_fixed_segments:
-        for seg_idx in segment_indices:
-            frames, audio, width, height, length, _, _ = prepare_h3_reference_components(
-                components,
-                megapixels,
-                duration_seconds=0.0,
-                start_at_timestamp=0.0,
-                spatially_prepared=True,
-                segment_count=segment_count,
-                segment_index=seg_idx,
-            )
-            out_w, out_h = width, height
-            t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
-            prep_video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
-            frames_list.append(frames)
-            audio_list.append(audio)
-            length_list.append(length)
-            video_list.append(prep_video)
-            transcript_list.append(t_audio)
-    else:
-        for s_time, s_dur in segment_indices:
-            frames, audio, width, height, length, _, _ = prepare_h3_reference_components(
-                components,
-                megapixels,
-                duration_seconds=s_dur,
-                start_at_timestamp=s_time,
-                spatially_prepared=True,
-            )
-            out_w, out_h = width, height
-            t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
-            prep_video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
-            frames_list.append(frames)
-            audio_list.append(audio)
-            length_list.append(length)
-            video_list.append(prep_video)
-            transcript_list.append(t_audio)
+    for w in window_records:
+        f_start = w["frame_start"]
+        f_end = w["frame_end"]
+        f_len = f_end - f_start
+        s_time = f_start / 24.0
+        s_dur = f_len / 24.0
+
+        frames, audio, width, height, length, _, _ = prepare_h3_reference_components(
+            components,
+            megapixels,
+            duration_seconds=s_dur,
+            start_at_timestamp=s_time,
+            spatially_prepared=True,
+        )
+        out_w, out_h = width, height
+        t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
+        prep_video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
+        frames_list.append(frames)
+        audio_list.append(audio)
+        length_list.append(length)
+        video_list.append(prep_video)
+        transcript_list.append(t_audio)
 
     return frames_list, audio_list, out_w, out_h, length_list, video_list, transcript_list
