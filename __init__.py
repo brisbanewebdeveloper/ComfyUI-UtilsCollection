@@ -19,6 +19,7 @@ from .nodes.logic_math_nodes import *
 from .nodes.patcher_nodes import *
 from .nodes.lama_nodes import *
 from .nodes.model_nodes import *
+from .nodes.sampling_nodes import *
 
 from comfy_api.latest import ComfyExtension, io
 from .node_replacements import register_replacements
@@ -259,6 +260,7 @@ class SamplingUtils(ComfyExtension):
             LamaRemoverIMG,
             TextGenerateQwen35SystemPrompt,
             ColorConvertNode,
+            UC_H3LoopSampler,
             *LOGIC_MATH_NODES,
             *SCHEDULER_NODES,
         ])
