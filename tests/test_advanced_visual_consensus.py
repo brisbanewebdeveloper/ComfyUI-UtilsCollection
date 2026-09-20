@@ -309,6 +309,124 @@ def test_complete_conditioning_consensus_rejects_bad_minimax_tags(monkeypatch):
         )
 
 
+def test_complete_conditioning_consensus_preserves_equal_qwen_image21_slots(monkeypatch):
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "get_torch_device", lambda: torch.device("cpu")
+    )
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "intermediate_dtype", lambda: torch.float32
+    )
+    first = [[torch.ones(1, 3, 2), {"image_slots": [1, 2]}]]
+    second = [[torch.full((1, 3, 2), 2.0), {"image_slots": list([1, 2])}]]
+
+    result = encoder_helpers.blend_complete_conditionings(
+        [first, second], {"blend_preset": "custom", "blend_method": "linear"}
+    )
+
+    assert result[0][1]["image_slots"] == [1, 2]
+
+
+@pytest.mark.parametrize("other_slots", [None, [2, 1]])
+def test_complete_conditioning_consensus_rejects_missing_or_mismatched_qwen_image21_slots(
+    monkeypatch, other_slots
+):
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "get_torch_device", lambda: torch.device("cpu")
+    )
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "intermediate_dtype", lambda: torch.float32
+    )
+    first = [[torch.ones(1, 3, 2), {"image_slots": [1]}]]
+    second_metadata = {} if other_slots is None else {"image_slots": other_slots}
+    second = [[torch.ones(1, 3, 2), second_metadata]]
+
+    with pytest.raises(ValueError, match="image_slots"):
+        encoder_helpers.blend_complete_conditionings(
+            [first, second], {"blend_preset": "custom", "blend_method": "linear"}
+        )
+
+
+def test_complete_conditioning_consensus_rejects_qwen_image21_slot_sequence_remap(monkeypatch):
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "get_torch_device", lambda: torch.device("cpu")
+    )
+    monkeypatch.setattr(
+        encoder_helpers.comfy.model_management, "intermediate_dtype", lambda: torch.float32
+    )
+    short = [[torch.ones(1, 2, 2), {"image_slots": [1]}]]
+    long = [[torch.ones(1, 3, 2), {"image_slots": [1]}]]
+
+    with pytest.raises(ValueError, match="image_slots"):
+        encoder_helpers.blend_complete_conditionings(
+            [short, long], {"blend_preset": "custom", "blend_method": "linear"}
+        )
+
+
+def test_qwen_image21_consensus_source_keeps_vision_for_visual_range(monkeypatch):
+    calls = []
+    tokenizer_type = type(
+        "QwenImage21Tokenizer", (), {"__module__": "comfy.text_encoders.qwen_image21", "clip_name": "qwen3vl_8b"}
+    )
+
+    class Clip:
+        tokenizer = tokenizer_type()
+
+        @staticmethod
+        def tokenize(text, **kwargs):
+            calls.append((text, kwargs))
+            return {"qwen3vl_8b": [[(151644, 1.0), (151644, 1.0)]]}
+
+    image = torch.zeros(1, 2, 2, 3)
+    monkeypatch.setattr(encoder_helpers, "prepare_vlm_image", lambda source, _resolution: source)
+    monkeypatch.setattr(
+        encoder_helpers,
+        "encode_embedding_classical_scaled_bias",
+        lambda *_args, **_kwargs: [[torch.zeros(1, 1, 1), {}]],
+    )
+    monkeypatch.setattr(
+        encoder_helpers, "find_visual_token_range", lambda *_args, **_kwargs: (0, 1)
+    )
+    monkeypatch.setattr(encoder_helpers, "visual_fusion_grid", lambda *_args: (1, 1))
+
+    result = encoder_helpers._encode_visual_consensus_source(
+        Clip(), image, 384, "prompt", "grid-deepstack"
+    )
+
+    assert result["visual_range"] == (0, 1)
+    assert len(calls) == 1
+    assert calls[0][0] == "prompt"
+    assert calls[0][1]["skip_template"] is True
+    assert calls[0][1]["keep_vision"] is True
+    assert len(calls[0][1]["images"]) == 1
+    assert calls[0][1]["images"][0] is image
+
+
+def test_qwen_image21_consensus_text_only_uses_qwen_prompt(monkeypatch):
+    captured = {}
+    tokenizer_type = type(
+        "QwenImage21Tokenizer", (), {"__module__": "comfy.text_encoders.qwen_image21"}
+    )
+    clip = types.SimpleNamespace(tokenizer=tokenizer_type())
+    conditioning = [[torch.ones(1, 1, 1), {}]]
+    monkeypatch.setattr(
+        encoder_helpers,
+        "encode_embedding_classical_scaled_bias",
+        lambda _clip, prompt, **kwargs: captured.update(prompt=prompt, kwargs=kwargs) or conditioning,
+    )
+    monkeypatch.setattr(
+        encoder_helpers, "_scale_and_attach_visual_consensus_references", lambda *_args: conditioning
+    )
+
+    result = encoder_helpers.execute_advanced_visual_consensus(
+        clip, "describe", "be precise", 384, {}, {}, "Fast (1024)", "off", None,
+        1.0, 8, lambda *_args: conditioning,
+    )
+
+    assert result is conditioning
+    assert captured["prompt"] == encoder_helpers.format_qwen_image21_prompt("describe", "be precise")
+    assert captured["kwargs"] == {"skip_template": True}
+
+
 def _execution_config(spatial=True, consensus=True, samples=1):
     return {
         "enable_spatial_fusion": spatial,

@@ -42,6 +42,8 @@ from ..helpers.encoder_helpers import(
     prepare_vae_reference_image,
     qwen3vl_visual_encoder_path,
     is_klein_vl_text_encoder,
+    is_qwen_image21_text_encoder,
+    format_qwen_image21_prompt,
     is_minimax_h3_text_encoder,
     tokenize_minimax_h3_prompt,
     format_minimax_h3_prompt,
@@ -2059,6 +2061,8 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, prompt, system_prompt, vlm_resolution, image_inputs: io.Autogrow.Type, visual_fusion_config: dict = None, formula: str = "", padding_method: str = "zero-pad", vae_resolution="Fast (1024)", ref_latent_mode="off", vae=None, multiplier: float = 1.0, vae_dimension_multiple=8, semantic_anchor: bool = False, fusion_method=None) -> io.NodeOutput:
+        if is_qwen_image21_text_encoder(clip) and ref_latent_mode != "off":
+            raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
         method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
         if method not in ("conds_fusion", "token_fusion"):
             raise ValueError(f"Unsupported visual fusion method: {method}")
@@ -2086,12 +2090,15 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
         _, active_images, _ = extract_and_flatten_images(image_inputs)
         minimax_h3 = is_minimax_h3_text_encoder(clip)
         klein_vl = is_klein_vl_text_encoder(clip)
+        qwen_image21 = is_qwen_image21_text_encoder(clip)
         if minimax_h3 and ref_latent_mode != "off":
             raise ValueError(
                 "MiniMax H3 reference latents require Core's MiniMax H3 reference conditioning node. Set ref_latent_mode to off."
             )
 
         def format_krea_prompt(user_prompt):
+            if qwen_image21:
+                return format_qwen_image21_prompt(user_prompt, system_prompt)
             if minimax_h3:
                 return format_minimax_h3_prompt(user_prompt, system_prompt)
             if klein_vl and not system_prompt:
@@ -2185,6 +2192,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
                         if minimax_h3
                         else clip.tokenize(
                             inline_prompt, images=inline_images, skip_template=True,
+                            **({"keep_vision": True} if qwen_image21 else {}),
                         )
                     )
                     inline_cond = clip.encode_from_tokens_scheduled(inline_tokens)
@@ -2216,6 +2224,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
                     visual_ranges["a"] = find_visual_token_range(
                         inline_tokens,
                         sequence_tensors["a"],
+                        qwen_image21=qwen_image21,
                     )
                 if formula.strip() not in {"", "a"}:
                     logging.warning(
@@ -2273,7 +2282,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
                         tokenize_minimax_h3_prompt(clip, full_prompt, [processed_img])
                         if minimax_h3
                         else clip.tokenize(
-                            full_prompt, images=[processed_img], skip_template=True
+                            full_prompt, images=[processed_img], skip_template=True, **({"keep_vision": True} if qwen_image21 else {})
                         )
                     )
                     tokens_dict[letter] = tokens
@@ -2284,6 +2293,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
                             visual_method != "off"
                             and visual_encoder_path == "legacy-flat"
                         ),
+                        qwen_image21=qwen_image21,
                     )
                     if visual_method != "off":
                         visual_grids[letter] = visual_fusion_grid(

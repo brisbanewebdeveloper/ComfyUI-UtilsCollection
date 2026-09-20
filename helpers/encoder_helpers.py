@@ -248,6 +248,23 @@ def is_klein_vl_text_encoder(clip) -> bool:
     )
 
 
+def is_qwen_image21_text_encoder(clip) -> bool:
+    return any(
+        cls.__module__ == "comfy.text_encoders.qwen_image21"
+        and cls.__name__ == "QwenImage21Tokenizer"
+        for cls in type(getattr(clip, "tokenizer", None)).__mro__
+    )
+
+
+def format_qwen_image21_prompt(prompt, system_prompt):
+    system = system_prompt or "Comprehend and analyze the provided prompt."
+    return (
+        f"<|im_start|>system\n{system}<|im_end|>\n"
+        f"<|im_start|>user\n{prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
 def visual_embedding_key(clip, tokens: dict) -> str:
     """Return the source model key required to load saved visual embeddings."""
     source_key = getattr(getattr(clip, "cond_stage_model", None), "clip_name", None)
@@ -1081,6 +1098,11 @@ def _released_qwen3vl_prefix_end(token_list, expanded_length: int) -> int:
     return template_end
 
 
+def _qwen_image21_prefix_end(token_list):
+    starts = [index for index, token in enumerate(token_list) if _token_id(token) == _QWEN_IM_START]
+    return starts[1] if len(starts) > 1 else 0
+
+
 def _qwen3vl_resized_dimensions(height: int, width: int, min_pixels=3136, max_pixels=12845056) -> tuple[int, int]:
     """Replicate released Core's Qwen3-VL resize arithmetic locally."""
     patch_size = 16
@@ -1265,7 +1287,7 @@ def visual_fusion_grid(image, visual_length: int, legacy_flat: bool = False) -> 
 
 
 def build_token_to_conditioning_map(
-    token_list, cond_tensor, embedding_key=None
+    token_list, cond_tensor, embedding_key=None, qwen_image21=False
 ) -> list[tuple[int, int]]:
     """Map raw tokenizer entries to conditioning spans, validating all inferred lengths."""
     cond_len = cond_tensor.shape[1]
@@ -1288,7 +1310,9 @@ def build_token_to_conditioning_map(
         and total_length < cond_len
         and cond_len == 512
     )
-    if total_length == cond_len or klein_tail_padding:
+    if qwen_image21:
+        prefix_len = _qwen_image21_prefix_end(token_list)
+    elif total_length == cond_len or klein_tail_padding:
         prefix_len = 0
     else:
         try:
@@ -1810,9 +1834,30 @@ def _encode_preprocessed_clip_model(clip_model, embeds, attention_mask, num_toke
     return conditioning.to(comfy.model_management.intermediate_device()), metadata
 
 
-def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata):
+def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata, embeds_info=None):
     """Apply outer text-encoder shaping normally performed after the inner Qwen encode."""
     key = next(iter(tokens))
+    if is_qwen_image21_text_encoder(clip):
+        if not tokens.get("keep_vision", False):
+            raise ValueError("Qwen-Image-2.1 visual fusion requires keep_vision=True; VAE-reference fusion is not supported yet.")
+        token_list = tokens[key][0]
+        prefix_end = _qwen_image21_prefix_end(token_list)
+        image_sizes = iter(entry["size"] for entry in (embeds_info or []) if entry["type"] == "image")
+        prefix_length = prefix_end
+        for token in token_list[:prefix_end]:
+            if is_image_token(token):
+                prefix_length += next(image_sizes) - 1
+        conditioning = conditioning[:, prefix_length:]
+        metadata = metadata.copy()
+        metadata.pop("image_slots", None)
+        attention_mask = metadata.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask[:, prefix_length:]
+            if attention_mask.sum() == torch.numel(attention_mask):
+                metadata.pop("attention_mask", None)
+            else:
+                metadata["attention_mask"] = attention_mask
+        return conditioning, metadata
     if key != "qwen3vl_4b" or conditioning.ndim != 4:
         return conditioning, metadata
 
@@ -1952,7 +1997,7 @@ def encode_token_fused_visual_sources(
                 clip_model, embeds, attention_mask, num_tokens, embeds_info
             )
             conditioning, metadata = _normalize_token_fused_conditioning(
-                clip, token_sources[0], conditioning, metadata
+                clip, token_sources[0], conditioning, metadata, embeds_info
             )
         return conditioning, metadata, embeds, embeds_info, fused
 
@@ -2081,7 +2126,7 @@ def encode_token_fused_visual_slots(
                 **({"cache": cache, "visual_encoder_path": visual_encoder_path, "hooks": clip.patcher.forced_hooks} if cache is not None else {}),
             )
             conditioning, metadata = _normalize_token_fused_conditioning(
-                clip, canonical_tokens, conditioning, metadata
+                clip, canonical_tokens, conditioning, metadata, fused_info
             )
             if next(iter(canonical_tokens)) == "qwen3vl_32b":
                 if conditioning.ndim != 3:
@@ -2182,7 +2227,7 @@ def encode_token_fused_text(
     if biases:
         token_list = token_sources[0][next(iter(token_sources[0]))][0]
         for tensor, _ in conditioning:
-            mapping = build_token_to_conditioning_map(token_list, tensor)
+            mapping = build_token_to_conditioning_map(token_list, tensor, qwen_image21=is_qwen_image21_text_encoder(clip))
             for start_token, end_token, strength in biases:
                 if start_token >= len(mapping):
                     continue
@@ -2213,7 +2258,9 @@ def execute_token_fusion_visual_conditioning(
     if not any(tag in prepared_prompt for tag in ("<|image_pad|>", "<|image|>", "<|vision_start|>")):
         prepared_prompt = VISION_BLOCK + prepared_prompt
     minimax_h3 = is_minimax_h3_text_encoder(clip)
-    if system_prompt is None:
+    if is_qwen_image21_text_encoder(clip):
+        full_prompt = format_qwen_image21_prompt(prepared_prompt, system_prompt)
+    elif system_prompt is None:
         full_prompt = prepared_prompt
     elif minimax_h3:
         full_prompt = format_minimax_h3_prompt(prepared_prompt, system_prompt)
@@ -2229,6 +2276,8 @@ def execute_token_fusion_visual_conditioning(
         if minimax_h3:
             return tokenize_minimax_h3_prompt(clip, text, [image])
         kwargs = {"skip_template": True} if skip_template else {}
+        if is_qwen_image21_text_encoder(clip):
+            kwargs["keep_vision"] = True
         return clip.tokenize(text, images=[image], **kwargs)
 
     conditioning, token_sources = encode_token_fused_text(
@@ -2957,6 +3006,7 @@ def find_visual_token_range(
     legacy_krea_spatial=False,
     minimax_token_tags=None,
     minimax_visual_index=None,
+    qwen_image21=False,
 ) -> tuple:
     key_name = next(iter(tokens.keys()))
     token_list = tokens[key_name][0]
@@ -3011,7 +3061,7 @@ def find_visual_token_range(
         return visual_start, visual_end
 
     mapping = build_token_to_conditioning_map(
-        token_list, cond_tensor, embedding_key=key_name
+        token_list, cond_tensor, embedding_key=key_name, qwen_image21=qwen_image21
     )
     for i, t in enumerate(token_list):
         if is_image_token(t):
@@ -3035,6 +3085,8 @@ def encode_embedding_classical_scaled_bias(
     def tokenize(value):
         if tokenize_callback is not None:
             return tokenize_callback(value)
+        if is_qwen_image21_text_encoder(clip):
+            return clip.tokenize(value, llama_template=llama_template, **{"keep_vision": True, **kwargs})
         return clip.tokenize(value, llama_template=llama_template, **kwargs)
 
     if "(" not in text or ")" not in text:
@@ -3071,7 +3123,7 @@ def encode_embedding_classical_scaled_bias(
 
         key_name = next(iter(tokens.keys()))
         token_list = tokens[key_name][0]
-        mapping = build_token_to_conditioning_map(token_list, new_cond)
+        mapping = build_token_to_conditioning_map(token_list, new_cond, qwen_image21=is_qwen_image21_text_encoder(clip))
 
         # Scale embeddings using mapped ranges
         for bias in biases_to_apply:
@@ -3270,6 +3322,10 @@ def blend_complete_conditionings(conditionings, blend_config):
     blended = []
     for schedule_index in range(next(iter(schedule_lengths))):
         entries = [conditioning[schedule_index] for conditioning in conditionings]
+        slots = [entry[1].get("image_slots") for entry in entries]
+        if any(value is not None for value in slots):
+            if any(value != slots[0] for value in slots[1:]) or len({entry[0].shape[1] for entry in entries}) != 1:
+                raise ValueError("Consensus requires matching image_slots and sequence lengths; incompatible reference layouts cannot be blended.")
         sequence_tensors = {
             chr(97 + index): entry[0] for index, entry in enumerate(entries)
         }
@@ -3291,12 +3347,15 @@ def blend_complete_conditionings(conditionings, blend_config):
             "embeds_info",
             "minimax_token_tags",
             "pooled_output",
+            "image_slots",
         }
         metadata_items = [entry[1] for entry in entries]
         common_keys = set.intersection(
             *(set(metadata) for metadata in metadata_items)
         ) - layout_keys
         metadata = {}
+        if slots[0] is not None:
+            metadata["image_slots"] = list(slots[0])
         for key in common_keys:
             values = [item[key] for item in metadata_items]
             first = values[0]
@@ -3369,7 +3428,9 @@ def batch_complete_conditionings(conditionings):
     return batched
 
 
-def _format_advanced_visual_consensus_prompt(prompt, system_prompt):
+def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False):
+    if qwen_image21:
+        return format_qwen_image21_prompt(prompt, system_prompt)
     if system_prompt:
         return (
             "<|im_start|>user\n<|im_end|>\n"
@@ -3411,13 +3472,14 @@ def _encode_visual_consensus_source(
     tokens = (
         tokenize_minimax_h3_prompt(clip, prompt, [processed])
         if minimax_h3
-        else clip.tokenize(prompt, images=[processed], skip_template=True)
+        else clip.tokenize(prompt, images=[processed], skip_template=True, **({"keep_vision": True} if is_qwen_image21_text_encoder(clip) else {}))
     )
     visual_range = find_visual_token_range(
         tokens,
         tensor,
         legacy_krea_spatial=visual_encoder_path == "legacy-flat",
         minimax_token_tags=metadata.get("minimax_token_tags"),
+        qwen_image21=is_qwen_image21_text_encoder(clip),
     )
     return {
         "conditioning": [[tensor, metadata]],
@@ -3440,7 +3502,7 @@ def _tokenize_visual_consensus_source(clip, source_image, resolution, prompt):
     tokens = (
         tokenize_minimax_h3_prompt(clip, prompt, [processed])
         if is_minimax_h3_text_encoder(clip)
-        else clip.tokenize(prompt, images=[processed], skip_template=True)
+        else clip.tokenize(prompt, images=[processed], skip_template=True, **({"keep_vision": True} if is_qwen_image21_text_encoder(clip) else {}))
     )
     return tokens
 
@@ -4258,6 +4320,9 @@ def execute_advanced_visual_consensus(
     if not isinstance(joint_config, dict):
         raise ValueError("Connect a Visual Consensus Configuration.")
 
+    qwen_image21 = is_qwen_image21_text_encoder(clip)
+    if qwen_image21 and ref_latent_mode != "off":
+        raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
     minimax_h3 = is_minimax_h3_text_encoder(clip)
     if minimax_h3 and ref_latent_mode != "off":
         raise ValueError(
@@ -4273,7 +4338,7 @@ def execute_advanced_visual_consensus(
             format_minimax_h3_prompt(clean_prompt, system_prompt)
             if minimax_h3
             else _format_advanced_visual_consensus_prompt(
-                clean_prompt, system_prompt
+                clean_prompt, system_prompt, qwen_image21
             )
         )
         conditioning = encode_embedding_classical_scaled_bias(
@@ -4323,7 +4388,7 @@ def execute_advanced_visual_consensus(
     full_prompt = (
         format_minimax_h3_prompt(prepared_prompt, system_prompt)
         if minimax_h3
-        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt)
+        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21)
     )
 
     if consensus_enabled:

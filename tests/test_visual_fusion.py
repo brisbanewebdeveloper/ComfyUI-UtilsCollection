@@ -997,6 +997,209 @@ def test_token_fusion_keeps_nontrivial_krea2_attention_mask_after_template_slice
     assert torch.equal(normalized["attention_mask"], torch.tensor([[1, 0]]))
 
 
+def _qwen_image21_clip():
+    tokenizer_type = type(
+        "QwenImage21Tokenizer",
+        (),
+        {"__module__": "comfy.text_encoders.qwen_image21", "clip_name": "qwen3vl_8b"},
+    )
+    return types.SimpleNamespace(tokenizer=tokenizer_type())
+
+
+def test_token_fusion_qwen_image21_keeps_vision_and_slices_system_prefix():
+    tokens = {
+        "qwen3vl_8b": [[
+            (151644, 1.0), (10, 1.0), (151645, 1.0),
+            (151644, 1.0), (872, 1.0), (198, 1.0),
+            ({"type": "image"}, 1.0), (42, 1.0),
+        ]],
+        "keep_vision": True,
+    }
+    conditioning = torch.arange(8, dtype=torch.float32).reshape(1, 8, 1)
+    metadata = {"attention_mask": torch.tensor([[1, 1, 1, 1, 1, 1, 1, 0]])}
+
+    normalized, output_metadata = encoder_helpers._normalize_token_fused_conditioning(
+        _qwen_image21_clip(), tokens, conditioning, metadata
+    )
+
+    assert torch.equal(normalized, conditioning[:, 3:])
+    assert torch.equal(output_metadata["attention_mask"], torch.tensor([[1, 1, 1, 1, 0]]))
+
+
+def test_token_fusion_qwen_image21_rejects_unsupported_reference_latent_path():
+    tokens = {"qwen3vl_8b": [[(151644, 1.0), (151644, 1.0)]]}
+
+    with pytest.raises(ValueError, match="keep_vision=True"):
+        encoder_helpers._normalize_token_fused_conditioning(
+            _qwen_image21_clip(), tokens, torch.zeros(1, 2, 1), {}
+        )
+
+
+@pytest.mark.parametrize("prefix_image", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+def test_qwen_image21_fused_normalization_matches_core(monkeypatch, prefix_image, masked):
+    core = pytest.importorskip("comfy.text_encoders.qwen_image21")
+    stage = core.QwenImage21TEModel.__new__(core.QwenImage21TEModel)
+    torch.nn.Module.__init__(stage)
+    stage.clip = "qwen3vl_8b"
+    values = [151644, {"type": "image"} if prefix_image else 10, 151645,
+              151644, 872, 198, {"type": "image"}, 42]
+    offset = 2 if prefix_image else 0
+    spans = ([(1, 3)] if prefix_image else []) + [(6 + offset, 4)]
+    stage.qwen3vl_8b = types.SimpleNamespace(image_spans=spans)
+    raw = torch.arange((11 + offset) * 2, dtype=torch.float32).reshape(1, 11 + offset, 2)
+    mask = torch.ones(1, raw.shape[1], dtype=torch.long)
+    if masked:
+        mask[:, -1] = 0
+    monkeypatch.setattr(core.sd1_clip.SD1ClipModel, "encode_token_weights",
+                        lambda self, tokens: (raw.clone(), None, {"attention_mask": mask.clone()}))
+    tokens = {"qwen3vl_8b": [[(value, 1.0) for value in values]], "keep_vision": True}
+    expected, _, expected_metadata = stage.encode_token_weights(tokens)
+    actual, metadata = encoder_helpers._normalize_token_fused_conditioning(
+        _qwen_image21_clip(), tokens, raw, {"attention_mask": mask},
+        [{"type": "image", "index": start, "size": size} for start, size in spans],
+    )
+    torch.testing.assert_close(actual, expected)
+    assert metadata.keys() == expected_metadata.keys()
+    if masked:
+        torch.testing.assert_close(metadata["attention_mask"], expected_metadata["attention_mask"])
+    generic = types.SimpleNamespace(tokenizer=object())
+    unchanged, generic_metadata = encoder_helpers._normalize_token_fused_conditioning(
+        generic, tokens, raw, {"attention_mask": mask},
+    )
+    assert unchanged is raw
+    assert generic_metadata["attention_mask"] is mask
+
+
+def test_qwen_image21_prompt_keeps_custom_system_turn_without_dummy_user_turn():
+    prompt = encoder_helpers.format_qwen_image21_prompt("describe image", "be precise")
+
+    assert prompt == (
+        "<|im_start|>system\nbe precise<|im_end|>\n"
+        "<|im_start|>user\ndescribe image<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
+def test_qwen_image21_visual_range_retains_user_prefix():
+    tokens = {"qwen3vl_8b": [[(value, 1.0) for value in (
+        151644, 10, 151645, 151644, 872, 198,
+        {"type": "image", "data": torch.zeros(1, 64, 64, 3)}, 42,
+    )]], "keep_vision": True}
+    assert encoder_helpers.find_visual_token_range(
+        tokens, torch.zeros(1, 8, 2), qwen_image21=True,
+    ) == (3, 7)
+
+
+@pytest.mark.parametrize("image_count", [1, 2])
+def test_qwen_image21_token_fusion_wires_prompt_and_keep_vision(monkeypatch, image_count):
+    calls = {"tokenize": [], "full_prompt": None}
+    base = _qwen_image21_clip()
+
+    class Clip:
+        tokenizer = base.tokenizer
+
+        @staticmethod
+        def tokenize(text, **kwargs):
+            calls["tokenize"].append((text, kwargs))
+            return {"qwen3vl_8b": [[(151644, 1.0), (151644, 1.0)]]}
+
+    monkeypatch.setattr(encoder_helpers, "prepare_vlm_image", lambda image, _resolution: image)
+
+    def encode(_clip, prompt, images, _config, tokenize_source, _path):
+        calls["full_prompt"] = prompt
+        for image in images:
+            tokenize_source(prompt, image)
+        return [[torch.zeros(1, 1, 1), {}]], []
+
+    monkeypatch.setattr(encoder_helpers, "encode_token_fused_text", encode)
+    images = [torch.zeros(1, 2, 2, 3) for _ in range(image_count)]
+    encoder_helpers.execute_token_fusion_visual_conditioning(
+        Clip(), "describe", images, {"visual_encoder_path": "grid-deepstack"}, 384,
+        system_prompt="be precise",
+    )
+
+    assert calls["full_prompt"] == encoder_helpers.format_qwen_image21_prompt(
+        "<|vision_start|><|image_pad|><|vision_end|>describe", "be precise"
+    )
+    assert len(calls["tokenize"]) == image_count
+    for index, (_, kwargs) in enumerate(calls["tokenize"]):
+        assert kwargs["skip_template"] is True and kwargs["keep_vision"] is True
+        assert kwargs["images"][0] is images[index]
+
+
+def test_qwen_image21_contextual_weighting_maps_after_system_prefix():
+    base = _qwen_image21_clip()
+
+    class Clip:
+        tokenizer = base.tokenizer
+
+        @staticmethod
+        def tokenize(text, **kwargs):
+            tokens = [(151644, 1.0), (10, 1.0), (151645, 1.0), (151644, 1.0), (872, 1.0), (198, 1.0)]
+            if text:
+                tokens.append((42, 1.0))
+            return {"qwen3vl_8b": [tokens]}
+
+    def encode(_tokens):
+        return [[torch.ones(1, 4, 1), {}]]
+
+    result = encoder_helpers.encode_embedding_classical_scaled_bias(
+        Clip(), "(weighted:2)", encode_callback=encode
+    )
+
+    assert torch.equal(result[0][0][0, :, 0], torch.tensor([1.0, 1.0, 1.0, 2.0]))
+
+
+def test_primary_visual_encoder_text_only_qwen_image21_uses_qwen_prompt(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        encoder_nodes,
+        "encode_embedding_classical_scaled_bias",
+        lambda _clip, prompt, **kwargs: captured.update(prompt=prompt, kwargs=kwargs) or [[torch.ones(1, 1, 1), {}]],
+    )
+
+    output = UC_AdvancedVisualConditioningEncode.execute(
+        clip=_qwen_image21_clip(), prompt="describe", system_prompt="be precise",
+        vlm_resolution=384, image_inputs={}, fusion_method="conds_fusion",
+    )
+
+    assert output.args[0][0][0].shape == (1, 1, 1)
+    assert captured["prompt"] == encoder_helpers.format_qwen_image21_prompt("describe", "be precise")
+    assert captured["kwargs"] == {"skip_template": True}
+
+
+@pytest.mark.parametrize(
+    ("execute", "kwargs"),
+    [
+        (
+            UC_AdvancedVisualConditioningEncode.execute,
+            {
+                "visual_fusion_config": None,
+                "image_inputs": {},
+            },
+        ),
+        (
+            encoder_nodes.UC_AdvancedVisConEncoder.execute,
+            {
+                "visual_consensus_config": {},
+                "image_inputs": {},
+            },
+        ),
+    ],
+)
+def test_primary_visual_encoders_reject_qwen_image21_reference_latents(execute, kwargs):
+    with pytest.raises(ValueError, match="Qwen-Image-2.1 VAE-reference fusion"):
+        execute(
+            clip=_qwen_image21_clip(),
+            prompt="",
+            system_prompt="",
+            vlm_resolution=384,
+            ref_latent_mode="single",
+            **kwargs,
+        )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
 def test_cached_cuda_mask_matches_cpu_raw_fusion():
     config = _config(seed=47)
