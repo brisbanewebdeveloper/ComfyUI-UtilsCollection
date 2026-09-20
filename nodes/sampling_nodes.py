@@ -90,7 +90,13 @@ class UC_H3LoopSampler(io.ComfyNode):
                     min=0.0,
                     max=1.0,
                     step=0.01,
-                    tooltip="How firmly earlier audio is kept across seams. 0.9 allows a smooth crossfade into newly generated audio.",
+                    tooltip="How firmly earlier audio is kept across seams when blending. 0.9 allows a smooth crossfade into newly generated audio.",
+                ),
+                io.Combo.Input(
+                    "audio_mode",
+                    options=["preserve_input", "generate_and_blend", "full_generation"],
+                    default="preserve_input",
+                    tooltip="Controls audio handling. 'preserve_input' keeps clean original reference audio across the whole clip. 'generate_and_blend' crossfades generated chunk audio with seam carry. 'full_generation' allows the model to synthesize the soundtrack without pinning.",
                 ),
                 io.Int.Input(
                     "sampling_start_step",
@@ -172,6 +178,7 @@ class UC_H3LoopSampler(io.ComfyNode):
         carry_mode="mask",
         overlap_strength_video=1.0,
         overlap_strength_audio=0.9,
+        audio_mode="preserve_input",
         sampling_start_step=0,
         sampling_end_step=1000,
         phase2_start_step=0,
@@ -200,6 +207,7 @@ class UC_H3LoopSampler(io.ComfyNode):
         carry_val = _first(carry_mode)
         str_v_val = _first(overlap_strength_video)
         str_a_val = _first(overlap_strength_audio)
+        audio_m_val = str(_first(audio_mode))
         start_step_val = _first(sampling_start_step)
         end_step_val = _first(sampling_end_step)
         p2_start_val = _first(phase2_start_step)
@@ -281,6 +289,7 @@ class UC_H3LoopSampler(io.ComfyNode):
             carry_mode=carry_val,
             overlap_strength_video=str_v_val,
             overlap_strength_audio=str_a_val,
+            audio_mode=audio_m_val,
             sampling_start_step=start_step_val,
             sampling_end_step=end_step_val,
             phase2_start_step=p2_start_val,

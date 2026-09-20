@@ -254,6 +254,7 @@ def test_node_schema():
     input_names = [inp.id for inp in schema.inputs]
     assert "model" in input_names
     assert "guider" in input_names
+    assert "audio_mode" in input_names
     assert "segment_lengths" in input_names
     assert "chunk_duration" in input_names
     assert "overlap_duration" in input_names

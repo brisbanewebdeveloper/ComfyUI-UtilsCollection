@@ -448,6 +448,7 @@ def start_sampling_loop(
     carry_mode: str = "mask",
     overlap_strength_video: float = 1.0,
     overlap_strength_audio: float = 0.9,
+    audio_mode: str = "preserve_input",
     sampling_start_step: int = 0,
     sampling_end_step: int = 1000,
     phase2_start_step: int = 0,
@@ -530,7 +531,24 @@ def start_sampling_loop(
         sub_a = None if out_a is None else out_a[:, :, :, a0:a1].clone()
 
         chunk_latent = h3_pack_av(latent, sub_v, sub_a)
-        if carried_v > 0:
+        if audio_mode == "full_generation":
+            # Strip audio carry so model generates audio cleanly without pinning
+            if carried_v > 0:
+                chunk_latent["noise_mask"] = build_carry_noise_mask(
+                    sub_v,
+                    sub_a,
+                    carried_v,
+                    0,  # no carried audio pinning
+                    overlap_strength_video,
+                    0.0,
+                    in_mask_v,
+                    in_mask_a,
+                    v0,
+                    v1,
+                    a0,
+                    a1,
+                )
+        elif carried_v > 0:
             chunk_latent["noise_mask"] = build_carry_noise_mask(
                 sub_v,
                 sub_a,
@@ -587,6 +605,10 @@ def start_sampling_loop(
             out_a[:, :, :, a0:a1] = res_a.to(out_a.dtype)
 
         lines.append(f"  chunk {i}: prompt {cond_idx}, latents {v0}-{v1}, carried {carried_v}")
+
+    # Restore clean input audio if audio_mode is 'preserve_input'
+    if audio_mode == "preserve_input" and master_a is not None:
+        out_a = master_a.clone()
 
     final_latent = h3_pack_av(latent, out_v, out_a)
     report = "\n".join(lines)
