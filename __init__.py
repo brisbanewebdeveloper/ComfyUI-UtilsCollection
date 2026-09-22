@@ -1,28 +1,30 @@
 from typing_extensions import override
 
-from .encoder_nodes import *
-from .embedding_nodes import *
-from .image_nodes import *
-from .preset_nodes import *
-from .vlm_nodes import *
-from .minimax_h3_vlm_nodes import *
-from .parameter_nodes import *
-from .utils_nodes import *
-from .legacy_nodes import *
-from .scheduler_nodes import *
-from .loader_nodes import *
-from .text_nodes import *
-from .textgen_nodes import *
-from .composite_nodes import *
-from .logic_math_nodes import *
-from .patcher_nodes import *
-from .lama_nodes import *
-from .model_nodes import *
+from .nodes.encoder_nodes import *
+from .nodes.embedding_nodes import *
+from .nodes.image_nodes import *
+from .nodes.video_nodes import *
+from .nodes.preset_nodes import *
+from .nodes.vlm_nodes import *
+from .nodes.minimax_h3_vlm_nodes import *
+from .nodes.parameter_nodes import *
+from .nodes.utils_nodes import *
+from .nodes.legacy_nodes import *
+from .nodes.scheduler_nodes import *
+from .nodes.loader_nodes import *
+from .nodes.text_nodes import *
+from .nodes.textgen_nodes import *
+from .nodes.composite_nodes import *
+from .nodes.logic_math_nodes import *
+from .nodes.patcher_nodes import *
+from .nodes.lama_nodes import *
+from .nodes.model_nodes import *
+from .nodes.sampling_nodes import *
 
 from comfy_api.latest import ComfyExtension, io
 from .node_replacements import register_replacements
 from .node_metadata import enrich_node_list
-from .scheduler_helpers import register_scheduler_handlers
+from .helpers.scheduler_helpers import register_scheduler_handlers
 
 class SamplingUtils(ComfyExtension):
     @override
@@ -54,6 +56,12 @@ class SamplingUtils(ComfyExtension):
             UC_MiniMaxH3RefSave,
             UC_MiniMaxH3RefApply,
             UC_AdvancedMiniMaxH3ImageToVideo,
+            UC_MiniMaxH3ClipContinuationEncoder,
+            UC_MiniMaxH3ClipContinuationSave,
+            UC_MiniMaxH3ClipContinuationLoad,
+            UC_MiniMaxH3ClipContinuationUnpack,
+            UC_MiniMaxH3ClipContinuationTrim,
+            UC_MiniMaxH3ClipContinuationAccumulate,
             UC_AdvMiniMaxH3ImageToVideoTokenFusion,
             UC_AdvMiniMaxH3ImageToVideoTemporalFusion,
             UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion,
@@ -119,6 +127,8 @@ class SamplingUtils(ComfyExtension):
             UC_ImageToVideoPrompt,
             UC_LoadImagePath,
             UC_LoadImageDirectory,
+            UC_LoadVideoPath,
+            UC_LoadVideoDirectory,
             UC_SampleVideoFramesAsImages,
             UC_MiniMaxH3RefVid,
             UC_ImagesToVideoTimeline,
@@ -126,6 +136,7 @@ class SamplingUtils(ComfyExtension):
             UC_HighResolutionTileSplit,
             UC_HighResolutionTileAccumulator,
             UC_ListToImageBatch,
+            UC_ImageBatchToList,
             UC_FromList,
             UC_SwitchInverseNode,
             UC_SoftSwitchInverseNode,
@@ -134,6 +145,7 @@ class SamplingUtils(ComfyExtension):
             UC_FromSeedCluster,
             UC_GetJsonValue,
             UC_ImageMatchPropertiesNode,
+            UC_ImageColorRestore,
             UC_OpticalFlowComposite,
             UC_ImageInwardEdgeFill,
             UC_ImageIterativeStretchFill,
@@ -174,6 +186,8 @@ class SamplingUtils(ComfyExtension):
             UC_SAM3Detect,
             UC_LoadImageWithAlpha,
             UC_LoadLaMaModel,
+            UC_WhisperLoader,
+            UC_WhisperTranscribe,
             UC_LaMaInpaint,
             UC_BatchedOpenPose,
             UC_DWPoseEstimator,
@@ -246,6 +260,8 @@ class SamplingUtils(ComfyExtension):
             LamaRemoverIMG,
             TextGenerateQwen35SystemPrompt,
             ColorConvertNode,
+            UC_H3LoopSampler,
+            UC_H3RefVideoSegments,
             *LOGIC_MATH_NODES,
             *SCHEDULER_NODES,
         ])

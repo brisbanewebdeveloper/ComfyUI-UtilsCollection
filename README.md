@@ -6,6 +6,15 @@ A collection of ComfyUI nodes for modern text and multimodal conditioning, image
 
 The list below uses the canonical node IDs. Deprecated compatibility aliases remain registered for existing workflows but are not duplicated here.
 
+### Whisper audio transcription
+
+Whisper transcription requires `tiktoken` (included in `requirements.txt`). Without it, the collection still loads and non-Whisper nodes remain available; attempting transcription gives an installation error. Install it in ComfyUI's Python environment and restart ComfyUI to enable Whisper.
+
+- `UC_WhisperLoader` loads tiny, base (default), small, medium, large-v2, or large-v3 safetensors from the registered `whisper` model directories. If missing, executing the loader downloads only the selected model from `silveroxides/ComfyUI-UtilsCollection-Models/audio/whisper` into `models/whisper`. Existing configured directories retain priority; invalid checkpoints raise an error rather than being replaced.
+- `UC_WhisperTranscribe` takes the loaded model and ComfyUI `AUDIO`. Choose transcription (default) or translation to English, with automatic spoken-language detection or a language code. Stereo/multichannel audio is downmixed to mono and resampled to 16 kHz. Full recordings are processed in timestamp-aware windows.
+- Outputs are aligned ComfyUI lists: transcript text, a JSON array of `{start, end, text}` segments, and a spoken-language code per recording. Times are seconds from the start of each recording, not each processing window. With an explicit language, the language output reports that selection. Translation text is English, not the selected source language.
+- Native inference uses ComfyUI model management and attention, UEL safetensors loading, and `tiktoken`; it does not import `openai-whisper` or the local reference checkout. Segment timestamps are approximate. Word alignment, diarization, SRT/VTT formatting, and advanced decoding widgets are not included. A language unavailable in a checkpoint is rejected explicitly.
+
 ### Text encoding and conditioning
 
 - `UC_TextEncodeSystemPrompt`
@@ -51,6 +60,16 @@ The temporal encoders fuse offset video samples into the ordinary video token bu
 `UC_MiniMaxH3VLMGuide` inserts an independently encoded timestamp/image block before the prompt in compatible H3 conditioning. Chained guides retain insertion order. This experiment does not re-encode the original prompt jointly with the guide.
 
 `UC_MiniMaxH3FirstFrameReferences`, `UC_AdvancedMiniMaxH3ImageToVideoCombined`, and `UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion` were removed. Workflows using these IDs report missing nodes; no aliases or migration are provided.
+
+**MiniMax H3 Clip Continuation** saves decoded RGB tail frames and optional matching audio from clip 1 into slot `1`. Load slot `0` for clip 1 (no context), then Load slot `1` when generating clip 2. Keep one identical `filename_prefix` on both nodes. For each later clip, Load the prior slot and Save the current slot: `1→2`, `2→3`, and so on. Connect Load `continuation_media` to Clip Continuation Encoder. A video VAE and, when saved audio exists, an audio VAE are required. Tail frame 0 is a native guide and the appended Qwen Picture explicitly anchored at 00.00s. Interior tail frames are Qwen-only Video context; the final tail frame remains a native guide. Saved audio is native-only at target frame 0. Do not wire Save `path` to Load.
+
+For an unchanged reference-video timeline, select **temporal fusion** on Clip Continuation Load. The encoder fuses saved interior frames with reference-video Qwen blocks at the same target times using the existing temporal consensus path, rather than replacing or prepending the reference. A 22-frame tail supplies 20 interior-frame alternatives; its two endpoint guides and first-frame Picture remain separate. Prompt text, reference timestamps, and requested output length are preserved. This requires an additional Qwen encoding lane and also works alongside picture fusion. `replace` and `prepend` remain available with their existing Qwen semantics and default; ordinary native reference-video guides are retained in all modes. No mode is selected automatically.
+
+Clip Continuation Accumulate searches both the preceding output's ending and the new clip's beginning, bounded independently by `maximum_overlap_frames`. Saved `continuation_media` pixels provide supporting temporal evidence; they need not equal decoded pixels and do not shorten either search window. Sequences contain at least two frames and pass an aggregate visual threshold, so an imperfect frame need not split a match. Usable audio contributes to ranking; silent, short, incomplete, or unavailable audio is neutral. The splice minimizes visual seam discrepancy, then audio discrepancy, with central placement only as a tie-breaker. Both video and audio are trimmed at the selected positions.
+
+The console reports cuts and explains unchanged joins. Weak saved context is reported and actual-clip evidence remains usable. Unresolved competing offsets leave both clips unchanged with a warning. Visual scoring uses mean dHash similarity and a 70/30 RGB-motion score; usable audio uses the existing 60/40 visual-audio weighting. Alignment assumes 24 fps without time stretching or dropped-frame repair. Existing matching helpers remain available. Larger search windows increase runtime; synthetic tests do not establish generated-video quality.
+
+H3 Reference Video Components supports indexed extraction: set **Divide into segments** to `N`, then select **Segment index** from `0` through `N-1`. This divides the whole source on a shared 24-fps timeline and overrides manual duration/start controls. Segment boundaries do not drift through repeated H3 rounding. Required output padding holds the segment's last frame and adds silence; the preview reports padding separately. Set the count to `0` for existing manual behavior.
 
 #### MiniMax H3 Ref
 
@@ -167,6 +186,7 @@ the base-resolution conditioning fusion.
 - `UC_MediaPipeFaceComposite`
 - `UC_ListToImageBatch`
 - `UC_ImageMatchProperties`
+- `UC_ImageColorRestore`
 - `UC_OpticalFlowComposite`
 - `UC_ImageInwardEdgeFill`
 - `UC_ImageIterativeStretchFill`
@@ -275,7 +295,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_LoadImageDirectory`
 - `UC_LoadImageWithAlpha`
 - `UC_SampleVideoFramesAsImages`
-- `UC_MiniMaxH3RefVid` — **H3 Reference Video Components** prepares 24 fps reference frames, H3-ready audio, width, height, and frame count. Its final `video` output preserves the source resolution and framing, adjusting only timing and audio for nodes that accept VIDEO. Set the duration in seconds (`0` uses the whole clip); the selected duration rounds up to H3's supported frame count. Only the separate `frames` output is matched to the nearest standard aspect ratio from Video Resolution Selector and center-cropped to its selected resolution. Audio is resampled to 32 kHz and padded only at the end to an 800-sample boundary, avoiding Core's H3 audio input-cropping issue; missing audio is filled with silence.
+- `UC_MiniMaxH3RefVid` — **H3 Reference Video Components** prepares 24 fps reference frames, H3-ready audio, width, height, and frame count. Its final `video` output preserves the source resolution and framing, adjusting only timing and audio for nodes that accept VIDEO. `start_at_timestamp` skips the beginning of both video and audio: `0` skips nothing; positive seconds use H3 frame-count rounding. Duration is measured after that offset (`0` uses the remaining clip), with the usual H3 end padding. The live preview displays zero-based start frame, inclusive end frame, and output frame count; with automatic duration, end/count become available after video analysis. End frames can extend beyond the source because the final frame is repeated for padding. Only the separate `frames` output is matched to the nearest standard aspect ratio from Video Resolution Selector and center-cropped to its selected resolution. Audio is resampled to 32 kHz and padded only at the end to an 800-sample boundary, avoiding Core's H3 audio input-cropping issue; missing audio is filled with silence.
 - `UC_ImagesToVideoTimeline`
 - `UC_VideoTimelineText`
 - `UC_LoraLoaderCLIPOnly`

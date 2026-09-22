@@ -121,6 +121,7 @@ def test_registered_non_deprecated_nodes_have_search_metadata():
     checked = []
 
     for node_class in node_classes:
+        assert node_class.__module__.startswith(f"{PACKAGE_NAME}.nodes.")
         schema = node_class.define_schema()
         if schema.is_deprecated or "(Legacy)" in (schema.display_name or ""):
             continue

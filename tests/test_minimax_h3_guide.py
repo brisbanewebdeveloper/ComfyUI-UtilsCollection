@@ -11,7 +11,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(pathlib.Path(__file__).parents[1])]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_h3_guide_test.minimax_h3_guide_helpers import (
+from utils_collection_h3_guide_test.helpers.minimax_h3_guide_helpers import (
     LAYOUT_KEY,
     build_layout,
     layout_from_token_boundary,

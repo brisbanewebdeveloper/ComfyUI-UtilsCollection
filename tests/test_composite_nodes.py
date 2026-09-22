@@ -20,18 +20,17 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_composite_test import (
+    from utils_collection_composite_test.helpers import (
         background_replace_helpers,
         composite_helpers,
-        composite_nodes,
         foreground_content_helpers,
         image_helpers,
-        image_nodes,
-        model_assets,
         staged_compositor_helpers,
         staged_face_helpers,
     )
-    from utils_collection_composite_test.helper_functions import resize_nchw
+    from utils_collection_composite_test.nodes import composite_nodes, image_nodes
+    from utils_collection_composite_test import model_assets
+    from utils_collection_composite_test.helpers.helper_functions import resize_nchw
 finally:
     cli_args.cpu = prior_cpu
 
@@ -1854,6 +1853,23 @@ def test_property_match_zero_weight_is_bit_exact():
     ).result[0]
 
     assert torch.equal(result, generated)
+
+
+def test_image_color_restore_uses_legacy_schema_and_transfer():
+    schema = image_nodes.UC_ImageColorRestore.define_schema()
+    assert schema.node_id == "UC_ImageColorRestore"
+    assert schema.display_name == "Image Color Restore"
+    assert [value.id for value in schema.inputs] == [
+        "original_image", "generated_image", "overall_weight", "color_weight",
+        "lighting_weight", "texture_preservation", "mask",
+    ]
+    source = torch.full((1, 6, 8, 3), 0.8)
+    generated = torch.full((1, 10, 5, 3), 0.2)
+    restored = image_nodes.UC_ImageColorRestore.execute(
+        source, generated, 1.0, 1.0, 1.0, 0.5,
+    ).result[0]
+    assert restored.shape == generated.shape
+    assert restored.mean() > generated.mean()
 
 
 def test_property_match_uses_global_statistics_without_spatial_correspondence():

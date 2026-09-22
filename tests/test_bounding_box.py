@@ -12,15 +12,15 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_bbox_test.utils_nodes import (
+from utils_collection_bbox_test.nodes.utils_nodes import (
     UC_AdjustBoundingBox,
     UC_ExtractBoundingBox,
     UC_ExtractImage,
     UC_ExtractMask,
     UC_Ideogram4BoundingBoxCrop,
 )
-from utils_collection_bbox_test.image_helpers import mask_to_bounding_box
-from utils_collection_bbox_test.image_nodes import UC_MaskToBoundingBox
+from utils_collection_bbox_test.helpers.image_helpers import mask_to_bounding_box
+from utils_collection_bbox_test.nodes.image_nodes import UC_MaskToBoundingBox
 
 
 def test_mask_to_bounding_box_uses_core_dictionary_shape():

@@ -9,7 +9,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_photography_preset_test import preset_nodes, presets_collection
+from utils_collection_photography_preset_test.nodes import preset_nodes
+from utils_collection_photography_preset_test import presets_collection
 
 
 FAMILIES = (

@@ -1,14 +1,15 @@
 import { app } from "../../scripts/app.js";
+import { h3VideoLengthFromSeconds, h3ReferenceFrameRange } from "./h3_video_length.js";
 import {
   clampResolutionPreviewSize,
   resolutionPreviewMinimumSize,
 } from "./resolution_preview_layout.js";
 
 const VIDEO_MIDDLE_BAND_RESOLUTIONS = {
-  "21:9": [[896, 384], [1120, 480]],
+  "7:3": [[896, 384], [1120, 480], [1280, 544]],
   "16:9": [[768, 416], [864, 480], [1024, 576], [1152, 672]],
   "16:10": [[768, 480], [1024, 640]],
-  "4:3": [[640, 480], [768, 576], [1024, 768]],
+  "4:3": [[640, 480], [768, 576], [864, 672], [1024, 768]],
 };
 
 function gcd(left, right) {
@@ -27,6 +28,10 @@ function ratioFromValue(value) {
 
 function widgetValue(node, name) {
   return node.widgets?.find((widget) => widget.name === name)?.value;
+}
+
+function widgetIsLinked(node, name) {
+  return node.inputs?.some((input) => input.widget?.name === name && input.link != null) ?? false;
 }
 
 function compareKeys(left, right) {
@@ -109,7 +114,29 @@ function videoResolution(ratioWidth, ratioHeight, megapixels, multiple, minimum)
   return best;
 }
 
+const PREVIEW_FONT = "12px sans-serif";
+const previewMeasureContext = document.createElement("canvas").getContext("2d");
+previewMeasureContext.font = PREVIEW_FONT;
+
+function fitPreview(node) {
+  const minimum = node.computeSize();
+  if (node.size[0] < minimum[0]) node.setSize([minimum[0], node.size[1]]);
+  node.setDirtyCanvas(true, true);
+}
+
 function updatePreview(node, backendValue) {
+  if (node.__ucH3ReferenceVideo) {
+    const range = backendValue ?? h3ReferenceFrameRange(
+      widgetIsLinked(node, "start_at_timestamp") ? null : Number(widgetValue(node, "start_at_timestamp")),
+      widgetIsLinked(node, "duration_seconds") ? null : Number(widgetValue(node, "duration_seconds")),
+      node.__ucH3SourceSeconds ?? null,
+      widgetIsLinked(node, "segment_count") ? null : Number(widgetValue(node, "segment_count") ?? 0),
+      widgetIsLinked(node, "segment_index") ? null : Number(widgetValue(node, "segment_index") ?? 0),
+    );
+    node.__ucResolutionPreview = `start frame ${range.start ?? "…"} · end frame ${range.end ?? "…"} · ${range.length ?? "…"} frames${range.padding ? ` (${range.padding} padded)` : ""}`;
+    fitPreview(node);
+    return;
+  }
   if (backendValue !== undefined) {
     node.__ucResolutionPreview = String(Array.isArray(backendValue) ? backendValue[0] : backendValue);
   } else {
@@ -121,20 +148,26 @@ function updatePreview(node, backendValue) {
     const [width, height] = node.__ucVideoResolutionSelector
       ? videoResolution(...ratio, megapixels, multiple, minimum)
       : regularResolution(...ratio, megapixels, multiple, minimum);
-    node.__ucResolutionPreview = `${width}×${height}`;
+    const length = node.__ucVideoResolutionSelector && !widgetIsLinked(node, "duration_seconds")
+      ? h3VideoLengthFromSeconds(Number(widgetValue(node, "duration_seconds")))
+      : null;
+    node.__ucResolutionPreview = length === null
+      ? `${width}×${height}`
+      : `${width}×${height} · ${length} frames`;
   }
-  node.setDirtyCanvas(true, true);
+  fitPreview(node);
 }
 
 app.registerExtension({
   name: "ComfyUI.UtilsCollection.ResolutionPreview",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector"].includes(nodeData.name)) return;
+    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector", "UC_MiniMaxH3RefVid"].includes(nodeData.name)) return;
 
     const computeSize = nodeType.prototype.computeSize;
     nodeType.prototype.computeSize = function (out) {
       const baseSize = computeSize?.call(this, out ? [...out] : undefined) || [...(out || this.size || [0, 0])];
-      return resolutionPreviewMinimumSize(baseSize);
+      const textWidth = previewMeasureContext.measureText(this.__ucResolutionPreview || "").width;
+      return resolutionPreviewMinimumSize(baseSize, textWidth);
     };
 
     const onResize = nodeType.prototype.onResize;
@@ -147,6 +180,7 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated?.apply(this, arguments);
       this.__ucVideoResolutionSelector = nodeData.name === "UC_VideoResolutionSelector";
+      this.__ucH3ReferenceVideo = nodeData.name === "UC_MiniMaxH3RefVid";
       this.__ucResolutionPreview = "";
       const minimum = this.computeSize();
       this.setSize([
@@ -163,7 +197,7 @@ app.registerExtension({
       if (this.flags.collapsed || !this.__ucResolutionPreview) return;
       ctx.save();
       ctx.fillStyle = "#bbb";
-      ctx.font = "12px sans-serif";
+      ctx.font = PREVIEW_FONT;
       ctx.textAlign = "center";
       ctx.fillText(this.__ucResolutionPreview, this.size[0] / 2, this.size[1] - 9);
       ctx.restore();
@@ -172,14 +206,40 @@ app.registerExtension({
     const onWidgetChanged = nodeType.prototype.onWidgetChanged;
     nodeType.prototype.onWidgetChanged = function (name) {
       const result = onWidgetChanged?.apply(this, arguments);
-      if (["aspect_ratio", "megapixels", "multiple", "minimum"].includes(name)) updatePreview(this);
+      if (["aspect_ratio", "megapixels", "multiple", "minimum", "duration_seconds", "start_at_timestamp", "segment_count", "segment_index"].includes(name)) updatePreview(this);
       return result;
     };
 
     const onExecuted = nodeType.prototype.onExecuted;
     nodeType.prototype.onExecuted = function (message) {
       onExecuted?.apply(this, arguments);
+      if (this.__ucH3ReferenceVideo) {
+        const range = message?.h3_reference_range?.[0];
+        if (range) {
+          this.__ucH3SourceSeconds = range.source_seconds;
+          updatePreview(this, { start: range.start_frame, end: range.source_end_frame ?? range.start_frame + range.length - 1, length: range.length, padding: range.padded_frames ?? 0 });
+        }
+        return;
+      }
       updatePreview(this, message?.resolution);
     };
+
+    if (nodeData.name === "UC_MiniMaxH3RefVid") {
+      const onConnectionsChange = nodeType.prototype.onConnectionsChange;
+      nodeType.prototype.onConnectionsChange = function (type, slot) {
+        const result = onConnectionsChange?.apply(this, arguments);
+        if (type === 1) {
+          if (this.inputs?.[slot]?.name === "video") this.__ucH3SourceSeconds = null;
+          updatePreview(this);
+        }
+        return result;
+      };
+      const onConfigure = nodeType.prototype.onConfigure;
+      nodeType.prototype.onConfigure = function () {
+        const result = onConfigure?.apply(this, arguments);
+        updatePreview(this);
+        return result;
+      };
+    }
   },
 });

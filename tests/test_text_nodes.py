@@ -9,7 +9,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_text_nodes_test import text_nodes
+from utils_collection_text_nodes_test.nodes import text_nodes
 
 
 def test_text_concatenate_autogrow_schema_uses_wildcard_links():

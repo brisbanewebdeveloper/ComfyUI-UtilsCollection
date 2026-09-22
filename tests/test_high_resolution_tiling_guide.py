@@ -14,7 +14,7 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_high_resolution_tiling_guide_test.utils_nodes import (
+    from utils_collection_high_resolution_tiling_guide_test.nodes.utils_nodes import (
         UC_HighResolutionTilingGuide,
     )
 finally:

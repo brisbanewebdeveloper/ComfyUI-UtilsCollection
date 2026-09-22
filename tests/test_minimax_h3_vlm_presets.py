@@ -12,9 +12,9 @@ sys.modules.setdefault(PACKAGE_NAME, package)
 
 from utils_collection_minimax_h3_vlm_preset_test import (
     minimax_h3_vlm_experimental_presets,
-    minimax_h3_vlm_nodes,
     minimax_h3_vlm_presets,
 )
+from utils_collection_minimax_h3_vlm_preset_test.nodes import minimax_h3_vlm_nodes
 
 
 NATIVE_H3_PRESETS = [

@@ -45,8 +45,8 @@ def test_changed_paths_select_only_dependent_groups_and_direct_tests():
     groups = runner.load_groups()
     selection = runner.select_tests(
         {
-            "staged_compositor_helpers.py",
-            "encoder_helpers.py",
+            "helpers/staged_compositor_helpers.py",
+            "helpers/encoder_helpers.py",
             "tests/test_scheduler_migration.py",
             "README.md",
         },
@@ -65,7 +65,7 @@ def test_changed_paths_select_only_dependent_groups_and_direct_tests():
     ("path", "group_names", "python_tests"),
     (
         (
-            "encoder_helpers.py",
+            "helpers/encoder_helpers.py",
             {"encoder", "minimax_h3_cache"},
             {
                 "tests/test_advanced_visual_consensus.py",
@@ -170,20 +170,20 @@ def test_deleted_source_uses_historical_group_without_deleted_test(monkeypatch, 
     monkeypatch.setattr(runner, "REPOSITORY_ROOT", tmp_path)
     current = {
         "encoder": runner.TestGroup(
-            "encoder", ("encoder_nodes.py",), ("tests/test_current.py",), ()
+            "encoder", ("nodes/encoder_nodes.py",), ("tests/test_current.py",), ()
         )
     }
     historical = {
         "encoder": runner.TestGroup(
             "encoder",
-            ("encoder_nodes.py", "qwen_vlm_nodes.py"),
+            ("nodes/encoder_nodes.py", "nodes/qwen_vlm_nodes.py"),
             ("tests/test_current.py", "tests/test_deleted.py"),
             (),
         )
     }
 
     selection = runner.select_tests(
-        {"qwen_vlm_nodes.py"}, current, historical_groups=(historical,)
+        {"nodes/qwen_vlm_nodes.py"}, current, historical_groups=(historical,)
     )
 
     assert selection.groups == {"encoder"}
@@ -278,7 +278,7 @@ def test_help_and_advisory_modes_never_run_tests(monkeypatch, capsys):
     monkeypatch.setattr(runner, "changed_paths", lambda base: pytest.fail("No-argument invocation inspected changes"))
     assert runner.main([]) == 0
     assert "--test" in capsys.readouterr().out
-    monkeypatch.setattr(runner, "changed_paths", lambda base: {"encoder_helpers.py"})
+    monkeypatch.setattr(runner, "changed_paths", lambda base: {"helpers/encoder_helpers.py"})
     monkeypatch.setattr(runner, "load_groups_from_revision", lambda revision: {})
     for args in (["--changed"], ["--dry-run"], ["--base", "HEAD"]):
         assert runner.main(args) == 0

@@ -1,6 +1,6 @@
 import pytest
 
-from .. import logic_math_nodes
+from ..nodes import logic_math_nodes
 
 
 EXPECTED_NODE_IDS = {

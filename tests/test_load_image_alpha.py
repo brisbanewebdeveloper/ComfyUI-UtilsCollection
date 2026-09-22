@@ -10,7 +10,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_load_image_alpha_test import image_nodes
+from utils_collection_load_image_alpha_test.nodes import image_nodes
 
 
 def test_load_image_alpha_v3_hooks_accept_annotated_input(monkeypatch, tmp_path):

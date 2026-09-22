@@ -16,8 +16,9 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_patcher_test import patcher_helpers, patcher_nodes
-from utils_collection_patcher_test.minimax_h3_cache_helpers import H3EncoderCache, clip_description
+from utils_collection_patcher_test.helpers import patcher_helpers
+from utils_collection_patcher_test.nodes import patcher_nodes
+from utils_collection_patcher_test.helpers.minimax_h3_cache_helpers import H3EncoderCache, clip_description
 
 
 def test_unified_attention_schema_keeps_mode_settings_separate():
@@ -930,6 +931,57 @@ def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
     assert final_layer_args["sigma"].item() == pytest.approx(0.5)
     assert final_layer_args["sample_sigmas"] is sample_sigmas
     assert final_layer_args["shifts"] == (1.25, 0.75)
+
+
+def test_cached_forward_supports_core_cond_audio_segments(monkeypatch):
+    layout = types.SimpleNamespace(
+        signature=(1, 1, 2, 2, 1),
+        segments=[
+            (0, 1, "text"),
+            (1, 3, "cond_audio"),
+            (3, 5, "audio"),
+            (5, 6, "video"),
+        ],
+        img_update=torch.ones(1, dtype=torch.bool),
+        audio_update=torch.tensor([False, False, True, True]),
+        seq_len=6,
+        position_ids=torch.zeros((6, 3)),
+    )
+    model = types.SimpleNamespace(
+        patch_size=(1, 2, 2),
+        sigma_shift_video=1.0,
+        sigma_shift_audio=1.0,
+        hidden_size=4,
+        use_adaln_curves=False,
+        blocks=[],
+        latents_dim=1,
+        video_patch_proj=lambda rows: rows,
+        audio_patch_proj=lambda rows: rows,
+        _cond_video_rows=lambda payload, device: None,
+        _cond_audio_rows=lambda payload, device: torch.zeros((2, 4), device=device),
+        time_embedder=lambda values: values[:, None].expand(-1, 4),
+        rope_freqs=lambda position_ids, device: torch.zeros((1, 1)),
+        final_layer=lambda *args: (torch.ones((1, 4)), torch.ones((2, 4))),
+    )
+    monkeypatch.setattr(
+        patcher_helpers.minimax_model,
+        "rope_rotation_table",
+        lambda frequencies, dtype: frequencies,
+    )
+
+    output = patcher_helpers.minimax_h3_block_patch_forward(
+        model,
+        [
+            torch.zeros((1, 1, 1, 2, 2), dtype=torch.float16),
+            torch.zeros((1, 4, 2, 1), dtype=torch.float16),
+        ],
+        torch.tensor([500.0]),
+        torch.zeros((1, 1, 4), dtype=torch.float32),
+        transformer_options={},
+        minimax_payload={"layout": layout},
+    )
+
+    assert len(output) == 2
 
 
 def test_model_helper_adds_only_reversible_instance_patch(monkeypatch):

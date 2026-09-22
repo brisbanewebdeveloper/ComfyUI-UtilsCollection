@@ -5,7 +5,9 @@ import torch
 
 import comfy.samplers
 
-from .. import node_replacements, scheduler_helpers, scheduler_nodes
+from .. import node_replacements
+from ..helpers import scheduler_helpers
+from ..nodes import scheduler_nodes
 
 
 EXPECTED_NODE_IDS = {

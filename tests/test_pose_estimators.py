@@ -16,7 +16,7 @@ sys.modules.setdefault(package.__name__, package)
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_pose_test import image_helpers, model_helpers
+    from utils_collection_pose_test.helpers import image_helpers, model_helpers
     model_helpers.register_openpose_paths()
 finally:
     cli_args.cpu = prior_cpu

@@ -16,9 +16,9 @@ sys.modules.setdefault(PACKAGE, package)
 prior_cpu = args.cpu
 args.cpu = True
 try:
-    from utils_collection_cache_test import encoder_helpers as encoder
-    from utils_collection_cache_test import encoder_nodes as nodes
-    from utils_collection_cache_test import minimax_h3_cache_helpers as cache_module
+    from utils_collection_cache_test.helpers import encoder_helpers as encoder
+    from utils_collection_cache_test.nodes import encoder_nodes as nodes
+    from utils_collection_cache_test.helpers import minimax_h3_cache_helpers as cache_module
 finally:
     args.cpu = prior_cpu
 

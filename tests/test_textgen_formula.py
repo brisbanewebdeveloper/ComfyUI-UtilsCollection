@@ -20,7 +20,8 @@ from comfy.cli_args import args as cli_args
 prior_cpu = cli_args.cpu
 cli_args.cpu = True
 try:
-    from utils_collection_textgen_test import textgen_helpers, textgen_nodes
+    from utils_collection_textgen_test.helpers import textgen_helpers
+    from utils_collection_textgen_test.nodes import textgen_nodes
 finally:
     cli_args.cpu = prior_cpu
 

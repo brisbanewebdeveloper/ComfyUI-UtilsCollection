@@ -12,7 +12,8 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_embedding_analysis_test import embedding_helpers, embedding_nodes
+from utils_collection_embedding_analysis_test.helpers import embedding_helpers
+from utils_collection_embedding_analysis_test.nodes import embedding_nodes
 
 
 class FakeTokenizerLeaf:

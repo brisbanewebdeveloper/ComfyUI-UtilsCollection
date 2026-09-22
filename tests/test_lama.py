@@ -12,7 +12,7 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(PACKAGE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_lama_test import lama_helpers
+from utils_collection_lama_test.helpers import lama_helpers
 from utils_collection_lama_test.models.lama import FFCResNetGenerator
 
 
