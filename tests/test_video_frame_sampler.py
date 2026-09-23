@@ -1513,6 +1513,27 @@ def test_h3_streamed_cache_reuses_ranges(tmp_path, monkeypatch):
     assert second[4] > first[4]
 
 
+@pytest.mark.parametrize("megapixels", [0.0, 0.01])
+def test_h3_reference_node_reuses_window_cache_after_output_eviction(tmp_path, monkeypatch, megapixels):
+    source = tmp_path / "source.mkv"
+    _encode_h3_fixture(source, "ffv1", 1)
+    monkeypatch.setattr(image_helpers.folder_paths, "get_temp_directory", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(image_helpers.InputImpl.VideoFromFile, "get_duration", lambda self: 20.0)
+    video = image_helpers.InputImpl.VideoFromFile(str(source))
+
+    first = utils_nodes.UC_MiniMaxH3RefVid.execute(video, megapixels=megapixels, duration_seconds=0.2, enable_whisper=False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("The same H3 window must reuse its decoded and resized disk cache")
+
+    monkeypatch.setattr(image_helpers, "_write_streamed_h3_components", forbidden)
+    monkeypatch.setattr(image_helpers.InputImpl.VideoFromFile, "get_components", forbidden)
+    second = utils_nodes.UC_MiniMaxH3RefVid.execute(video, megapixels=megapixels, duration_seconds=0.2, enable_whisper=False)
+    torch.testing.assert_close(second.args[0], first.args[0], rtol=0, atol=0)
+    torch.testing.assert_close(second.args[1]["waveform"], first.args[1]["waveform"], rtol=0, atol=0)
+    assert second.args[2:5] == first.args[2:5]
+
+
 def test_h3_legacy_video_cache_migrates_without_decoding_source(tmp_path, monkeypatch):
     from safetensors.torch import save_file
     from utils_collection_video_frame_sampler_test.helpers import image_helpers as cache

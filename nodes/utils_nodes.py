@@ -93,10 +93,10 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
                 start_sec = decode_start / 24.0
                 dur_sec = max(1, end_frame - decode_start) / 24.0
                 windowed_video = InputImpl.VideoFromFile(video.get_stream_source(), start_time=start_sec, duration=dur_sec)
-                components = windowed_video.get_components()
+                components = cached_h3_reference_components(windowed_video, megapixels, cache_long_window=True)
                 frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
                     components, megapixels, duration_seconds=duration_seconds, start_at_timestamp=start_at_timestamp,
-                    spatially_prepared=False, segment_count=segment_count, segment_index=segment_index,
+                    spatially_prepared=True, segment_count=segment_count, segment_index=segment_index,
                     continuation_media=continuation_media,
                     full_source_seconds=source_seconds,
                     window_start_frame=decode_start,

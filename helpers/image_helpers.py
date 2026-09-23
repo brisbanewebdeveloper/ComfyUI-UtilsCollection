@@ -1159,7 +1159,7 @@ def cached_video_components(video, preparation=None, prepare=None):
         # Migrate frame-by-frame, never materializing the old multi-GB tensor.
         components = read_legacy_components(legacy, source_key)
     elif preparation is not None and preparation.get("resize") == "h3-bicubic-center-v2":
-        if hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
+        if not preparation.get("cache_long_window") and hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
             components = video.get_components()
             return prepare(components) if prepare is not None else components
         _write_streamed_h3_components(path, key, video, preparation["megapixels"], storage)
@@ -1216,7 +1216,7 @@ class H3ResizedFrames:
         return self._batch[index - self._batch_start]
 
 
-def cached_h3_reference_components(video, megapixels):
+def cached_h3_reference_components(video, megapixels, *, cache_long_window=False):
     if not math.isfinite(megapixels) or megapixels < 0:
         raise ValueError("Megapixels must be non-negative.")
 
@@ -1234,6 +1234,8 @@ def cached_h3_reference_components(video, megapixels):
     prep_info = {"megapixels": megapixels}
     if megapixels > 0:
         prep_info["resize"] = "h3-bicubic-center-v2"
+    if cache_long_window:
+        prep_info["cache_long_window"] = True
     return cached_video_components(video, prep_info, prepare)
 
 
