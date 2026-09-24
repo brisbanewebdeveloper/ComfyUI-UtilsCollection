@@ -45,8 +45,8 @@ from comfy.text_encoders.minimax import token_tags_from_embeds_info
 _VISUAL_ENCODER_PATH_LOCK = threading.RLock()
 MINIMAX_H3_MEDIA_STRUCTURE = "<<picture>>: <<visual>>"
 MINIMAX_H3_AUDIO_MODES = (
-    "auto_anchor",
     "reference_only",
+    "auto_anchor",
 )
 MINIMAX_H3_VIDEO_LATENT_MODES = (
     "full video",
@@ -509,7 +509,7 @@ def build_minimax_h3_media_config(
     timestamps, timestamp_format="0.0s", structure=MINIMAX_H3_MEDIA_STRUCTURE,
     video_fps=2, video_latent_mode="even keyframes",
     video_latent_keyframes=4, temporal_density=1, temporal_fusion_method="consensus",
-    audio_mode="auto_anchor",
+    audio_mode="reference_only",
 ):
     if isinstance(timestamp_format, list):
         timestamp_format = timestamp_format[0] if timestamp_format else "0.0s"
@@ -547,7 +547,7 @@ def build_minimax_h3_media_config(
     if temporal_fusion_method not in ("consensus", "spatial"):
         raise ValueError("Unsupported MiniMax H3 temporal fusion method.")
     if isinstance(audio_mode, list):
-        audio_mode = audio_mode[0] if audio_mode else "auto_anchor"
+        audio_mode = audio_mode[0] if audio_mode else "reference_only"
     if audio_mode not in MINIMAX_H3_AUDIO_MODES:
         raise ValueError(f"Unsupported MiniMax H3 audio mode: {audio_mode}")
     return {
@@ -600,7 +600,7 @@ def _validate_minimax_h3_media_config(media_config, output_frame_count):
     if timestamp_format not in VIDEO_FRAME_TIMESTAMP_FORMATS:
         raise ValueError("MiniMax H3 media config has an unsupported timestamp format.")
     structure = _validate_minimax_h3_media_structure(media_config.get("structure"))
-    audio_mode = media_config.get("audio_mode", "auto_anchor")
+    audio_mode = media_config.get("audio_mode", "reference_only")
     if audio_mode not in MINIMAX_H3_AUDIO_MODES:
         raise ValueError(f"Unsupported MiniMax H3 audio mode: {audio_mode}")
     return (
@@ -3769,7 +3769,7 @@ def execute_advanced_minimax_h3_image_to_video(
     video_fps = 2
     video_latent_mode = None
     video_latent_keyframes = 4
-    audio_mode = "auto_anchor"
+    audio_mode = "reference_only"
     if media_config is not None:
         (
             picture_timestamps,

@@ -3640,8 +3640,8 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
                 io.Combo.Input(
                     "audio_mode",
                     options=list(MINIMAX_H3_AUDIO_MODES),
-                    default="auto_anchor",
-                    tooltip="Controls reference audio timeline anchoring. auto_anchor pins audio to frame 0 as a keyframe guide to avoid cutoff during long clips; reference_only sends audio only as a conditioning reference.",
+                    default="reference_only",
+                    tooltip="Controls reference audio timeline anchoring. reference_only sends audio only as a conditioning reference (matching Core defaults); auto_anchor pins audio to frame 0 as a keyframe guide to avoid cutoff during long clips.",
                 ),
             ],
             outputs=[MiniMaxH3MediaConfig.Output(display_name="media_config", tooltip="Runtime media configuration for the Advanced MiniMax H3 encoder nodes.")],
@@ -3658,7 +3658,7 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         video_latent_keyframes=4,
         temporal_density=1,
         temporal_fusion_method="consensus",
-        audio_mode="auto_anchor",
+        audio_mode="reference_only",
     ):
         return io.NodeOutput(build_minimax_h3_media_config(
             timestamps,
