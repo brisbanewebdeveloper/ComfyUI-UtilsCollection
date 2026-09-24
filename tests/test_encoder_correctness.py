@@ -936,9 +936,8 @@ def test_advanced_minimax_h3_audio_auto_anchors_and_slices_to_target_audio_t():
     audio_kf = next(kf for kf in metadata["minimax_keyframes"] if "audio_latent" in kf)
     assert audio_kf["resolved_frame_index"] == 0
     assert audio_kf["audio_latent"].shape[-1] == 93
-    # Also retained in minimax_refs
-    ref_audio = next(ref for ref in metadata["minimax_refs"] if ref["kind"] == "audio")
-    assert ref_audio["ref_audio_t"] == 100
+    # Not duplicated in minimax_refs to avoid double cond_audio_latents packing
+    assert "minimax_refs" not in metadata
 
     # 2. Explicit reference_only mode: does not add audio keyframe
     media_config = encoder_helpers.build_minimax_h3_media_config(None, audio_mode="reference_only")

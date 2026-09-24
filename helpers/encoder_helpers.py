@@ -4353,7 +4353,7 @@ def execute_advanced_minimax_h3_image_to_video(
     ] if native_reference_mode else []
     if video_reference is not None:
         references.append(video_reference)
-    if audio_reference is not None:
+    if audio_reference is not None and audio_mode != "auto_anchor":
         references.append(audio_reference)
     if positioned_video_keyframes:
         if continuation_frames is not None:
