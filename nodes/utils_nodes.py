@@ -9,6 +9,7 @@ from comfy_execution.graph import ExecutionBlocker
 from comfy_api.latest import InputImpl, Types, io
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from ..helpers.helper_functions import to_video_prompt
+from ..helpers.text_helpers import compile_h3_prompt, default_h3_prompt_state
 from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, video_source_hash, resolve_h3_reference_window, VIDEO_FRAME_TIMESTAMP_FORMATS
 from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
@@ -24,6 +25,7 @@ from ..helpers.model_helpers import (
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
 SeedClusterType = io.Custom("UC_SEED_CLUSTER")
 MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
+MiniMaxH3PromptBuilderState = io.Custom("UC_MINIMAX_H3_PROMPT_BUILDER")
 _MINIMAX_H3_CLIP_ACCUMULATION = {}
 
 
@@ -637,6 +639,25 @@ class UC_GetJsonValue(io.ComfyNode):
             raise ValueError(f"Unsupported JSON value selection mode: {selection_mode!r}")
 
         return io.NodeOutput(value)
+
+
+class UC_MiniMaxH3DynamicPromptBuilder(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3DynamicPromptBuilder",
+            display_name="MiniMax H3 Dynamic Prompt Builder",
+            category="advanced/text",
+            description="Build an H3 prompt with optional headers and editable timeline segments.",
+            inputs=[MiniMaxH3PromptBuilderState.Input("prompt_state", extra_dict={
+                "socketless": True, "default": json.dumps(default_h3_prompt_state()), "state_version": 1,
+            })],
+            outputs=[io.String.Output("prompt")],
+        )
+
+    @classmethod
+    def execute(cls, prompt_state: str) -> io.NodeOutput:
+        return io.NodeOutput(compile_h3_prompt(prompt_state))
 
 
 class UC_ImageToVideoPrompt(io.ComfyNode):
