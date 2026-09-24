@@ -6,6 +6,7 @@ const NODE_IDS = new Set([
   "UC_AdvMiniMaxH3ImageToVideoTokenFusion",
   "UC_AdvMiniMaxH3ImageToVideoTemporalFusion",
   "UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion",
+  "UC_VisualFusionImages",
 ]);
 
 const GROUPS = [

@@ -35,6 +35,7 @@ try:
         UC_Krea2TokenAttentionWeight,
         UC_Qwen3VLInputEmbeds,
         UC_VisualFusionConfig,
+        UC_VisualFusionImages,
         UC_VLMInputEmbeds,
     )
 finally:
@@ -592,11 +593,9 @@ def test_advanced_minimax_h3_node_schema_separates_visual_roles():
     assert inputs["reference_images"].template.names == [
         f"reference_image_{index}" for index in range(1, 33)
     ]
-    assert inputs["fusion_images"].template.names == [
-        f"fusion_image_{index}" for index in range(1, 33)
-    ]
     assert inputs["reference_images"].template.min == 0
-    assert inputs["fusion_images"].template.min == 0
+    assert inputs["fusion_images"].io_type == "VISUAL_FUSION_IMAGES"
+    assert inputs["fusion_images"].optional is True
     assert inputs["ref_image_size"].options == ["match", "max", "none"]
     assert inputs["ref_image_size"].default == "match"
     assert inputs["vlm_resolution"].default == 384
@@ -649,6 +648,20 @@ def test_minimax_h3_fusion_selector_preserves_legacy_defaults(monkeypatch, legac
     with pytest.raises(ValueError, match="Unsupported MiniMax H3 .*fusion method"):
         node.execute(object(), fusion_method="unknown")
     assert len(calls) == 3
+
+
+def test_visual_fusion_images_schema_and_passthrough():
+    schema = UC_VisualFusionImages.define_schema()
+    assert schema.node_id == "UC_VisualFusionImages"
+    assert [output.io_type for output in schema.outputs] == ["VISUAL_FUSION_IMAGES"]
+    inputs = {value.id: value for value in schema.inputs}
+    assert "fusion_images" in inputs
+    assert inputs["fusion_images"].template.names == [
+        f"fusion_image_{index}" for index in range(1, 33)
+    ]
+    test_dict = {"fusion_image_1": torch.ones(1, 3, 64, 64)}
+    output = UC_VisualFusionImages.execute(test_dict)
+    assert output.result == (test_dict,)
 
 
 def test_minimax_h3_media_config_schema_and_payload():

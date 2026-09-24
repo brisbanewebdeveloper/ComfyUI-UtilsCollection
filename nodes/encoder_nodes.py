@@ -196,6 +196,7 @@ class UC_AttentionBiasTextEncode(io.ComfyNode):
 # --- Type Definitions for Modular Configurations ---
 TextBlendConfig = io.Custom("TEXT_BLEND_CONFIG")
 VisualFusionConfig = io.Custom("VISUAL_FUSION_CONFIG")
+VisualFusionImages = io.Custom("VISUAL_FUSION_IMAGES")
 AdvancedConsensusConfig = io.Custom("ADVANCED_CONSENSUS_CONFIG")
 VisualConsensusConfig = io.Custom("VISUAL_CONSENSUS_CONFIG")
 MiniMaxH3MediaConfig = io.Custom("MINIMAX_H3_MEDIA_CONFIG")
@@ -358,6 +359,44 @@ class UC_VisualFusionConfig(io.ComfyNode):
             "save_path": save_path
         }
         return io.NodeOutput(config)
+
+
+class UC_VisualFusionImages(io.ComfyNode):
+    """
+    Isolated container for visual fusion image inputs.
+    Extracts autogrow inputs into a single dedicated output to avoid multiple autogrows on complex nodes.
+    """
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        fusion_template = io.Autogrow.TemplateNames(
+            io.Image.Input(
+                "fusion_image",
+                tooltip="Ordered Qwen-only visual source for visual component fusion.",
+            ),
+            names=[f"fusion_image_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        return io.Schema(
+            node_id="UC_VisualFusionImages",
+            display_name="Visual Fusion Images",
+            category="advanced/conditioning",
+            description="Collects ordered visual fusion images for Advanced MiniMax H3 and visual conditioning encoders.",
+            inputs=[
+                io.Autogrow.Input(
+                    "fusion_images",
+                    template=fusion_template,
+                    optional=True,
+                    tooltip="Connect images to combine via visual component fusion. Images pair by index or broadcast per node fusion rules.",
+                ),
+            ],
+            outputs=[
+                VisualFusionImages.Output("fusion_images", display_name="Fusion Images")
+            ],
+        )
+
+    @classmethod
+    def execute(cls, fusion_images: io.Autogrow.Type = None) -> io.NodeOutput:
+        return io.NodeOutput(fusion_images)
 
 
 class UC_AdvancedConsensusConfiguration(UC_TextConsensusBlendConfig):
@@ -3669,14 +3708,6 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
             names=[f"reference_image_{index}" for index in range(1, 33)],
             min=0,
         )
-        fusion_template = io.Autogrow.TemplateNames(
-            io.Image.Input(
-                "fusion_image",
-                tooltip="Ordered Qwen-only visual source. Active fusion combines only this group.",
-            ),
-            names=[f"fusion_image_{index}" for index in range(1, 33)],
-            min=0,
-        )
         return io.Schema(
             node_id="UC_AdvancedMiniMaxH3ImageToVideo",
             display_name="Advanced MiniMax H3 Image to Video",
@@ -3795,12 +3826,12 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                         "explicit first/last frame inputs. See fusion_images for supported reference-picture fusion."
                     ),
                 ),
-                io.Autogrow.Input(
+                VisualFusionImages.Input(
                     "fusion_images",
-                    template=fusion_template,
+                    display_name="Fusion Images",
                     optional=True,
                     tooltip=(
-                        "Qwen-only fusion contract. Active method: with frames, socket N targets Picture N and every batch "
+                        "Connect Visual Fusion Images to supply Qwen-only visual sources. Active method: with frames, socket N targets Picture N and every batch "
                         "item is another source; an unmatched socket errors. With one native reference, all fusion images "
                         "combine with that Picture. With multiple references, one image on fusion_image_1 broadcasts to "
                         "every reference Picture; otherwise flattened fusion images pair by "
@@ -3836,7 +3867,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         first_frame=None,
         last_frame=None,
         reference_images: io.Autogrow.Type = None,
-        fusion_images: io.Autogrow.Type = None,
+        fusion_images=None,
         visual_fusion_config=None,
         multiplier=1.0,
         ref_image_size="match",
@@ -3918,7 +3949,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         first_frame=None,
         last_frame=None,
         reference_images: io.Autogrow.Type = None,
-        fusion_images: io.Autogrow.Type = None,
+        fusion_images=None,
         visual_fusion_config=None,
         multiplier=1.0,
         ref_image_size="match",
