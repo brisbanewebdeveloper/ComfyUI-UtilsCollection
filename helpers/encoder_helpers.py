@@ -3565,14 +3565,79 @@ def execute_minimax_h3_vlm_guide(conditioning, clip, image, timestamp, vlm_resol
         with H3EncoderCache(enable_caching) as invocation:
             return execute_minimax_h3_vlm_guide(conditioning, clip, image, timestamp, vlm_resolution, cache=invocation, enable_caching=enable_caching)
     clip = cache.prepare_clip(clip)
+    guide = _encode_minimax_h3_image_guide(clip, image, timestamp, vlm_resolution, cache)
+    return splice_conditioning(conditioning, guide)
+
+
+def _encode_minimax_h3_image_guide(clip, image, timestamp, vlm_resolution, cache):
     prepared = prepare_vlm_image(image, vlm_resolution)
     entries = _minimax_h3_text_entries(clip, f"<{timestamp:.1f} seconds>")
     entries += _minimax_h3_visual_token_entries(clip, prepared)
-    guide = _encode_minimax_h3_section(
+    return _encode_minimax_h3_section(
         clip, {"qwen3vl_32b": [entries]}, "grid-deepstack", cache=cache,
         section_kind="guide", section_id="guide",
     )
-    return splice_conditioning(conditioning, guide)
+
+
+def encode_minimax_h3_ref_vlm(clip, media_type, media, vlm_resolution=384, reference_number=17):
+    if not is_minimax_h3_text_encoder(clip):
+        raise ValueError("MiniMax H3 Ref VLM requires the qwen3vl_32b text encoder.")
+    if isinstance(reference_number, bool) or not isinstance(reference_number, numbers.Integral) or reference_number < 17:
+        raise ValueError("MiniMax H3 Ref Qwen reference number must be at least 17.")
+    with H3EncoderCache("disabled") as invocation:
+        clip = invocation.prepare_clip(clip)
+        if media_type == "image":
+            prepared = prepare_vlm_image(media, vlm_resolution)
+            entries = _minimax_h3_text_entries(clip, f"<Picture {reference_number}>: ")
+            entries += _minimax_h3_visual_token_entries(clip, prepared)
+            sections = _encode_minimax_h3_section(
+                clip, {"qwen3vl_32b": [entries]}, "grid-deepstack", cache=invocation,
+                section_kind="image", section_id="ref_vlm",
+            )
+        elif media_type == "video":
+            indices = list(range(0, media.shape[0], 12))
+            frames = prepare_minimax_h3_vlm_video_frames(media[indices], vlm_resolution)
+            tokens = clip.tokenize("", minimax_ref_items=[{
+                "type": "video", "data": frames,
+                "timestamps": [Fraction(index, 24) for index in indices],
+            }])
+            entries = _token_entries(tokens, "qwen3vl_32b")
+            label = _minimax_h3_text_entries(clip, "<Video 1>: ")
+            if [entry[0] for entry in entries[:len(label)]] != [entry[0] for entry in label]:
+                raise ValueError("MiniMax H3 tokenizer returned an unexpected video prefix.")
+            numbered = _minimax_h3_text_entries(clip, f"<Video {reference_number}>: ")
+            numbered += entries[len(label):]
+            sections = _encode_minimax_h3_section(
+                clip, {"qwen3vl_32b": [numbered]}, "grid-deepstack", cache=invocation,
+                section_kind="video", section_id="ref_vlm",
+            )
+        else:
+            raise ValueError("MiniMax H3 Ref VLM media must be image or video.")
+    if len(sections) != 1:
+        raise ValueError("MiniMax H3 Ref VLM requires one CLIP conditioning schedule.")
+    embedding, metadata = sections[0]
+    return embedding, metadata.get("minimax_token_tags")
+
+
+def fuse_minimax_h3_ref_vlm_images(clip, images, vlm_resolution=384, reference_number=17):
+    fused = None
+    tags = None
+    output_dtype = None
+    for index, image in enumerate(images):
+        embedding, image_tags = encode_minimax_h3_ref_vlm(
+            clip, "image", image.unsqueeze(0), vlm_resolution, reference_number,
+        )
+        if not torch.is_tensor(embedding) or not torch.is_tensor(image_tags):
+            raise ValueError("MiniMax H3 Ref Qwen encoding must return embeddings and token tags.")
+        if fused is None:
+            output_dtype = embedding.dtype
+            fused = embedding.detach().to(device="cpu", dtype=torch.float32).clone() if images.shape[0] > 1 else embedding
+            tags = image_tags.detach().cpu().clone() if images.shape[0] > 1 else image_tags
+        else:
+            if embedding.shape != fused.shape or not torch.equal(image_tags.cpu(), tags):
+                raise ValueError("MiniMax H3 Ref images must produce matching Qwen token layouts for fusion.")
+            fused.lerp_(embedding.to(device="cpu", dtype=torch.float32), 1.0 / (index + 1))
+    return fused.to(output_dtype), tags
 
 
 def _encode_minimax_h3_section(clip, tokens, visual_path, cache, *, section_kind, section_id):

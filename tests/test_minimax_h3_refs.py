@@ -46,18 +46,21 @@ class _VisualVae:
         return pixels.mean().expand(1, 24, frames, pixels.shape[1] // 16, pixels.shape[2] // 16).clone()
 
 
-def test_image_batch_uses_native_preparation_and_keeps_entries_independent():
+def test_image_batch_fuses_prepared_vae_latents_into_one_ref():
     vae = _VisualVae()
-    images = torch.stack((torch.zeros(40, 72, 3), torch.ones(40, 72, 3)))
+    images = torch.cat((torch.zeros(4, 40, 72, 3), torch.ones(4, 40, 72, 3)))
 
     refs = model_helpers.create_minimax_h3_image_refs(images, vae, description="subject")
 
-    assert len(refs) == 2
-    assert [tuple(image.shape) for image in vae.inputs] == [(1, 32, 64, 3)] * 2
-    assert torch.count_nonzero(refs[0]["latent"]) == 0
-    torch.testing.assert_close(refs[1]["latent"], torch.ones_like(refs[1]["latent"]))
-    assert all(ref["kind"] == "image" and ref["metadata"]["description"] == "subject" for ref in refs)
-    assert refs[0]["latent"] is not refs[1]["latent"]
+    assert len(refs) == 1
+    assert [tuple(image.shape) for image in vae.inputs] == [(1, 32, 64, 3)] * 8
+    torch.testing.assert_close(refs[0]["latent"], torch.full_like(refs[0]["latent"], 0.5))
+    assert refs[0]["kind"] == "image"
+    assert refs[0]["metadata"]["source_images"] == 8
+    assert "fused 8 images" in model_helpers.format_minimax_h3_ref_info(refs)
+    pooled = model_helpers.create_minimax_h3_image_refs(images, _VisualVae(), "pooled", 2)[0]
+    single = model_helpers.create_minimax_h3_image_refs(images[:1], _VisualVae(), "pooled", 2)[0]
+    assert pooled["latent"].shape == single["latent"].shape
 
 
 def test_video_uses_native_five_plus_seventeen_frame_contract():
@@ -922,6 +925,181 @@ def test_video_and_audio_round_trip_independently(monkeypatch, tmp_path):
             assert restored["metadata"][key] == value
 
 
+def test_visual_ref_round_trip_restores_qwen_conditioning_and_legacy_file(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    qwen_ref = _image_ref()
+    qwen_ref["vlm_embedding"] = torch.arange(12, dtype=torch.float32).reshape(1, 3, 4)
+    qwen_ref["vlm_tags"] = torch.tensor([1, 0, 0], dtype=torch.long)
+    qwen_ref["metadata"].update({"vlm_presentation": "image_numbered", "vlm_reference_number": 17})
+    saved = model_helpers.save_minimax_h3_ref_collection([qwen_ref, _video_ref()], "qwen")
+    loaded, legacy = [model_helpers.load_minimax_h3_ref(path) for path in saved]
+    assert len(model_nodes.UC_MiniMaxH3RefLoad.execute(saved[0])[0]) == 1
+    torch.testing.assert_close(loaded["vlm_embedding"], qwen_ref["vlm_embedding"])
+    torch.testing.assert_close(loaded["vlm_tags"], qwen_ref["vlm_tags"])
+    assert "Qwen <Picture 17> 3 tokens" in model_helpers.format_minimax_h3_ref_info([loaded])
+    assert "vlm_embedding" not in legacy
+
+
+def test_fused_image_batch_saves_one_file_and_applies_one_ref(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    monkeypatch.setattr(model_helpers, "fuse_minimax_h3_ref_vlm_images", lambda *_args: (
+        torch.ones((1, 2, 4)), torch.tensor([1, 0], dtype=torch.long),
+    ))
+    images = torch.stack((torch.zeros(32, 64, 3), torch.ones(32, 64, 3)))
+    refs = model_helpers.create_minimax_h3_image_refs(images, _VisualVae(), clip=object())
+    paths = model_helpers.save_minimax_h3_ref_collection(refs, "fused")
+    assert len(paths) == 1
+    loaded = model_helpers.load_minimax_h3_ref(paths[0])
+    assert loaded["metadata"]["source_images"] == 2
+    base = [[torch.zeros((1, 1, 4)), {
+        "minimax_token_tags": torch.ones(1, dtype=torch.long),
+        "uc_minimax_h3_vlm_layout": {"version": 1, "sequence_length": 1, "prompt_start": 0},
+    }]]
+    applied = model_helpers.apply_minimax_h3_refs_to_conditioning(base, [loaded])
+    assert len(applied[0][1]["minimax_refs"]) == 1
+    assert applied[0][0].shape[1] == 3
+    assert applied[0][1]["minimax_token_tags"].tolist() == [1, 0, 1]
+
+
+def test_bundle_saves_four_refs_in_one_file_and_loads_for_apply(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    fused_image = _image_ref(2.0)
+    fused_image["metadata"].update({"source_images": 8, "vlm_presentation": "image_numbered", "vlm_reference_number": 17})
+    fused_image["vlm_embedding"] = torch.ones((1, 2, 4))
+    fused_image["vlm_tags"] = torch.tensor([1, 0], dtype=torch.long)
+    refs = [_image_ref(), fused_image, _video_ref(), {
+        "kind": "audio", "latent": torch.ones((1, 32, 2, 5)), "metadata": {"description": "voice"},
+    }]
+    paths = model_nodes.UC_MiniMaxH3RefSave.execute("bundle", refs={"ref_1": refs}, save_layout="bundle")[0]
+    assert len(paths) == 1
+    loaded = model_nodes.UC_MiniMaxH3RefLoad.execute(paths[0])[0]
+    assert [ref["kind"] for ref in loaded] == ["image", "image", "video", "audio"]
+    assert loaded[1]["metadata"]["source_images"] == 8
+    torch.testing.assert_close(loaded[1]["vlm_embedding"], fused_image["vlm_embedding"])
+    base = [[torch.zeros((1, 1, 4)), {
+        "minimax_token_tags": torch.ones(1, dtype=torch.long),
+        "uc_minimax_h3_vlm_layout": {"version": 1, "sequence_length": 1, "prompt_start": 0},
+    }]]
+    applied = model_nodes.UC_MiniMaxH3RefApply.execute(base, refs={"ref_1": loaded})[0]
+    assert len(applied[0][1]["minimax_refs"]) == 4
+    assert applied[0][0].shape[1] == 3
+
+
+def test_loads_original_style_bundle_members(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    metadata = {"_format_version": 5, "kind": "bundle", "name": "original", "members": [
+        {"kind": "image", "latent_t": 1, "latent_h": 4, "latent_w": 4, "mode": "training", "description": "subject"},
+        {"kind": "audio", "latent_t": 5, "latent_h": 0, "latent_w": 0, "mode": "encode", "description": "voice"},
+    ]}
+    with IncrementalSafetensorsWriter(str(tmp_path / "original_bundle.safetensors"), metadata={"refmod_meta": json.dumps(metadata)}, max_workers=1) as writer:
+        writer.write("ref_0", _image_ref()["latent"])
+        writer.write("ref_1", torch.ones((1, 32, 2, 5)))
+    loaded = model_helpers.load_minimax_h3_ref_collection("original_bundle.safetensors")
+    assert [ref["kind"] for ref in loaded] == ["image", "audio"]
+    assert [ref["metadata"]["description"] for ref in loaded] == ["subject", "voice"]
+
+
+def test_bundle_rejects_member_dimensions_that_disagree_with_tensor(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    metadata = {"_format_version": 5, "kind": "bundle", "members": [
+        {"kind": "image", "latent_t": 1, "latent_h": 2, "latent_w": 4},
+    ]}
+    with IncrementalSafetensorsWriter(str(tmp_path / "bad_bundle.safetensors"), metadata={"refmod_meta": json.dumps(metadata)}, max_workers=1) as writer:
+        writer.write("ref_0", _image_ref()["latent"])
+    with pytest.raises(ValueError, match="member dimensions"):
+        model_helpers.load_minimax_h3_ref_collection("bad_bundle.safetensors")
+
+
+def test_qwen_refs_splice_in_socket_order_and_zero_retention_omits_them():
+    first, second = _image_ref(), _video_ref()
+    first["metadata"]["vlm_presentation"] = "image_visual"
+    second["metadata"]["vlm_presentation"] = "video_visual_2fps"
+    first["vlm_embedding"] = torch.full((1, 2, 1), 3.0)
+    first["vlm_tags"] = torch.tensor([1, 0], dtype=torch.long)
+    second["vlm_embedding"] = torch.full((1, 1, 1), 4.0)
+    second["vlm_tags"] = torch.tensor([0], dtype=torch.long)
+    base = [[torch.tensor([[[1.0], [2.0]]]), {
+        "minimax_token_tags": torch.ones(2, dtype=torch.long),
+        "uc_minimax_h3_vlm_layout": {"version": 1, "sequence_length": 2, "prompt_start": 1},
+        "start_percent": 0.25,
+    }]]
+    applied = model_helpers.apply_minimax_h3_refs_to_conditioning(base, [first, second])
+    assert applied[0][0].flatten().tolist() == [1, 3, 3, 4, 2]
+    assert applied[0][1]["minimax_token_tags"].tolist() == [1, 1, 0, 0, 1]
+    assert applied[0][1]["uc_minimax_h3_vlm_layout"]["prompt_start"] == 4
+    assert len(applied[0][1]["minimax_refs"]) == 2
+    assert applied[0][1]["start_percent"] == 0.25
+    assert base[0][0].shape[1] == 2
+    skipped = model_helpers.apply_minimax_h3_refs_to_conditioning(base, [first, second], retention=0)
+    assert skipped[0][0] is base[0][0]
+    assert skipped[0][1]["minimax_refs"] == []
+
+
+def test_ref_extract_keeps_old_inputs_and_attaches_optional_qwen(monkeypatch):
+    clip = object()
+    calls = []
+
+    def encode(_clip, media_type, media, resolution, number):
+        calls.append((_clip, media_type, tuple(media.shape), resolution, number))
+        return torch.ones((1, 2, 4)), torch.tensor([1, 0], dtype=torch.long)
+
+    monkeypatch.setattr(model_helpers, "encode_minimax_h3_ref_vlm", encode)
+    monkeypatch.setattr(model_helpers, "fuse_minimax_h3_ref_vlm_images", lambda _clip, media, resolution, number: encode(_clip, "image", media, resolution, number))
+    schema = model_nodes.UC_MiniMaxH3RefExtract.define_schema()
+    assert [item.id for item in schema.inputs[:4]] == ["images", "vae", "media_type", "description"]
+    assert any(item.id == "clip" and item.optional for item in schema.inputs)
+    assert any(item.id == "vlm_reference_start" for item in schema.inputs)
+    assert all(item.id != "timestamp" for item in schema.inputs)
+    media_type = {"media_type": "image", "compression": {"compression": "encode"}}
+    images = torch.zeros((2, 32, 64, 3))
+    refs = model_nodes.UC_MiniMaxH3RefExtract.execute(images, _VisualVae(), media_type, clip=clip, vlm_resolution=512, vlm_reference_start=21)[0]
+    assert len(refs) == 1
+    assert calls == [(clip, "image", (2, 32, 64, 3), 512, 21)]
+    assert refs[0]["metadata"]["vlm_reference_number"] == 21
+    assert all("vlm_embedding" in ref and "vlm_tags" in ref for ref in refs)
+    video_type = {"media_type": "video", "compression": {"compression": "encode"}}
+    video_ref = model_nodes.UC_MiniMaxH3RefExtract.execute(torch.zeros((22, 32, 64, 3)), _VisualVae(), video_type, clip=clip, vlm_resolution=512, vlm_reference_start=30)[0][0]
+    assert calls[-1] == (clip, "video", (22, 32, 64, 3), 512, 30)
+    assert video_ref["metadata"]["vlm_reference_number"] == 30
+
+
+def test_ref_vlm_requires_matching_tags_and_base_layout(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    ref = _image_ref()
+    ref["vlm_embedding"] = torch.ones((1, 2, 4))
+    ref["vlm_tags"] = torch.ones(1, dtype=torch.long)
+    with pytest.raises(ValueError, match="tags must match"):
+        model_helpers.save_minimax_h3_ref_collection([ref], "invalid")
+    ref["vlm_tags"] = torch.ones(2, dtype=torch.long)
+    ref["metadata"]["vlm_presentation"] = "image_visual"
+    with pytest.raises(ValueError, match="layout metadata"):
+        model_helpers.apply_minimax_h3_refs_to_conditioning([[torch.ones((1, 1, 4)), {"minimax_token_tags": torch.ones(1, dtype=torch.long)}]], [ref])
+    ref["metadata"]["vlm_presentation"] = "image_guide"
+    with pytest.raises(ValueError, match="outdated"):
+        model_helpers.apply_minimax_h3_refs_to_conditioning([[torch.ones((1, 1, 4)), {"minimax_token_tags": torch.ones(1, dtype=torch.long)}]], [ref])
+
+
+def test_ref_apply_rejects_duplicate_qwen_picture_numbers():
+    refs = [_image_ref(), _image_ref()]
+    for ref in refs:
+        ref["metadata"].update({"vlm_presentation": "image_numbered", "vlm_reference_number": 17})
+        ref["vlm_embedding"] = torch.ones((1, 2, 4))
+        ref["vlm_tags"] = torch.ones(2, dtype=torch.long)
+    with pytest.raises(ValueError, match="duplicate image number 17"):
+        model_helpers.apply_minimax_h3_refs_to_conditioning([[torch.ones((1, 1, 4)), {"minimax_token_tags": torch.ones(1, dtype=torch.long), "uc_minimax_h3_vlm_layout": {"version": 1, "sequence_length": 1, "prompt_start": 0}}]], refs)
+
+
+def test_load_rejects_incomplete_qwen_tensor_pair(monkeypatch, tmp_path):
+    _ref_folder(monkeypatch, tmp_path)
+    target = tmp_path / "incomplete.safetensors"
+    metadata = model_helpers._minimax_h3_ref_storage_metadata(_image_ref())
+    with IncrementalSafetensorsWriter(str(target), metadata={"refmod_meta": json.dumps(metadata)}, max_workers=1) as writer:
+        writer.write("latent", _image_ref()["latent"])
+        writer.write("vlm_embedding", torch.ones((1, 2, 4)))
+    with pytest.raises(ValueError, match="invalid tensor set"):
+        model_helpers.load_minimax_h3_ref("incomplete.safetensors")
+
+
 def test_load_rejects_wrong_header_shape_and_dtype(monkeypatch, tmp_path):
     _ref_folder(monkeypatch, tmp_path)
     original_metadata = {"kind": "image", "latent_t": 1, "latent_h": 4, "latent_w": 4, "mode": "encode", "description": "original format", "_format_version": 4}
@@ -986,6 +1164,7 @@ def test_schema_nested_dynamic_combo_autogrow_order_and_registration_source(monk
     media_type = next(input for input in extract.inputs if input.id == "media_type")
     assert [option.key for option in media_type.options] == ["image", "video"]
     assert all(option.inputs[0].id == "compression" for option in media_type.options)
+    assert media_type.options[0].inputs[0].options[0].key == "pooled"
     flat_inputs = {"images": torch.ones((1, 32, 64, 3)), "vae": _VisualVae(), "media_type": "image", "media_type.compression": "pooled", "media_type.compression.reference_resolution": 32, "description": "schema"}
     expanded, _hidden, dynamic = get_finalized_class_inputs(model_nodes.UC_MiniMaxH3RefExtract.INPUT_TYPES(), flat_inputs)
     assert not any(name.endswith("latent_frames") for group in expanded.values() for name in group)

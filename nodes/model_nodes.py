@@ -12,7 +12,7 @@ from ..helpers.model_helpers import (
     format_minimax_h3_ref_info,
     get_minimax_h3_ref_input_fingerprint,
     list_minimax_h3_refs,
-    load_minimax_h3_ref,
+    load_minimax_h3_ref_collection,
     minimax_h3_ref_resolution_grid,
     save_minimax_h3_ref_collection,
 )
@@ -75,13 +75,13 @@ class UC_MiniMaxH3RefExtract(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         image_compression_options = [
-            io.DynamicCombo.Option(key="encode", inputs=[]),
             io.DynamicCombo.Option(
                 key="pooled",
                 inputs=[
                     io.Int.Input("reference_resolution", display_name="Reference resolution", default=256, min=32, step=32, tooltip="Compressed reference size in pixels along the longer edge. Start with 128–512 px; 256 px is the default. Higher values retain more detail but use more memory. The shorter edge follows the source shape. This does not change generation resolution or enlarge the source."),
                 ],
             ),
+            io.DynamicCombo.Option(key="encode", inputs=[]),
             io.DynamicCombo.Option(
                 key="refined",
                 inputs=[
@@ -116,13 +116,16 @@ class UC_MiniMaxH3RefExtract(io.ComfyNode):
             node_id="UC_MiniMaxH3RefExtract",
             display_name="MiniMax H3 Ref Extract",
             category="model/minimax_h3",
-            description="Creates reusable MiniMax H3 references from images or video frames.",
+            description="Fuses an image batch into one reusable MiniMax H3 reference, or encodes one video clip.",
             search_aliases=["minimax", "h3", "reference", "ref", "image", "video"],
             inputs=[
-                io.Image.Input("images", tooltip="Connect images or video frames. Image mode keeps each image separate. Video mode uses the frames as one clip; provide at least five frames at 24 fps."),
+                io.Image.Input("images", tooltip="Image mode fuses the batch into one reference. Video mode treats the batch as one 24 fps clip; provide at least five frames."),
                 io.Vae.Input("vae", display_name="visual vae", tooltip="Connect the MiniMax H3 video VAE for both images and video."),
-                io.DynamicCombo.Input("media_type", options=media_type_options, tooltip="Choose image to keep each image separate, or video to treat the frames as one clip."),
+                io.DynamicCombo.Input("media_type", options=media_type_options, tooltip="Choose image to fuse multiple stills into one reference, or video for one temporal clip."),
                 io.String.Input("description", default="", multiline=True, dynamic_prompts=False, tooltip="Optional notes to save with the reference. These notes do not change your prompt."),
+                io.Clip.Input("clip", optional=True, tooltip="Optional MiniMax H3 qwen3vl_32b encoder. Stores independently encoded Qwen conditioning with each visual reference."),
+                io.Int.Input("vlm_resolution", default=384, min=0, max=4096, step=32, optional=True, tooltip="Qwen image target. 256–4096 resizes; other values keep original resolution. Used only with clip."),
+                io.Int.Input("vlm_reference_start", default=17, min=17, step=1, optional=True, tooltip="Qwen Picture/Video number stored in this fused reference. Use distinct numbers when combining refs extracted in separate runs."),
             ],
             outputs=[
                 MiniMaxH3Ref.Output("ref", display_name="ref", tooltip="Connect to Ref Save to keep these references, or Ref Apply to use them."),
@@ -131,15 +134,15 @@ class UC_MiniMaxH3RefExtract(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, vae, media_type, description="") -> io.NodeOutput:
+    def execute(cls, images, vae, media_type, description="", clip=None, vlm_resolution=384, vlm_reference_start=17) -> io.NodeOutput:
         kind = media_type.get("media_type")
         compression = media_type.get("compression", {})
         mode = compression.get("compression")
         grid_long_edge = minimax_h3_ref_resolution_grid(compression["reference_resolution"]) if mode != "encode" else 16
         if kind == "image":
-            refs = create_minimax_h3_image_refs(images, vae, mode, grid_long_edge, compression.get("refine_steps", 100), description)
+            refs = create_minimax_h3_image_refs(images, vae, mode, grid_long_edge, compression.get("refine_steps", 100), description, clip, vlm_resolution, vlm_reference_start)
         else:
-            refs = [create_minimax_h3_video_ref(images, vae, mode, grid_long_edge, compression.get("temporal_density", 16), compression.get("refine_steps", 100), description)]
+            refs = [create_minimax_h3_video_ref(images, vae, mode, grid_long_edge, compression.get("temporal_density", 16), compression.get("refine_steps", 100), description, clip, vlm_resolution, vlm_reference_start)]
         return io.NodeOutput(refs, format_minimax_h3_ref_info(refs))
 
 
@@ -176,10 +179,10 @@ class UC_MiniMaxH3RefLoad(io.ComfyNode):
             node_id="UC_MiniMaxH3RefLoad",
             display_name="MiniMax H3 Ref Load",
             category="model/minimax_h3",
-            description="Loads a saved MiniMax H3 reference for use with Ref Apply.",
+            description="Loads one reference or every member of a saved MiniMax H3 Ref bundle.",
             search_aliases=["minimax", "h3", "reference", "ref", "load"],
             inputs=[
-                io.Combo.Input("filename", options=list_minimax_h3_refs(), tooltip="Choose a saved reference from ComfyUI/models/minimax_h3_refs or your configured reference folders."),
+                io.Combo.Input("filename", options=list_minimax_h3_refs(), tooltip="Choose a saved reference or bundle from ComfyUI/models/minimax_h3_refs or your configured reference folders."),
             ],
             outputs=[
                 MiniMaxH3Ref.Output("ref", display_name="ref", tooltip="Connect to Ref Apply to use this reference, or Ref Save to save another copy."),
@@ -193,7 +196,7 @@ class UC_MiniMaxH3RefLoad(io.ComfyNode):
 
     @classmethod
     def execute(cls, filename) -> io.NodeOutput:
-        refs = [load_minimax_h3_ref(filename)]
+        refs = load_minimax_h3_ref_collection(filename)
         return io.NodeOutput(refs, format_minimax_h3_ref_info(refs))
 
 
@@ -204,11 +207,12 @@ class UC_MiniMaxH3RefSave(io.ComfyNode):
             node_id="UC_MiniMaxH3RefSave",
             display_name="MiniMax H3 Ref Save",
             category="model/minimax_h3",
-            description="Saves each connected reference to its own file. No sampler is needed.",
+            description="Saves connected references separately or together in one bundle file. No sampler is needed.",
             search_aliases=["minimax", "h3", "reference", "ref", "save"],
             inputs=[
                 io.String.Input("filename_prefix", default="ref/MiniMax_H3", tooltip="Name for the saved files. Use a slash to add a subfolder. Files are numbered automatically and existing files are not overwritten."),
-                io.Autogrow.Input("refs", template=io.Autogrow.TemplatePrefix(MiniMaxH3Ref.Input("ref", optional=True), prefix="ref_", min=1, max=100), tooltip="Connect one or more references to save. Each reference is saved separately, in input order."),
+                io.Autogrow.Input("refs", template=io.Autogrow.TemplatePrefix(MiniMaxH3Ref.Input("ref", optional=True), prefix="ref_", min=1, max=100), tooltip="Connect one or more references to save. Their input order is preserved in either save layout."),
+                io.Combo.Input("save_layout", options=["separate", "bundle"], default="separate", optional=True, tooltip="Separate writes one file per ref. Bundle stores all connected refs in one file, preserving their order and kinds."),
             ],
             outputs=[
                 io.String.Output("saved_paths", display_name="saved paths", is_output_list=True, tooltip="Names of the saved files, including any subfolders."),
@@ -217,11 +221,13 @@ class UC_MiniMaxH3RefSave(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, filename_prefix, refs: io.Autogrow.Type | None = None) -> io.NodeOutput:
+    def execute(cls, filename_prefix, refs: io.Autogrow.Type | None = None, save_layout="separate") -> io.NodeOutput:
         connected_refs = flatten_minimax_h3_ref_collections(refs)
         if not connected_refs:
             raise ValueError("Connect at least one ref to MiniMax H3 Ref Save.")
-        return io.NodeOutput(save_minimax_h3_ref_collection(connected_refs, filename_prefix))
+        if save_layout not in {"separate", "bundle"}:
+            raise ValueError("MiniMax H3 Ref save layout must be separate or bundle.")
+        return io.NodeOutput(save_minimax_h3_ref_collection(connected_refs, filename_prefix, bundle=save_layout == "bundle"))
 
 
 class UC_MiniMaxH3RefApply(io.ComfyNode):
