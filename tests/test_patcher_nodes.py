@@ -456,7 +456,7 @@ def test_h3_sla_sampling_scope_restores_reduced_precision_accumulation():
     assert {name: getattr(backend, name) for name in attributes} == original
 
 
-def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypatch):
+def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypatch, caplog):
     class FakeAttention:
         def forward(self, x, rope_freqs=None, transformer_options=None):
             return x
@@ -473,6 +473,7 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
             self.model = types.SimpleNamespace(diffusion_model=diffusion)
             self.model_options = {"transformer_options": {}}
             self.object_patches = {}
+            self.wrappers = {}
 
         def clone(self):
             return FakePatcher(self.model.diffusion_model)
@@ -482,6 +483,12 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
 
         def add_object_patch(self, path, value):
             self.object_patches[path] = value
+
+        def remove_wrappers_with_key(self, wrapper_type, key):
+            self.wrappers.get(wrapper_type, {}).pop(key, None)
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            self.wrappers.setdefault(wrapper_type, {})[key] = wrapper
 
     patched = patcher_helpers.patch_unified_attention_model(
         FakePatcher(FakeH3()),
@@ -496,6 +503,19 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
         "diffusion_model.blocks.0.attn.forward",
         "diffusion_model.blocks.1.attn.forward",
     ]
+    scope = patched.wrappers[patcher_helpers.comfy.patcher_extension.WrappersMP.OUTER_SAMPLE][
+        patcher_helpers.UNIFIED_ATTENTION_SAMPLING_SCOPE_KEY
+    ]
+
+    def fail():
+        raise RuntimeError("sampling failed")
+
+    with caplog.at_level(logging.INFO, logger=patcher_helpers.__name__):
+        assert scope(lambda: "sampled") == "sampled"
+        with pytest.raises(RuntimeError, match="sampling failed"):
+            scope(fail)
+    assert caplog.text.count("SageAttention active for sampling") == 2
+    assert caplog.text.count("SageAttention sampling ended; Core default attention unchanged") == 2
 
 
 def test_h3_radial_block_mask_keeps_cross_segment_blocks_dense():
@@ -804,6 +824,20 @@ def test_cpu_cache_preserves_output_shape_and_dtype():
     assert output.dtype == image.dtype
 
 
+def test_cache_reset_invalidates_without_releasing_residual_buffer():
+    cache = _cache(device="cpu")
+    cache._store_residual(torch.ones((4, 8)))
+    buffer = cache.cached_residual
+
+    cache.finish()
+
+    assert cache.cached_residual is None
+    assert cache._residual_buffer is buffer
+    cache._store_residual(torch.full((4, 8), 3.0))
+    assert cache.cached_residual is buffer
+    torch.testing.assert_close(buffer, torch.full((4, 8), 3.0))
+
+
 def test_sampling_scope_always_clears_cache_state():
     cache = _cache()
     scope = patcher_helpers.MiniMaxH3SamplingScope(cache)
@@ -829,7 +863,7 @@ def test_block_runner_preserves_double_block_replacements(monkeypatch):
     monkeypatch.setattr(
         patcher_helpers.comfy.model_prefetch,
         "prefetch_queue_pop",
-        lambda queue, device, block: prefetch_events.append(block),
+        lambda queue, device, block, malloc_scope=None: prefetch_events.append((block, malloc_scope)),
     )
 
     class Block:
@@ -853,7 +887,7 @@ def test_block_runner_preserves_double_block_replacements(monkeypatch):
     )
 
     assert torch.equal(output, torch.full((2, 4), 12.0))
-    assert prefetch_events == [blocks[0], blocks[1], None]
+    assert prefetch_events == [(blocks[0], "block"), (blocks[1], "block"), (None, "block")]
 
 
 def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):

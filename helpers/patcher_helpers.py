@@ -45,6 +45,7 @@ MINIMAX_H3_CACHE_OWNER_KEY = "utilscollection_minimax_h3_cache"
 MINIMAX_H3_SPECTRUM_OWNER_KEY = "utilscollection_minimax_h3_spectrum"
 MINIMAX_H3_PDD_OWNER_KEY = "utilscollection_minimax_h3_pdd_acc"
 UNIFIED_ATTENTION_OWNER_KEY = "utilscollection_unified_attention"
+UNIFIED_ATTENTION_SAMPLING_SCOPE_KEY = "utilscollection_unified_attention_sampling_scope"
 MINIMAX_H3_RADIAL_WRAPPER_KEY = "utilscollection_minimax_h3_radial"
 MINIMAX_H3_RADIAL_STATE_KEY = "utilscollection_minimax_h3_radial_state"
 MINIMAX_H3_SLA_WRAPPER_KEY = "utilscollection_minimax_h3_sla"
@@ -807,6 +808,8 @@ def patch_minimax_h3_pdd_model(model: Any, pdd_lora: str, nfe: int, partition: s
 
 # Cache heuristic adapted from ComfyUI-MiniMaxH3-Cache by lihaoyun6:
 # https://github.com/lihaoyun6/ComfyUI-MiniMaxH3-Cache (GPL-3.0).
+# Scoped-prefetch and residual-buffer fixes adapted from PlagueKind/ComfyUI-PlagueKind-Nodes
+# revisions e787ecf and 9aad64a.
 class MiniMaxH3Cache:
     """Reuse the residual produced by the complete MiniMax H3 block stack."""
 
@@ -826,10 +829,13 @@ class MiniMaxH3Cache:
         self.device = device
         self.verbose = verbose
         self.total_steps = 1
+        self._residual_buffer: torch.Tensor | None = None
+        self._cache_valid = False
         self.reset()
 
     def reset(self) -> None:
-        self.cached_residual: torch.Tensor | None = None
+        # Invalidate contents while keeping storage stable across block malloc scopes.
+        self._cache_valid = False
         self.previous_feature_signature: torch.Tensor | None = None
         self.layout_signature: tuple[Any, ...] | None = None
         self.last_seen_timestep: float | None = None
@@ -874,8 +880,8 @@ class MiniMaxH3Cache:
         if not signatures:
             stride = max(1, hidden_states.shape[0] // 100)
             sampled = hidden_states[::stride, :max_dim]
-            return sampled.detach().abs().mean(dim=-1).clone()
-        return torch.cat(signatures).clone()
+            return sampled.detach().abs().mean(dim=-1).float().cpu()
+        return torch.cat(signatures).float().cpu()
 
     @staticmethod
     def _timestep_value(timestep: Any) -> float | None:
@@ -887,21 +893,35 @@ class MiniMaxH3Cache:
             return float(timestep)
         return None
 
+    @property
+    def cached_residual(self) -> torch.Tensor | None:
+        return self._residual_buffer if self._cache_valid else None
+
     def _store_residual(self, residual: torch.Tensor) -> None:
         if self.device == "cuda" and residual.device.type != "cuda":
             raise ValueError(
                 "MiniMax H3 cache device is set to cuda, but the model is not running on CUDA."
             )
 
+        target_device = torch.device("cpu") if self.device == "cpu" else residual.device
+        residual = residual.detach()
         try:
-            if self.device == "cpu":
-                self.cached_residual = residual.detach().to("cpu", copy=True)
-            else:
-                self.cached_residual = residual.detach().clone()
+            buffer = self._residual_buffer
+            if (
+                buffer is None
+                or buffer.shape != residual.shape
+                or buffer.dtype != residual.dtype
+                or buffer.device != target_device
+            ):
+                buffer = torch.empty(residual.shape, dtype=residual.dtype, device=target_device)
+                self._residual_buffer = buffer
+            buffer.copy_(residual, non_blocking=(target_device.type == "cuda"))
+            self._cache_valid = True
         except torch.OutOfMemoryError:
             if self.device == "cuda":
                 raise
-            self.cached_residual = residual.detach().to("cpu", copy=True)
+            self._residual_buffer = residual.to("cpu", copy=True)
+            self._cache_valid = True
 
     def _apply_residual(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = self.cached_residual
@@ -987,7 +1007,7 @@ class MiniMaxH3Cache:
 
         self.run_count += 1
         self.consecutive_skips = 0
-        self.cached_residual = None
+        self._cache_valid = False
         self.previous_feature_signature = self._feature_signature(hidden_states, cache_ranges)
         start_hidden_states = hidden_states.clone()
         result = original_block(args)
@@ -1038,7 +1058,9 @@ def run_minimax_h3_blocks(
     )
     for index in range(start, end):
         block = model.blocks[index]
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, hidden_states.device, block)
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, hidden_states.device, block, malloc_scope="block"
+        )
         if ("double_block", index) in blocks_replace:
 
             def block_wrapper(block_args: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -1072,7 +1094,7 @@ def run_minimax_h3_blocks(
             )
     if prefetch_queue is not None:
         comfy.model_prefetch.prefetch_queue_pop(
-            prefetch_queue, hidden_states.device, None
+            prefetch_queue, hidden_states.device, None, malloc_scope="block"
         )
     return hidden_states
 
@@ -5374,6 +5396,18 @@ def _patch_h3_sla_attention(model: Any, config: MiniMaxH3SlaAttentionConfig) -> 
     return patched
 
 
+def _unified_attention_sampling_scope(mode: str):
+    def scope(sample_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        logger = logging.getLogger(__name__)
+        logger.info("Unified Attention Patcher: %s active for sampling", mode)
+        try:
+            return sample_fn(*args, **kwargs)
+        finally:
+            logger.info("Unified Attention Patcher: %s sampling ended; Core default attention unchanged", mode)
+
+    return scope
+
+
 def patch_unified_attention_model(model: Any, attention_mode: dict[str, Any]) -> Any:
     mode = attention_mode.get("attention_mode")
     if mode not in UNIFIED_ATTENTION_MODES:
@@ -5384,8 +5418,8 @@ def patch_unified_attention_model(model: Any, attention_mode: dict[str, Any]) ->
         config = attention_mode.get("minimax_h3_radial_config")
         if not isinstance(config, MiniMaxH3RadialAttentionConfig):
             raise ValueError("Sparse / MiniMax H3 Radial requires MiniMax H3 Radial Attention Config.")
-        return _patch_h3_radial_attention(model, config)
-    if mode == "Sparse / MiniMax H3 SLA":
+        patched = _patch_h3_radial_attention(model, config)
+    elif mode == "Sparse / MiniMax H3 SLA":
         config = attention_mode.get("minimax_h3_sla_config")
         if config is None:
             config = MiniMaxH3SlaAttentionConfig()
@@ -5399,27 +5433,33 @@ def patch_unified_attention_model(model: Any, attention_mode: dict[str, Any]) ->
             protect_reference_media=attention_mode.get("protect_reference_media", "Light"),
             dense_backend=attention_mode.get("dense_backend", "comfy_kitchen"),
         )
-        return _patch_h3_sla_attention(model, config)
-
-    patched = model.clone()
-    options = _ensure_transformer_options(patched)
-    options[UNIFIED_ATTENTION_OWNER_KEY] = mode
-    if mode == "FlashAttention":
-        options["optimized_attention_override"] = _call_attention_function(
-            _make_flash_backend(bool(attention_mode.get("allow_compile", False)), _model_compute_dtype(patched))
-        )
-    elif mode == "SageAttention":
-        h3_memory_optimizations = bool(attention_mode.get("h3_memory_optimizations", False))
-        options["optimized_attention_override"] = _call_attention_function(
-            _make_sage_backend(attention_mode.get("sage_mode", "auto"), bool(attention_mode.get("allow_compile", False)))
-        )
-        if h3_memory_optimizations:
-            diffusion_model = patched.get_model_object("diffusion_model")
-            if not isinstance(diffusion_model, minimax_model.MiniMaxH3Model):
-                raise ValueError("MiniMax H3 memory optimizations require a MiniMax H3 diffusion model.")
-            for index, block in enumerate(diffusion_model.blocks):
-                patched_forward = types.MethodType(_h3_sage_forward, block.attn)
-                patched.add_object_patch(f"diffusion_model.blocks.{index}.attn.forward", patched_forward)
+        patched = _patch_h3_sla_attention(model, config)
+    else:
+        patched = model.clone()
+        options = _ensure_transformer_options(patched)
+        options[UNIFIED_ATTENTION_OWNER_KEY] = mode
+        if mode == "FlashAttention":
+            options["optimized_attention_override"] = _call_attention_function(
+                _make_flash_backend(bool(attention_mode.get("allow_compile", False)), _model_compute_dtype(patched))
+            )
+        elif mode == "SageAttention":
+            h3_memory_optimizations = bool(attention_mode.get("h3_memory_optimizations", False))
+            options["optimized_attention_override"] = _call_attention_function(
+                _make_sage_backend(attention_mode.get("sage_mode", "auto"), bool(attention_mode.get("allow_compile", False)))
+            )
+            if h3_memory_optimizations:
+                diffusion_model = patched.get_model_object("diffusion_model")
+                if not isinstance(diffusion_model, minimax_model.MiniMaxH3Model):
+                    raise ValueError("MiniMax H3 memory optimizations require a MiniMax H3 diffusion model.")
+                for index, block in enumerate(diffusion_model.blocks):
+                    patched_forward = types.MethodType(_h3_sage_forward, block.attn)
+                    patched.add_object_patch(f"diffusion_model.blocks.{index}.attn.forward", patched_forward)
+    patched.remove_wrappers_with_key(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, UNIFIED_ATTENTION_SAMPLING_SCOPE_KEY)
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+        UNIFIED_ATTENTION_SAMPLING_SCOPE_KEY,
+        _unified_attention_sampling_scope(mode),
+    )
     return patched
 
 
