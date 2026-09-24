@@ -54,7 +54,6 @@ from ..helpers.encoder_helpers import(
     build_minimax_h3_media_config,
     MINIMAX_H3_MEDIA_STRUCTURE,
     MINIMAX_H3_VIDEO_LATENT_MODES,
-    MINIMAX_H3_AUDIO_MODES,
     execute_token_fusion_visual_conditioning,
 )
 from ..helpers.image_helpers import VIDEO_FRAME_TIMESTAMP_FORMATS
@@ -3637,12 +3636,6 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
                 ),
                 io.Int.Input("temporal_density", default=1, min=1, max=24, step=1, tooltip="Offset sample density used only by the experimental temporal encoders."),
                 io.Combo.Input("temporal_fusion_method", options=["consensus", "spatial"], default="consensus", tooltip="Video-block fusion used only by the experimental temporal encoders."),
-                io.Combo.Input(
-                    "audio_mode",
-                    options=list(MINIMAX_H3_AUDIO_MODES),
-                    default="reference_only",
-                    tooltip="Controls reference audio timeline anchoring. reference_only sends audio only as a conditioning reference (matching Core defaults); auto_anchor pins audio to frame 0 as a keyframe guide to avoid cutoff during long clips.",
-                ),
             ],
             outputs=[MiniMaxH3MediaConfig.Output(display_name="media_config", tooltip="Runtime media configuration for the Advanced MiniMax H3 encoder nodes.")],
         )
@@ -3658,7 +3651,6 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         video_latent_keyframes=4,
         temporal_density=1,
         temporal_fusion_method="consensus",
-        audio_mode="reference_only",
     ):
         return io.NodeOutput(build_minimax_h3_media_config(
             timestamps,
@@ -3669,7 +3661,6 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
             video_latent_keyframes,
             temporal_density,
             temporal_fusion_method,
-            audio_mode,
         ))
 
 

@@ -676,11 +676,9 @@ def test_minimax_h3_media_config_schema_and_payload():
     assert inputs["video_fps"].default == 2
     assert inputs["video_fps"].min == 1
     assert inputs["video_fps"].max == 24
-    assert [value.id for value in schema.inputs][-6:] == [
-        "video_fps", "video_latent_mode", "video_latent_keyframes", "temporal_density", "temporal_fusion_method", "audio_mode"
+    assert [value.id for value in schema.inputs][-5:] == [
+        "video_fps", "video_latent_mode", "video_latent_keyframes", "temporal_density", "temporal_fusion_method"
     ]
-    assert inputs["audio_mode"].default == "reference_only"
-    assert inputs["audio_mode"].options == ["reference_only", "auto_anchor"]
     assert inputs["video_latent_mode"].default == "even keyframes"
     assert inputs["video_latent_keyframes"].default == 4
     assert inputs["video_latent_keyframes"].min == 2
@@ -912,7 +910,7 @@ def test_clip_continuation_encoder_supports_audio_only_continuation():
     assert all("latent" not in kf for kf in metadata["minimax_keyframes"])
 
 
-def test_advanced_minimax_h3_audio_auto_anchors_and_slices_to_target_audio_t():
+def test_advanced_minimax_h3_reference_audio():
     class MockAudioVAE:
         audio_sample_rate = 32000
 
@@ -924,7 +922,6 @@ def test_advanced_minimax_h3_audio_auto_anchors_and_slices_to_target_audio_t():
     # Audio with 80000 samples -> 100 latent frames (longer than 93)
     audio = {"waveform": torch.ones(1, 2, 80000), "sample_rate": 32000}
     
-    # 1. Default reference_only mode: keeps audio strictly as reference, no keyframe
     conditioning, _ = encoder_helpers.execute_advanced_minimax_h3_image_to_video(
         clip, None, "prompt", 64, 64, 56,
         audio=audio,
@@ -935,22 +932,6 @@ def test_advanced_minimax_h3_audio_auto_anchors_and_slices_to_target_audio_t():
     assert "minimax_keyframes" not in metadata
     ref_audio = next(ref for ref in metadata["minimax_refs"] if ref["kind"] == "audio")
     assert ref_audio["ref_audio_t"] == 100
-
-    # 2. Explicit auto_anchor mode: anchors to frame 0 and slices to target_audio_t (93)
-    media_config = encoder_helpers.build_minimax_h3_media_config(None, audio_mode="auto_anchor")
-    conditioning_anchor, _ = encoder_helpers.execute_advanced_minimax_h3_image_to_video(
-        clip, None, "prompt", 64, 64, 56,
-        media_config=media_config,
-        audio=audio,
-        audio_vae=MockAudioVAE(),
-        enable_caching="disabled",
-    )
-    metadata_anchor = conditioning_anchor[0][1]
-    assert "minimax_keyframes" in metadata_anchor
-    audio_kf = next(kf for kf in metadata_anchor["minimax_keyframes"] if "audio_latent" in kf)
-    assert audio_kf["resolved_frame_index"] == 0
-    assert audio_kf["audio_latent"].shape[-1] == 93
-    assert "minimax_refs" not in metadata_anchor
 
 
 def test_minimax_h3_reference_video_matches_core_resize_trim_and_payload(monkeypatch):
