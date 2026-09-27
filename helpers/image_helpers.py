@@ -1159,7 +1159,7 @@ def cached_video_components(video, preparation=None, prepare=None):
         # Migrate frame-by-frame, never materializing the old multi-GB tensor.
         components = read_legacy_components(legacy, source_key)
     elif preparation is not None and preparation.get("resize") == "h3-bicubic-center-v2":
-        if hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
+        if not preparation.get("cache_long_window") and hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
             components = video.get_components()
             return prepare(components) if prepare is not None else components
         _write_streamed_h3_components(path, key, video, preparation["megapixels"], storage)
@@ -1216,20 +1216,27 @@ class H3ResizedFrames:
         return self._batch[index - self._batch_start]
 
 
-def cached_h3_reference_components(video, megapixels):
-    if not math.isfinite(megapixels) or megapixels <= 0:
-        raise ValueError("Megapixels must be positive.")
+def cached_h3_reference_components(video, megapixels, *, cache_long_window=False):
+    if not math.isfinite(megapixels) or megapixels < 0:
+        raise ValueError("Megapixels must be non-negative.")
 
     def prepare(components):
         frames = components.images
         if frames.ndim != 4 or min(frames.shape[:3]) < 1:
             raise ValueError("Reference video must contain non-empty frames.")
+        if megapixels <= 0:
+            return components
         aspect = frames.shape[2] / frames.shape[1]
         ratio = min(ASPECT_RATIOS.values(), key=lambda value: abs(aspect - value[0] / value[1]))
         width, height = select_video_resolution(*ratio, megapixels, 32, 32, MAX_RESOLUTION)
         return Types.VideoComponents(images=H3ResizedFrames(frames, width, height), audio=components.audio, frame_rate=components.frame_rate)
 
-    return cached_video_components(video, {"megapixels": megapixels, "resize": "h3-bicubic-center-v2"}, prepare)
+    prep_info = {"megapixels": megapixels}
+    if megapixels > 0:
+        prep_info["resize"] = "h3-bicubic-center-v2"
+    if cache_long_window:
+        prep_info["cache_long_window"] = True
+    return cached_video_components(video, prep_info, prepare)
 
 
 def resolve_h3_reference_window(
@@ -1304,8 +1311,8 @@ def prepare_h3_reference_components(
         raise ValueError("Reference video must contain non-empty frames.")
     if not math.isfinite(source_rate) or source_rate <= 0:
         raise ValueError("Reference video must have a positive frame rate.")
-    if not math.isfinite(megapixels) or megapixels <= 0:
-        raise ValueError("Megapixels must be positive.")
+    if not math.isfinite(megapixels) or megapixels < 0:
+        raise ValueError("Megapixels must be non-negative.")
     if not segment_count and (not math.isfinite(duration_seconds) or duration_seconds < 0):
         raise ValueError("Duration must be zero or a positive number of seconds.")
     if not segment_count and (not math.isfinite(start_at_timestamp) or start_at_timestamp < 0):
@@ -1327,15 +1334,18 @@ def prepare_h3_reference_components(
     prepared_frames = video_frames
 
     source_height, source_width = source_frames.shape[1:3]
-    source_aspect = source_width / source_height
-    ratio_width, ratio_height = min(
-        ASPECT_RATIOS.values(), key=lambda ratio: abs(source_aspect - ratio[0] / ratio[1]),
-    )
-    output_width, output_height = select_video_resolution(
-        ratio_width, ratio_height, megapixels, 32, 32, MAX_RESOLUTION,
-    )
-    if spatially_prepared:
+    if megapixels <= 0:
         output_width, output_height = source_width, source_height
+    elif spatially_prepared:
+        output_width, output_height = source_width, source_height
+    else:
+        source_aspect = source_width / source_height
+        ratio_width, ratio_height = min(
+            ASPECT_RATIOS.values(), key=lambda ratio: abs(source_aspect - ratio[0] / ratio[1]),
+        )
+        output_width, output_height = select_video_resolution(
+            ratio_width, ratio_height, megapixels, 32, 32, MAX_RESOLUTION,
+        )
     if (output_height, output_width) != (source_height, source_width):
         prepared_frames = resize_nchw(
             prepared_frames.movedim(-1, 1), output_width, output_height, "lanczos", "center",

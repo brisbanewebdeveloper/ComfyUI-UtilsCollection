@@ -9,6 +9,7 @@ from comfy_execution.graph import ExecutionBlocker
 from comfy_api.latest import InputImpl, Types, io
 from comfy_extras.nodes_logic import SwitchNode, SoftSwitchNode
 from ..helpers.helper_functions import to_video_prompt
+from ..helpers.text_helpers import compile_h3_prompt, default_h3_prompt_state
 from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, video_source_hash, resolve_h3_reference_window, VIDEO_FRAME_TIMESTAMP_FORMATS
 from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
@@ -24,6 +25,7 @@ from ..helpers.model_helpers import (
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
 SeedClusterType = io.Custom("UC_SEED_CLUSTER")
 MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
+MiniMaxH3PromptBuilderState = io.Custom("UC_MINIMAX_H3_PROMPT_BUILDER")
 _MINIMAX_H3_CLIP_ACCUMULATION = {}
 
 
@@ -39,7 +41,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
             inputs=[
                 io.Video.Input("video", tooltip="Reference clip. Its original frame rate is used to preserve playback speed when preparing 24 fps frames."),
                 MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Optional output from MiniMax H3 Clip Continuation Load. When connected, continuation frames and audio replace or prepend the opening segment frames before reference preparation and Whisper transcription."),
-                io.Float.Input("megapixels", default=0.5, min=0.01, max=4.0, step=0.001, tooltip="Target frame size. Matches the video to the nearest standard aspect ratio from Video Resolution Selector, chooses its preferred resolution, and center-crops to fit. Edges may be trimmed; the picture is not stretched."),
+                io.Float.Input("megapixels", default=0.5, min=0.0, max=4.0, step=0.001, tooltip="Target frame size. Set to 0.0 to keep original video resolution without scaling or cropping. Otherwise matches the video to the nearest standard aspect ratio from Video Resolution Selector, chooses its preferred resolution, and center-crops to fit."),
                 io.Float.Input("duration_seconds", default=0.0, min=0.0, step=0.1, tooltip="Maximum reference duration after the start offset. 0 uses the remaining clip. The selected duration rounds up to a supported H3 frame count at 24 fps, so it may run slightly longer and repeat the final frame."),
                 io.Float.Input("start_at_timestamp", default=0.0, min=0.0, step=0.1, tooltip="Seconds to skip at the start, for both video and audio. 0 skips nothing; positive values use the same H3 frame-count rounding as duration. Preview frame numbers are zero-based and the end frame is inclusive."),
                 io.Custom("WHISPER_MODEL").Input("whisper_model", optional=True, tooltip="Optional native Whisper Loader output. Transcribes the selected audio in its original language; disconnected skips transcription."),
@@ -93,10 +95,10 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
                 start_sec = decode_start / 24.0
                 dur_sec = max(1, end_frame - decode_start) / 24.0
                 windowed_video = InputImpl.VideoFromFile(video.get_stream_source(), start_time=start_sec, duration=dur_sec)
-                components = windowed_video.get_components()
+                components = cached_h3_reference_components(windowed_video, megapixels, cache_long_window=True)
                 frames, audio, width, height, length, _, preview = prepare_h3_reference_components(
                     components, megapixels, duration_seconds=duration_seconds, start_at_timestamp=start_at_timestamp,
-                    spatially_prepared=False, segment_count=segment_count, segment_index=segment_index,
+                    spatially_prepared=True, segment_count=segment_count, segment_index=segment_index,
                     continuation_media=continuation_media,
                     full_source_seconds=source_seconds,
                     window_start_frame=decode_start,
@@ -637,6 +639,25 @@ class UC_GetJsonValue(io.ComfyNode):
             raise ValueError(f"Unsupported JSON value selection mode: {selection_mode!r}")
 
         return io.NodeOutput(value)
+
+
+class UC_MiniMaxH3DynamicPromptBuilder(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3DynamicPromptBuilder",
+            display_name="MiniMax H3 Dynamic Prompt Builder",
+            category="advanced/text",
+            description="Build an H3 prompt with optional headers and editable timeline segments.",
+            inputs=[MiniMaxH3PromptBuilderState.Input("prompt_state", extra_dict={
+                "socketless": True, "default": json.dumps(default_h3_prompt_state()), "state_version": 1,
+            })],
+            outputs=[io.String.Output("prompt")],
+        )
+
+    @classmethod
+    def execute(cls, prompt_state: str) -> io.NodeOutput:
+        return io.NodeOutput(compile_h3_prompt(prompt_state))
 
 
 class UC_ImageToVideoPrompt(io.ComfyNode):

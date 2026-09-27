@@ -833,10 +833,13 @@ class MiniMaxH3Cache:
         self.device = device
         self.verbose = verbose
         self.total_steps = 1
+        self._residual_buffer: torch.Tensor | None = None
+        self._cache_valid = False
         self.reset()
 
     def reset(self) -> None:
-        self.cached_residual: torch.Tensor | None = None
+        self._cache_valid = False
+        self._residual_buffer = None
         self.previous_feature_signature: torch.Tensor | None = None
         self.layout_signature: tuple[Any, ...] | None = None
         self.last_seen_timestep: float | None = None
@@ -881,8 +884,8 @@ class MiniMaxH3Cache:
         if not signatures:
             stride = max(1, hidden_states.shape[0] // 100)
             sampled = hidden_states[::stride, :max_dim]
-            return sampled.detach().abs().mean(dim=-1).clone()
-        return torch.cat(signatures).clone()
+            return sampled.detach().abs().mean(dim=-1).float().cpu()
+        return torch.cat(signatures).float().cpu()
 
     @staticmethod
     def _timestep_value(timestep: Any) -> float | None:
@@ -894,21 +897,35 @@ class MiniMaxH3Cache:
             return float(timestep)
         return None
 
+    @property
+    def cached_residual(self) -> torch.Tensor | None:
+        return self._residual_buffer if self._cache_valid else None
+
     def _store_residual(self, residual: torch.Tensor) -> None:
         if self.device == "cuda" and residual.device.type != "cuda":
             raise ValueError(
                 "MiniMax H3 cache device is set to cuda, but the model is not running on CUDA."
             )
 
+        target_device = torch.device("cpu") if self.device == "cpu" else residual.device
+        residual = residual.detach()
         try:
-            if self.device == "cpu":
-                self.cached_residual = residual.detach().to("cpu", copy=True)
-            else:
-                self.cached_residual = residual.detach().clone()
+            buffer = self._residual_buffer
+            if (
+                buffer is None
+                or buffer.shape != residual.shape
+                or buffer.dtype != residual.dtype
+                or buffer.device != target_device
+            ):
+                buffer = torch.empty(residual.shape, dtype=residual.dtype, device=target_device)
+                self._residual_buffer = buffer
+            buffer.copy_(residual, non_blocking=(target_device.type == "cuda"))
+            self._cache_valid = True
         except torch.OutOfMemoryError:
             if self.device == "cuda":
                 raise
-            self.cached_residual = residual.detach().to("cpu", copy=True)
+            self._residual_buffer = residual.to("cpu", copy=True)
+            self._cache_valid = True
 
     def _apply_residual(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = self.cached_residual
@@ -994,7 +1011,7 @@ class MiniMaxH3Cache:
 
         self.run_count += 1
         self.consecutive_skips = 0
-        self.cached_residual = None
+        self._cache_valid = False
         self.previous_feature_signature = self._feature_signature(hidden_states, cache_ranges)
         start_hidden_states = hidden_states.clone()
         result = original_block(args)
@@ -1045,7 +1062,9 @@ def run_minimax_h3_blocks(
     )
     for index in range(start, end):
         block = model.blocks[index]
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, hidden_states.device, block)
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, hidden_states.device, block, malloc_scope="block"
+        )
         if ("double_block", index) in blocks_replace:
 
             def block_wrapper(block_args: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -1079,7 +1098,7 @@ def run_minimax_h3_blocks(
             )
     if prefetch_queue is not None:
         comfy.model_prefetch.prefetch_queue_pop(
-            prefetch_queue, hidden_states.device, None
+            prefetch_queue, hidden_states.device, None, malloc_scope="block"
         )
     return hidden_states
 
@@ -4890,15 +4909,18 @@ def _h3_sage_forward(self, x, rope_freqs=None, transformer_options=None):
         raise RuntimeError("MiniMax H3 memory optimizations require SageAttention.") from error
 
     token_count = x.shape[0]
-    projected = self.qkv_proj(x).reshape(token_count, 3, self.heads, self.head_dim)
-    q, k, v = (projected[:, index].unsqueeze(0) for index in range(3))
+    inner = self.heads * self.head_dim
+    q, k, v = self.qkv_proj(x).split(inner, dim=-1)
+    q = q.view(1, token_count, self.heads, self.head_dim).contiguous()
+    k = k.view(1, token_count, self.heads, self.head_dim).contiguous()
+    v = v.view(1, token_count, self.heads, self.head_dim).contiguous()
     if rope_freqs is not None:
         qw = comfy.model_management.cast_to(self.q_norm.weight, device=x.device)
         kw = comfy.model_management.cast_to(self.k_norm.weight, device=x.device)
         comfy.quant_ops.ck.rms_rope_split_half_(q, k, rope_freqs, qw, kw, epsilon=self.q_norm.eps, rot_dim=rope_freqs.shape[-3] * 2)
     else:
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        q = self.q_norm(q.view(token_count, self.heads, self.head_dim)).unsqueeze(0).contiguous()
+        k = self.k_norm(k.view(token_count, self.heads, self.head_dim)).unsqueeze(0).contiguous()
     attended = sageattn_qk_int8_pv_fp8_cuda(q, k, v, is_causal=False, tensor_layout="NHD", pv_accum_dtype="fp32+fp32")
     return self.out_proj(attended.to(x.dtype).flatten(2).squeeze(0))
 

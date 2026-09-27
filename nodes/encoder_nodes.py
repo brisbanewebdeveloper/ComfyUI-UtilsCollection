@@ -195,6 +195,7 @@ class UC_AttentionBiasTextEncode(io.ComfyNode):
 # --- Type Definitions for Modular Configurations ---
 TextBlendConfig = io.Custom("TEXT_BLEND_CONFIG")
 VisualFusionConfig = io.Custom("VISUAL_FUSION_CONFIG")
+VisualFusionImages = io.Custom("VISUAL_FUSION_IMAGES")
 AdvancedConsensusConfig = io.Custom("ADVANCED_CONSENSUS_CONFIG")
 VisualConsensusConfig = io.Custom("VISUAL_CONSENSUS_CONFIG")
 MiniMaxH3MediaConfig = io.Custom("MINIMAX_H3_MEDIA_CONFIG")
@@ -357,6 +358,44 @@ class UC_VisualFusionConfig(io.ComfyNode):
             "save_path": save_path
         }
         return io.NodeOutput(config)
+
+
+class UC_VisualFusionImages(io.ComfyNode):
+    """
+    Isolated container for visual fusion image inputs.
+    Extracts autogrow inputs into a single dedicated output to avoid multiple autogrows on complex nodes.
+    """
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        fusion_template = io.Autogrow.TemplateNames(
+            io.Image.Input(
+                "fusion_image",
+                tooltip="Ordered Qwen-only visual source for visual component fusion.",
+            ),
+            names=[f"fusion_image_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        return io.Schema(
+            node_id="UC_VisualFusionImages",
+            display_name="Visual Fusion Images",
+            category="advanced/conditioning",
+            description="Collects ordered visual fusion images for Advanced MiniMax H3 and visual conditioning encoders.",
+            inputs=[
+                io.Autogrow.Input(
+                    "fusion_images",
+                    template=fusion_template,
+                    optional=True,
+                    tooltip="Connect images to combine via visual component fusion. Images pair by index or broadcast per node fusion rules.",
+                ),
+            ],
+            outputs=[
+                VisualFusionImages.Output("fusion_images", display_name="Fusion Images")
+            ],
+        )
+
+    @classmethod
+    def execute(cls, fusion_images: io.Autogrow.Type = None) -> io.NodeOutput:
+        return io.NodeOutput(fusion_images)
 
 
 class UC_AdvancedConsensusConfiguration(UC_TextConsensusBlendConfig):
@@ -3580,20 +3619,40 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
                 io.AnyType.Input("timestamps", optional=True, tooltip="Optional sequential timestamps for existing Picture slots. Leave disconnected to keep the default Core Picture presentation."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="0.0s", tooltip="Formatting used when the Picture structure contains <<time>>."),
                 io.String.Input("structure", multiline=True, dynamic_prompts=False, default=MINIMAX_H3_MEDIA_STRUCTURE, tooltip="Picture constructor using required <<picture>> and <<visual>> tags. Default matches Core: <<picture>>: <<visual>>. Timestamped example: At <<time>>, <<picture>>: <<visual>> (from <<shot>>) is fully anchored."),
+                io.Int.Input(
+                    "video_reference_resolution",
+                    display_name="Video reference resolution",
+                    default=512,
+                    min=32,
+                    step=32,
+                    optional=True,
+                    tooltip="Equivalent-square resolution in pixels for the reference area (e.g. 128, 256, 384, 512) for pooled/refined modes. Matches vlm_resolution equivalent-square scaling. Default 256px.",
+                ),
+                io.Float.Input(
+                    "video_latent_fps",
+                    display_name="Video reference FPS",
+                    default=24.0,
+                    min=0.1,
+                    max=24.0,
+                    step=0.1,
+                    optional=True,
+                    tooltip="Sampling rate in FPS for the video reference on the latent side (used in 'pooled' mode). E.g. 1.0, 2.0, 4.0 FPS. Lower FPS saves substantial VRAM.",
+                ),
                 io.Int.Input("video_fps", default=2, min=1, max=24, step=1, tooltip="VLM presentation sampling rate for the 24 fps Video input. Latent video usage is unchanged."),
                 io.Combo.Input(
                     "video_latent_mode",
-                    options=list(MINIMAX_H3_VIDEO_LATENT_MODES),
-                    default="even keyframes",
-                    tooltip="Controls Video motion guidance. Full Video uses the most sampling memory. Even keyframes keep spaced points from start to end with less sampling memory. Off sends Video only to Qwen.",
+                    options=["full video", "pooled", "refined", "off"],
+                    default="full video",
+                    tooltip="Controls Video motion guidance. Full Video uses uncompressed reference memory. Pooled compresses video references spatially and temporally on the latent side to save VRAM. Refined optimizes the compressed latent to preserve sharper features. Off sends Video only to Qwen.",
                 ),
                 io.Int.Input(
-                    "video_latent_keyframes",
-                    default=4,
-                    min=2,
-                    max=213,
+                    "refine_steps",
+                    default=200,
+                    min=1,
+                    max=1000,
                     step=1,
-                    tooltip="Number of evenly spaced Video points kept from beginning through end in even keyframes mode. Lower values use less sampling memory.",
+                    optional=True,
+                    tooltip="Optimization steps for 'refined' mode. Trains the small reference latent to match source features.",
                 ),
                 io.Int.Input("temporal_density", default=1, min=1, max=24, step=1, tooltip="Offset sample density used only by the experimental temporal encoders."),
                 io.Combo.Input("temporal_fusion_method", options=["consensus", "spatial"], default="consensus", tooltip="Video-block fusion used only by the experimental temporal encoders."),
@@ -3608,10 +3667,13 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         timestamp_format="0.0s",
         structure=MINIMAX_H3_MEDIA_STRUCTURE,
         video_fps=2,
-        video_latent_mode="even keyframes",
-        video_latent_keyframes=4,
+        video_latent_mode="full video",
         temporal_density=1,
         temporal_fusion_method="consensus",
+        video_reference_resolution=256,
+        video_latent_fps=2.0,
+        refine_steps=100,
+        **kwargs,
     ):
         return io.NodeOutput(build_minimax_h3_media_config(
             timestamps,
@@ -3619,9 +3681,12 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
             structure,
             video_fps,
             video_latent_mode,
-            video_latent_keyframes,
-            temporal_density,
-            temporal_fusion_method,
+            temporal_density=temporal_density,
+            temporal_fusion_method=temporal_fusion_method,
+            video_reference_resolution=video_reference_resolution,
+            video_latent_fps=video_latent_fps,
+            refine_steps=refine_steps,
+            **kwargs,
         ))
 
 
@@ -3658,14 +3723,6 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                 tooltip="Ordered native H3 image reference and separately numbered Qwen picture.",
             ),
             names=[f"reference_image_{index}" for index in range(1, 33)],
-            min=0,
-        )
-        fusion_template = io.Autogrow.TemplateNames(
-            io.Image.Input(
-                "fusion_image",
-                tooltip="Ordered Qwen-only visual source. Active fusion combines only this group.",
-            ),
-            names=[f"fusion_image_{index}" for index in range(1, 33)],
             min=0,
         )
         return io.Schema(
@@ -3786,12 +3843,12 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                         "explicit first/last frame inputs. See fusion_images for supported reference-picture fusion."
                     ),
                 ),
-                io.Autogrow.Input(
+                VisualFusionImages.Input(
                     "fusion_images",
-                    template=fusion_template,
+                    display_name="Fusion Images",
                     optional=True,
                     tooltip=(
-                        "Qwen-only fusion contract. Active method: with frames, socket N targets Picture N and every batch "
+                        "Connect Visual Fusion Images to supply Qwen-only visual sources. Active method: with frames, socket N targets Picture N and every batch "
                         "item is another source; an unmatched socket errors. With one native reference, all fusion images "
                         "combine with that Picture. With multiple references, one image on fusion_image_1 broadcasts to "
                         "every reference Picture; otherwise flattened fusion images pair by "
@@ -3827,7 +3884,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         first_frame=None,
         last_frame=None,
         reference_images: io.Autogrow.Type = None,
-        fusion_images: io.Autogrow.Type = None,
+        fusion_images=None,
         visual_fusion_config=None,
         multiplier=1.0,
         ref_image_size="match",
@@ -3909,7 +3966,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         first_frame=None,
         last_frame=None,
         reference_images: io.Autogrow.Type = None,
-        fusion_images: io.Autogrow.Type = None,
+        fusion_images=None,
         visual_fusion_config=None,
         multiplier=1.0,
         ref_image_size="match",

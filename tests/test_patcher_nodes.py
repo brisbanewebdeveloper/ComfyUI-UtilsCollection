@@ -463,7 +463,10 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
 
     class FakeH3:
         def __init__(self):
-            self.blocks = [types.SimpleNamespace(attn=FakeAttention()) for _ in range(2)]
+            self.blocks = [
+                types.SimpleNamespace(attn=FakeAttention()),
+                types.SimpleNamespace(attn=FakeAttention()),
+            ]
 
     monkeypatch.setattr(patcher_helpers.minimax_model, "MiniMaxH3Model", FakeH3)
     monkeypatch.setattr(patcher_helpers, "_make_sage_backend", lambda *_args: lambda *args, **_kwargs: args[2])
@@ -473,6 +476,7 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
             self.model = types.SimpleNamespace(diffusion_model=diffusion)
             self.model_options = {"transformer_options": {}}
             self.object_patches = {}
+            self.wrappers = {}
 
         def clone(self):
             return FakePatcher(self.model.diffusion_model)
@@ -482,6 +486,12 @@ def test_unified_h3_memory_optimizations_use_clone_scoped_block_patches(monkeypa
 
         def add_object_patch(self, path, value):
             self.object_patches[path] = value
+
+        def remove_wrappers_with_key(self, wrapper_type, key):
+            self.wrappers.get(wrapper_type, {}).pop(key, None)
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            self.wrappers.setdefault(wrapper_type, {})[key] = wrapper
 
     patched = patcher_helpers.patch_unified_attention_model(
         FakePatcher(FakeH3()),
@@ -804,6 +814,18 @@ def test_cpu_cache_preserves_output_shape_and_dtype():
     assert output.dtype == image.dtype
 
 
+def test_cache_finish_releases_residual_buffer():
+    cache = _cache(device="cpu")
+    cache._store_residual(torch.ones((4, 8)))
+    assert cache.cached_residual is not None
+    assert cache._residual_buffer is not None
+
+    cache.finish()
+
+    assert cache.cached_residual is None
+    assert cache._residual_buffer is None
+
+
 def test_sampling_scope_always_clears_cache_state():
     cache = _cache()
     scope = patcher_helpers.MiniMaxH3SamplingScope(cache)
@@ -829,7 +851,7 @@ def test_block_runner_preserves_double_block_replacements(monkeypatch):
     monkeypatch.setattr(
         patcher_helpers.comfy.model_prefetch,
         "prefetch_queue_pop",
-        lambda queue, device, block: prefetch_events.append(block),
+        lambda queue, device, block, malloc_scope=None: prefetch_events.append((block, malloc_scope)),
     )
 
     class Block:
@@ -853,7 +875,7 @@ def test_block_runner_preserves_double_block_replacements(monkeypatch):
     )
 
     assert torch.equal(output, torch.full((2, 4), 12.0))
-    assert prefetch_events == [blocks[0], blocks[1], None]
+    assert prefetch_events == [(blocks[0], "block"), (blocks[1], "block"), (None, "block")]
 
 
 def test_cached_forward_matches_current_core_audio_output_contract(monkeypatch):
@@ -1417,7 +1439,7 @@ def test_minimax_h3_projected_clip_is_clone_scoped_and_returns_tags(monkeypatch,
             cached = cache.encode_scheduled(cached_clip, tokens, "grid-deepstack", lambda: cached_clip.encode_from_tokens_scheduled(tokens))
             torch.testing.assert_close(cached[0][0], output["cond"], rtol=0, atol=0)
             assert torch.equal(cached[0][1]["minimax_token_tags"], output["minimax_token_tags"])
-            assert cache.hits["qwen_scheduled"] == iteration
+            assert cache.hits["encoded_section"] == iteration
     projected._projection_model.tap += 1
     assert identity != clip_description(projected)
 

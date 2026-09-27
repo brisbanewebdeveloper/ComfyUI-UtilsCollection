@@ -444,7 +444,7 @@ class H3EncoderCache:
         if not self.allows_encoded_section(section_kind):
             return compute()
         outputs = None
-        hooks = clip.patcher.forced_hooks
+        hooks = getattr(clip.patcher, "forced_hooks", None)
         schedules = hooks.get_hooks_for_clip_schedule() if hooks is not None and clip.use_clip_schedule else [None]
         dependencies = {
             "section_kind": section_kind, "section_id": section_id, "tokens": tokens,

@@ -1006,6 +1006,12 @@ def test_h3_reference_components_round_seconds_and_preserve_audio_start():
     assert short.result[1]["waveform"].shape[-1] == 7200
     assert torch.count_nonzero(short.result[1]["waveform"]) == 0
 
+    # megapixels=0.0 keeps native frame dimensions without scaling or cropping.
+    zero_mp = utils_nodes.UC_MiniMaxH3RefVid.execute(video, megapixels=0.0)
+    assert zero_mp.result[2] == 16
+    assert zero_mp.result[3] == 8
+    assert tuple(zero_mp.result[0].shape[1:3]) == (8, 16)
+
 
 @pytest.mark.parametrize("timestamp_format, expected", [
     ("00.000s", "[00.400s–01.800s] Shake the bottle."),
@@ -1505,6 +1511,27 @@ def test_h3_streamed_cache_reuses_ranges(tmp_path, monkeypatch):
     monkeypatch.setattr(image_helpers, "_write_streamed_h3_components", forbidden)
     second = image_helpers.prepare_h3_reference_video_components(video, 0.01, 0.4)
     assert second[4] > first[4]
+
+
+@pytest.mark.parametrize("megapixels", [0.0, 0.01])
+def test_h3_reference_node_reuses_window_cache_after_output_eviction(tmp_path, monkeypatch, megapixels):
+    source = tmp_path / "source.mkv"
+    _encode_h3_fixture(source, "ffv1", 1)
+    monkeypatch.setattr(image_helpers.folder_paths, "get_temp_directory", lambda: str(tmp_path / "cache"))
+    monkeypatch.setattr(image_helpers.InputImpl.VideoFromFile, "get_duration", lambda self: 20.0)
+    video = image_helpers.InputImpl.VideoFromFile(str(source))
+
+    first = utils_nodes.UC_MiniMaxH3RefVid.execute(video, megapixels=megapixels, duration_seconds=0.2, enable_whisper=False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("The same H3 window must reuse its decoded and resized disk cache")
+
+    monkeypatch.setattr(image_helpers, "_write_streamed_h3_components", forbidden)
+    monkeypatch.setattr(image_helpers.InputImpl.VideoFromFile, "get_components", forbidden)
+    second = utils_nodes.UC_MiniMaxH3RefVid.execute(video, megapixels=megapixels, duration_seconds=0.2, enable_whisper=False)
+    torch.testing.assert_close(second.args[0], first.args[0], rtol=0, atol=0)
+    torch.testing.assert_close(second.args[1]["waveform"], first.args[1]["waveform"], rtol=0, atol=0)
+    assert second.args[2:5] == first.args[2:5]
 
 
 def test_h3_legacy_video_cache_migrates_without_decoding_source(tmp_path, monkeypatch):
