@@ -56,6 +56,7 @@ from ..helpers.encoder_helpers import(
     MINIMAX_H3_VIDEO_LATENT_MODES,
     execute_token_fusion_visual_conditioning,
 )
+from ..helpers.minimax_h3_reference_media_helpers import execute_advanced_minimax_h3_reference_media_image_to_video
 from ..helpers.image_helpers import VIDEO_FRAME_TIMESTAMP_FORMATS
 
 def apply_parallel_ref_latents(clip, conditioning, ref_latents, ref_latent_mode):
@@ -200,6 +201,7 @@ AdvancedConsensusConfig = io.Custom("ADVANCED_CONSENSUS_CONFIG")
 VisualConsensusConfig = io.Custom("VISUAL_CONSENSUS_CONFIG")
 MiniMaxH3MediaConfig = io.Custom("MINIMAX_H3_MEDIA_CONFIG")
 MiniMaxH3ClipContinuationMedia = io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA")
+MiniMaxH3ReferenceMedia = io.Custom("MINIMAX_H3_REFERENCE_MEDIA")
 
 class UC_TextConsensusBlendConfig(io.ComfyNode):
     @classmethod
@@ -396,6 +398,54 @@ class UC_VisualFusionImages(io.ComfyNode):
     @classmethod
     def execute(cls, fusion_images: io.Autogrow.Type = None) -> io.NodeOutput:
         return io.NodeOutput(fusion_images)
+
+
+class UC_MiniMaxH3ReferenceMedia(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        video_template = io.Autogrow.TemplateNames(
+            io.Image.Input("reference_video", tooltip="Video frame batch for reference video guidance."),
+            names=[f"reference_video_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        video_audio_template = io.Autogrow.TemplateNames(
+            io.Audio.Input("reference_video_audio", tooltip="Paired audio track for reference video."),
+            names=[f"reference_video_audio_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        audio_template = io.Autogrow.TemplateNames(
+            io.Audio.Input("reference_audio", tooltip="Audio track for standalone audio reference conditioning."),
+            names=[f"reference_audio_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        return io.Schema(
+            node_id="UC_MiniMaxH3ReferenceMedia",
+            display_name="MiniMax H3 Reference Media",
+            category="advanced/conditioning",
+            description="Collects multiple reference videos, paired reference video audio tracks, and standalone reference audio tracks for MiniMax H3.",
+            inputs=[
+                io.Autogrow.Input("reference_videos", template=video_template, optional=True),
+                io.Autogrow.Input("reference_video_audios", template=video_audio_template, optional=True),
+                io.Autogrow.Input("reference_audios", template=audio_template, optional=True),
+            ],
+            outputs=[
+                MiniMaxH3ReferenceMedia.Output("reference_media", display_name="Reference Media")
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        reference_videos: io.Autogrow.Type = None,
+        reference_video_audios: io.Autogrow.Type = None,
+        reference_audios: io.Autogrow.Type = None,
+        **kwargs,
+    ) -> io.NodeOutput:
+        return io.NodeOutput({
+            "reference_videos": reference_videos,
+            "reference_video_audios": reference_video_audios,
+            "reference_audios": reference_audios,
+        })
 
 
 class UC_AdvancedConsensusConfiguration(UC_TextConsensusBlendConfig):
@@ -2920,10 +2970,6 @@ class UC_Krea2InputEmbeds(io.ComfyNode):
             if img_path is not None:
                 del image_tensor, processed_img
 
-        # 5. Final VRAM release and soft_empty_cache
-        gc.collect()
-        comfy.model_management.soft_empty_cache()
-
         return io.NodeOutput(last_state_dict, last_tensor_2d)
 
 
@@ -3109,10 +3155,6 @@ class UC_Qwen3VLInputEmbeds(io.ComfyNode):
             del embeds, embeds_sliced, tokens, tokens_only
             if img_path is not None:
                 del image_tensor, processed_img
-
-        # 5. Final VRAM release and soft_empty_cache
-        gc.collect()
-        comfy.model_management.soft_empty_cache()
 
         return io.NodeOutput(state_dict, tensor_2d)
 
@@ -3614,11 +3656,8 @@ class UC_MiniMaxH3MediaConfig(io.ComfyNode):
         return io.Schema(
             node_id="UC_MiniMaxH3MediaConfig", display_name="MiniMax H3 Media Configurator",
             category="advanced/conditioning", is_input_list=True,
-            description="Sets Picture timestamp syntax, Qwen Video sampling, and Video motion-guidance memory use for the Advanced MiniMax H3 nodes.",
+            description="Sets Qwen Video sampling and Video motion-guidance memory use for the Advanced MiniMax H3 nodes.",
             inputs=[
-                io.AnyType.Input("timestamps", optional=True, tooltip="Optional sequential timestamps for existing Picture slots. Leave disconnected to keep the default Core Picture presentation."),
-                io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="0.0s", tooltip="Formatting used when the Picture structure contains <<time>>."),
-                io.String.Input("structure", multiline=True, dynamic_prompts=False, default=MINIMAX_H3_MEDIA_STRUCTURE, tooltip="Picture constructor using required <<picture>> and <<visual>> tags. Default matches Core: <<picture>>: <<visual>>. Timestamped example: At <<time>>, <<picture>>: <<visual>> (from <<shot>>) is fully anchored."),
                 io.Int.Input(
                     "video_reference_resolution",
                     display_name="Video reference resolution",
@@ -3896,6 +3935,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         audio_vae=None,
         enable_caching="all",
         fusion_method=None,
+        **kwargs,
     ) -> io.NodeOutput:
         fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
         if fusion_method not in ("conds_fusion", "token_fusion"):
@@ -3979,6 +4019,7 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         audio_vae=None,
         enable_caching="all",
         fusion_method=None,
+        **kwargs,
     ) -> io.NodeOutput:
         fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
         if fusion_method not in ("conds_fusion", "token_fusion"):
@@ -4273,6 +4314,7 @@ class UC_AdvMiniMaxH3ImageToVideoTemporalFusion(UC_AdvancedMiniMaxH3ImageToVideo
         video=None, audio=None, audio_vae=None, text_blend_config=None,
         enable_caching="all",
         fusion_method=None,
+        **kwargs,
     ):
         fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
         if fusion_method not in ("conds_fusion", "token_fusion"):
@@ -4305,5 +4347,92 @@ class UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion(UC_AdvMiniMaxH3ImageToVideo
                 value.tooltip = 'Preserves joint Qwen encoding and caches the complete post-Qwen result. Prompt or media changes invalidate it. Pre-Qwen tokens and DeepStack are never saved. VAE caching follows the selected media mode.'
         schema.description = "Deprecated: use Adv MiniMax H3 Image to Video (Temporal Fusion) with fusion_method set to token_fusion. Existing workflows retain temporal token_fusion by default."
         return schema
+
+
+class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        reference_template = io.Autogrow.TemplateNames(
+            io.Image.Input(
+                "reference_image",
+                tooltip="Ordered native H3 image reference and separately numbered Qwen picture.",
+            ),
+            names=[f"reference_image_{index}" for index in range(1, 33)],
+            min=0,
+        )
+        return io.Schema(
+            node_id="UC_AdvancedMiniMaxH3RefMediaImageToVideo",
+            display_name="Advanced MiniMax H3 Reference Media to Video",
+            category="advanced/conditioning",
+            description="Encodes MiniMax H3 prompt conditioning, multi-video and audio references from a Reference Media container.",
+            inputs=[
+                io.Clip.Input("clip", tooltip="MiniMax H3 Qwen3-VL 32B text encoder (qwen3vl_32b)."),
+                io.Vae.Input("vae", optional=True, tooltip="Encodes reference videos and reference images."),
+                io.String.Input("prompt", multiline=True, dynamic_prompts=True, tooltip="MiniMax H3 prompt."),
+                io.Int.Input("width", default=1344, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("height", default=768, min=32, max=nodes.MAX_RESOLUTION, step=32),
+                io.Int.Input("length", default=124, min=5, max=3600, step=17, tooltip="Frame count at 24 fps."),
+                MiniMaxH3ReferenceMedia.Input("reference_media", optional=True, tooltip="Connect MiniMax H3 Reference Media containing reference videos and audios."),
+                io.Vae.Input("audio_vae", optional=True, lazy=True, tooltip="Audio VAE for encoding reference audio tracks."),
+                io.Float.Input("multiplier", default=1.0, min=-1000.0, max=1000.0, step=0.1),
+                io.Combo.Input("ref_image_size", options=["match", "max", "none"], default="match"),
+                io.Int.Input("vlm_resolution", default=384, min=0, max=4096, step=32),
+                io.Int.Input("vlm_video_resolution", default=384, min=0, max=4096, step=32),
+                io.Combo.Input("enable_caching", options=list(H3_CACHE_MODES), default="all"),
+                MiniMaxH3MediaConfig.Input("media_config", optional=True),
+                io.Autogrow.Input("reference_images", template=reference_template, optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Latent.Output(),
+            ],
+        )
+
+    @classmethod
+    def check_lazy_status(cls, reference_media=None, audio_vae=None, **kwargs):
+        has_audio = False
+        if isinstance(reference_media, dict):
+            has_audio = bool(reference_media.get("reference_audios") or reference_media.get("reference_video_audios"))
+        return ["audio_vae"] if has_audio and audio_vae is None else []
+
+    @classmethod
+    def execute(
+        cls,
+        clip,
+        vae=None,
+        prompt="",
+        width=1344,
+        height=768,
+        length=124,
+        reference_media=None,
+        audio_vae=None,
+        multiplier=1.0,
+        ref_image_size="match",
+        vlm_resolution=384,
+        vlm_video_resolution=384,
+        enable_caching="all",
+        media_config=None,
+        reference_images=None,
+        **kwargs,
+    ) -> io.NodeOutput:
+        conditioning, latent = execute_advanced_minimax_h3_reference_media_image_to_video(
+            clip=clip,
+            vae=vae,
+            prompt=prompt,
+            width=width,
+            height=height,
+            length=length,
+            reference_media=reference_media,
+            audio_vae=audio_vae,
+            multiplier=multiplier,
+            ref_image_size=ref_image_size,
+            vlm_resolution=vlm_resolution,
+            vlm_video_resolution=vlm_video_resolution,
+            enable_caching=enable_caching,
+            media_config=media_config,
+            reference_images=reference_images,
+            **kwargs,
+        )
+        return io.NodeOutput(conditioning, latent)
 
 

@@ -738,12 +738,12 @@ def minimax_h3_qwen_video_samples(
     if merge_mode == "temporal fusion" and continuation_frames is not None and video_frames is not None:
         return prepare_minimax_h3_continuation_fusion_video(continuation_frames, video_frames, video_fps)[:2]
     if continuation_frames is not None:
-        interior_frames = continuation_frames[1:]
-        if interior_frames.shape[0]:
-            samples.append(interior_frames)
+        indices = minimax_h3_video_sample_indices(continuation_frames.shape[0], video_fps)
+        if indices:
+            samples.append(continuation_frames[indices])
             timestamps.extend(
                 Fraction(index, 24)
-                for index in range(1, continuation_frames.shape[0])
+                for index in indices
             )
         offset = Fraction(continuation_frames.shape[0], 24)
     if video_frames is not None:

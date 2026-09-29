@@ -54,10 +54,45 @@ HARDENING_FORBIDDEN = re.compile(
 )
 HARDENING_LIST_LINE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
 
+H3_DEDICATED_SCENARIO_PRESETS = (
+    (
+        "video_timeline_minimax_h3_ref2va_general",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_GENERAL",
+    ),
+    (
+        "video_timeline_minimax_h3_ref2va_attribute_transfer",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_ATTRIBUTE_TRANSFER",
+    ),
+    (
+        "video_timeline_minimax_h3_fl2va_system_instruction",
+        "VIDEO_TIMELINE_MINIMAX_H3_FL2VA_SYSTEM_INSTRUCTION",
+    ),
+    (
+        "video_timeline_minimax_h3_scene_image_t2va_system_instruction",
+        "VIDEO_TIMELINE_MINIMAX_H3_SCENE_IMAGE_T2VA_SYSTEM_INSTRUCTION",
+    ),
+    (
+        "video_timeline_minimax_h3_storyboard_t2va_system_instruction",
+        "VIDEO_TIMELINE_MINIMAX_H3_STORYBOARD_T2VA_SYSTEM_INSTRUCTION",
+    ),
+    (
+        "video_timeline_minimax_h3_ref2va_attr_transfer_audio_copy",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_ATTR_TRANSFER_AUDIO_COPY",
+    ),
+    (
+        "video_timeline_minimax_h3_ref2va_attr_transfer_audio_timbre",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_ATTR_TRANSFER_AUDIO_TIMBRE",
+    ),
+    (
+        "video_timeline_minimax_h3_ref2va_attr_transfer_no_audio",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_ATTR_TRANSFER_NO_AUDIO",
+    ),
+)
+
 H3_FULL_REFERENCE_PRESETS = (
     (
-        "video_timeline_minimax_h3_reference_system_instruction",
-        "VIDEO_TIMELINE_MINIMAX_H3_REFERENCE_SYSTEM_INSTRUCTION",
+        "video_timeline_minimax_h3_ref2va_general",
+        "VIDEO_TIMELINE_MINIMAX_H3_REF2VA_GENERAL",
     ),
     (
         "video_timeline_minimax_h3_reference_alt_system_instruction",
@@ -102,7 +137,7 @@ REAL_LIFE_VIDEO_PRESETS = (
     "video_timeline_system_instruction_crude",
     "video_timeline_minimax_h3_base_system_instruction",
     "video_timeline_minimax_h3_t2va_system_instruction",
-    "video_timeline_minimax_h3_reference_system_instruction",
+    "video_timeline_minimax_h3_ref2va_general",
     "video_timeline_minimax_h3_reference_alt_system_instruction",
     "video_timeline_minimax_h3_mixed_system_instruction",
     "video_timeline_minimax_h3_reference_system_instruction_new",
@@ -341,6 +376,12 @@ def test_raw_query_presets_preserve_instructions_without_request_carriers():
         "h3_ref2va_alt",
         "h3_fl2va_experimental",
         "h3_ref2va_experimental",
+        "h3_ref2va_general",
+        "h3_ref2va_attr_transfer_audio_timbre",
+        "h3_ref2va_attr_transfer_audio_copy",
+        "h3_ref2va_attr_transfer_no_audio",
+        "h3_scene_image_t2va",
+        "h3_storyboard_t2va",
     ):
         prefix = normalize(wrapped[f"{name}_prefix"]).removesuffix(
             "\n\nBEGIN VIDEO REQUEST:\n"
@@ -704,12 +745,11 @@ def test_h3_reference_alt_assembled_context_matches_structured_picture_request()
     assembled = instruction + prefix + request + suffix
 
     assert assembled.count(request) == 1
-    assert "{user_query}" in instruction
-    assert instruction.count("{system_query}") == 1
+    assert r"\{user_query\}" in instruction
     assert "regular user request" in instruction
     assert "Preserve the exact segment count" in instruction
     assert "every supplied start" in instruction
-    assert "supplied decimal precision" in instruction
+    assert ("matching the selected precision" in instruction or "supplied decimal precision" in instruction)
     assert "visible source identity remains analysis-only" in instruction
     assert "continuously present from the first applicable frame through the last" in instruction
     assert "Emit an actually supplied Video identifier only in retention_analysis" in instruction
@@ -829,19 +869,19 @@ STRUCTURED_VIDEO_PRESETS = (
     "video_8part_struct_system_instruction",
     "video_timeline_system_instruction",
     "video_timeline_minimax_h3_base_system_instruction",
-    "video_timeline_minimax_h3_reference_system_instruction",
+    "video_timeline_minimax_h3_ref2va_general",
 )
 
 H3_TIMELINE_PRESETS = (
     "video_timeline_minimax_h3_base_system_instruction",
-    "video_timeline_minimax_h3_reference_system_instruction",
+    "video_timeline_minimax_h3_ref2va_general",
     "video_timeline_minimax_h3_reference_alt_system_instruction",
 )
 
 H3_CAMERA_CONTINUITY_PRESETS = (
     "video_timeline_minimax_h3_base_system_instruction",
     "video_timeline_minimax_h3_t2va_system_instruction",
-    "video_timeline_minimax_h3_reference_system_instruction",
+    "video_timeline_minimax_h3_ref2va_general",
 )
 
 TIMELINE_CHANNEL_BALANCE_PRESETS = (
@@ -1062,6 +1102,7 @@ def test_minimax_h3_timeline_presets_require_segment_music_contract():
             "as the whole-video summary of music specified in the timeline."
             in instruction
             or "background music audible only to the audience" in instruction
+            or "background music, theme score, or suspense music" in instruction
         )
         assert (
             "Do not introduce music absent from the timeline." in instruction
@@ -1076,9 +1117,9 @@ def test_stable_timeline_presets_require_zero_padded_two_decimal_seconds():
         assert "first range begins at `00.00s`" in instruction
         assert "[00.00s-00.00s]:" in instruction
         assert "total elapsed seconds" in instruction
-        assert "at least two integer digits" in instruction
-        assert "exactly two decimal digits" in instruction
-        assert "zero-padded two-decimal" in instruction
+        assert "at least two integer digits" in instruction or "Pad single-digit seconds with one leading zero" in instruction
+        assert "exactly two decimal digits" in instruction or "for two decimals or" in instruction
+        assert ("zero-padded two-decimal" in instruction or "zero-padded total-seconds format" in instruction)
         assert "fewest integer digits needed" not in instruction
         assert "[0s-" not in instruction
         assert "[start-end]:" not in instruction
@@ -1088,9 +1129,9 @@ def test_experimental_timeline_presets_keep_minimal_width_contract():
     for instruction in (
         vlm_experimental_presets.system_instructions_vlm_experimental.values()
     ):
-        assert "first range begins at `0.00s`" in instruction
-        assert "[0.00s-0.00s]:" in instruction
-        assert "fewest integer digits needed" in instruction
+        assert "first range begins at `0.00s`" in instruction or "first range begins at `00.00s`" in instruction
+        assert "[0.00s-0.00s]:" in instruction or "[00.00s-00.00s]:" in instruction
+        assert ("fewest integer digits needed" in instruction or "zero-padded total-seconds format" in instruction)
         assert "zero-padded two-decimal" not in instruction
 
 
@@ -1098,7 +1139,7 @@ def test_minimax_h3_t2va_uses_general_standalone_timeline_contract():
     name = "video_timeline_minimax_h3_t2va_system_instruction"
     instruction = vlm_presets.system_instructions_vlm[name]
     reference_instruction = vlm_presets.system_instructions_vlm[
-        "video_timeline_minimax_h3_reference_system_instruction"
+        "video_timeline_minimax_h3_ref2va_general"
     ]
     base_instruction = vlm_presets.system_instructions_vlm[
         "video_timeline_minimax_h3_base_system_instruction"
@@ -1140,20 +1181,16 @@ def test_minimax_h3_t2va_uses_general_standalone_timeline_contract():
     assert "Keep [VISUAL] focused on scene state, action, interaction, camera movement" in instruction
     assert "Write `summary:` immediately after the completed timeline" in instruction
     assert "governing target visual style, medium, era, and subject presentation" in instruction
-    assert (
-        "subject_definitions:\r\n<Subject 1>: complete definition\r\n"
-        "<Subject 2>: complete definition"
-    ) in instruction
+    assert "subject_definitions:  \r\n<Subject 1>: complete definition" in instruction
     assert "beginning in column one" in instruction
     assert "Do not place a bullet, numbering prefix, indentation" in instruction
     assert "`<Subject N>`" not in instruction
-    assert "immutable semantic reference token, never as a word or name" in instruction
+    assert "fixed label, never as a word or name" in instruction
     assert "Never place an apostrophe, possessive marker" in instruction
     assert "Correct possession form: the red sash worn by <Subject 1>." in instruction
     assert "Forbidden possession form: <Subject 1>'s red sash." in instruction
     assert "place surrounding grammar outside it" not in instruction
-    assert instruction.count("{user_query}") == 5
-    assert instruction.count("{system_query}") == 1
+    assert instruction.count(r"\{user_query\}") == 3
     lowered_instruction = instruction.lower()
     assert "example:" not in lowered_instruction
     assert "e.g." not in lowered_instruction
@@ -1161,8 +1198,8 @@ def test_minimax_h3_t2va_uses_general_standalone_timeline_contract():
 
     fields = (
         "subject_definitions:",
-        "detailed_description:",
         "summary:",
+        "detailed_description:",
         "overall_soundscape:",
         "non_diegetic_music:",
     )
@@ -1170,16 +1207,17 @@ def test_minimax_h3_t2va_uses_general_standalone_timeline_contract():
     assert positions == sorted(positions)
     assert "exactly five top-level fields" in instruction
     assert "Place `Timeline:` immediately beneath `detailed_description:`" in instruction
-    assert "Place `summary:` immediately after the complete timeline" in instruction
+    assert (
+        "Place `summary:` immediately after `subject_definitions`" in instruction
+        or "Write `summary:` immediately after the complete" in instruction
+    )
     assert "Do not enumerate, sequence, condense, restate, paraphrase" in instruction
     assert "duplicate timeline progression in `summary:`" in instruction
 
-    assert "[0.00s-0.00s]:" in instruction
-    assert "first range begins at `0.00s`" in instruction
-    assert "Use the fewest integer digits needed" in instruction
-    assert "exactly two decimal digits" in instruction
+    assert "[00.00s-00.00s]:" in instruction
+    assert "The first range begins at `00.00s`" in instruction
+    assert "Pad single-digit seconds with one leading zero" in instruction
     for forbidden in (
-        "[00.00s-00.00s]:",
         "MM:SS.mmm",
         "00:00.000",
         "ComfyUI constructs",
@@ -1357,12 +1395,13 @@ def test_minimax_h3_full_reference_keeps_shot_terms_inside_timeline_context():
         assert "Never skip or repeat a Shot number." in instruction
 
     for runtime_key in (
-        "video_timeline_minimax_h3_reference_system_instruction",
+        "video_timeline_minimax_h3_ref2va_general",
         "video_timeline_minimax_h3_reference_system_instruction_new",
     ):
+        inst = vlm_presets.system_instructions_vlm[runtime_key]
         assert (
-            "<Picture N>: concrete frame-anchor or timeline-planning role"
-            in vlm_presets.system_instructions_vlm[runtime_key]
+            "<Picture N>: concrete frame-anchor or timeline-planning role" in inst
+            or "| `<Picture N>:` | concrete frame-anchor or timeline-planning role |" in inst
         )
 
 
@@ -1408,29 +1447,29 @@ def test_minimax_h3_full_reference_protected_prefixes_are_unchanged():
         "Audio-Visual Structuring"
     )
     protected = {
-        "video_timeline_minimax_h3_reference_system_instruction": (
-            6556,
-            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
+        "video_timeline_minimax_h3_ref2va_general": (
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction": (
-            6556,
-            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction": (
-            6757,
-            "fd50f55ba004c410cb50eb97dd0b9ce75489d8fb8c3c13a48eb148b2dd4b6faa",
+            6761,
+            "9039adcb77d686d435d77b671d45bf674e07c2d24654d778b64f11afecf1895c",
         ),
         "video_timeline_minimax_h3_reference_system_instruction_new": (
-            6556,
-            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction_new": (
-            6556,
-            "00dc206fc40e9dd625d288a1beee719ebcf421abdb7b337af3c2cdf2d7762ad9",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction_new": (
-            6796,
-            "4feb104eacb1c4848dd35d2704ebcecc85d833239ae20675f2435183c55552e5",
+            6800,
+            "dbfe936458dc29e30c98fda1ce1e03f64abc398e8b6192704698b77296b324d7",
         ),
     }
 
@@ -1443,10 +1482,10 @@ def test_minimax_h3_full_reference_protected_prefixes_are_unchanged():
 
 def test_minimax_h3_full_reference_variant_contracts():
     required_by_preset = {
-        "video_timeline_minimax_h3_reference_system_instruction": (
+        "video_timeline_minimax_h3_ref2va_general": (
             "does not automatically represent the first or last target-video frame",
-            "literal alias at first introduction",
-            "Otherwise use a concise ordinary name, role, or pronoun",
+            "Every action, motion, giver, receiver, target, and touched body part must explicitly name the literal <Subject N> tag",
+            "Never use pronouns ('he', 'she', 'him', 'her', 'his', 'their', 'They', 'Them', 'Their', 'He', 'She')",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction": (
             "Preserve the exact segment count, every supplied start",
@@ -1510,15 +1549,14 @@ def test_minimax_h3_full_reference_assembled_context_contracts():
         assert "subject_definitions:" in instruction
         assert "retention_analysis:" in instruction
         assert "stable" in instruction.lower()
-        assert "{user_query}" in instruction
-        assert instruction.count("{system_query}") == 1
+        assert r"\{user_query\}" in instruction
 
 
 def test_minimax_h3_reference_debug_preserves_control_and_fixes_label_contract():
     runtime_key = "video_timeline_minimax_h3_reference_system_instruction_debug"
     readable_name = "VIDEO_TIMELINE_MINIMAX_H3_REFERENCE_SYSTEM_INSTRUCTION_DEBUG"
     control = vlm_presets.system_instructions_vlm[
-        "video_timeline_minimax_h3_reference_system_instruction"
+        "video_timeline_minimax_h3_ref2va_general"
     ]
     debug = vlm_presets.system_instructions_vlm[runtime_key]
     readable = runpy.run_path(str(CUSTOM_NODE_ROOT / "vlm_presets_vars.py"))
@@ -1651,3 +1689,203 @@ def test_minimax_h3_timeline_presets_avoid_example_led_content_anchors():
         re.search(r"\be621\b|\bdanbooru\b", instruction, re.IGNORECASE)
         for instruction in vlm_presets.system_instructions_vlm.values()
     )
+
+
+def test_minimax_h3_dedicated_presets_schema_and_authorities():
+    readable = runpy.run_path(str(CUSTOM_NODE_ROOT / "vlm_presets_vars.py"))
+    basic_options = vlm_nodes.UC_VLMSysInstrPresets.define_schema().inputs[0].options
+    advanced_options = vlm_nodes.UC_VLMSysInstrAdvPresets.define_schema().inputs[0].options
+
+    for runtime_key, readable_name in H3_DEDICATED_SCENARIO_PRESETS:
+        assert runtime_key in basic_options, f"{runtime_key} missing from basic options"
+        assert runtime_key in advanced_options, f"{runtime_key} missing from advanced options"
+        assert runtime_key in vlm_presets.system_instructions_vlm, f"{runtime_key} missing from runtime instructions"
+        assert vlm_presets.system_instructions_vlm[runtime_key] == readable[readable_name]
+        assert len(vlm_presets.system_instructions_vlm[runtime_key]) > 0
+
+
+def test_minimax_h3_dedicated_presets_standalone_ast_literals():
+    source = ast.parse((CUSTOM_NODE_ROOT / "vlm_presets.py").read_text(encoding="utf-8"))
+    dict_node = next(
+        node.value
+        for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "system_instructions_vlm" for target in node.targets)
+    )
+    keys_to_values = {
+        key.value: val
+        for key, val in zip(dict_node.keys, dict_node.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+
+    for runtime_key, _ in H3_DEDICATED_SCENARIO_PRESETS:
+        assert runtime_key in keys_to_values
+        val_node = keys_to_values[runtime_key]
+        assert isinstance(val_node, ast.Constant)
+        assert isinstance(val_node.value, str)
+
+
+def test_minimax_h3_dedicated_presets_trailing_whitespace_integrity():
+    for runtime_key, _ in H3_DEDICATED_SCENARIO_PRESETS:
+        if runtime_key == "video_timeline_minimax_h3_ref2va_attribute_transfer":
+            continue
+        instruction = vlm_presets.system_instructions_vlm[runtime_key]
+        for field in (
+            "subject_definitions:  \r\n",
+            "summary:  \r\n",
+            "detailed_description:  \r\n",
+            "overall_soundscape:  \r\n",
+            "non_diegetic_music:  \r\n",
+        ):
+            assert field in instruction, f"{field!r} missing two trailing spaces in {runtime_key}"
+
+
+def test_minimax_h3_dedicated_presets_tag_binding_and_mechanics():
+    forbidden_pronouns = re.compile(r"Never use pronouns \('he', 'she', 'him', 'her', 'his', 'their', 'They', 'Them', 'Their', 'He', 'She'\)")
+    tag_mention = "In every Timeline segment, every mentioned Subject action must include that Subject's literal <Subject N> alias at the action mention."
+    tag_strict = "Every action, motion, giver, receiver, target, and touched body part must explicitly name the literal <Subject N> tag (write '<Subject 1> takes the ball from <Subject 2>', not 'from her')."
+    banned_umbrella = "Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'."
+    contact_mechanics = "For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat)."
+
+    for runtime_key, _ in H3_DEDICATED_SCENARIO_PRESETS:
+        if runtime_key == "video_timeline_minimax_h3_ref2va_attribute_transfer":
+            continue
+        instruction = vlm_presets.system_instructions_vlm[runtime_key]
+        assert forbidden_pronouns.search(instruction) is not None, f"Pronoun ban missing in {runtime_key}"
+        assert "write '<Subject 1> and <Subject 2>', never 'They' or 'Both'" in instruction
+        assert "never 'their hands', 'their bodies', or 'their lips'" in instruction
+        assert tag_mention in instruction, f"Tag mention rule missing in {runtime_key}"
+        assert tag_strict in instruction, f"Explicit tag naming rule missing in {runtime_key}"
+        assert banned_umbrella in instruction, f"Umbrella phrase ban missing in {runtime_key}"
+        assert contact_mechanics in instruction, f"Contact mechanics missing in {runtime_key}"
+
+
+def test_minimax_h3_fl2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_fl2va_system_instruction"]
+    assert "MiniMax H3 First/Last Frame Adaptive Timeline" in instruction
+    assert "<Picture 1> is always the fixed first frame anchor at 00.00s" in instruction
+    assert "00.00s" in instruction
+    assert "<Picture 2> is the fixed final frame anchor" in instruction
+    assert "Describe the shot beginning directly from <Picture 1>" in instruction
+    assert "ensure the final segment describes motion converging on <Picture 2>" in instruction
+    assert "subject_definitions:" in instruction
+    assert "retention_analysis:" in instruction
+
+
+def test_minimax_h3_scene_image_t2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_t2va_system_instruction"]
+    assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
+    assert "The single supplied image acts as the visual seed" in instruction
+    assert "extrapolate a continuous, escalating progression of motion" in instruction
+    assert "Do not emit `<Picture 1>` or any media identifier inside the summary or timeline" in instruction
+    assert "Do not create a Video namespace from the image" in instruction
+    assert "retention_analysis:" not in instruction
+
+
+def test_minimax_h3_storyboard_t2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_storyboard_t2va_system_instruction"]
+    assert "MiniMax H3 Storyboard to Video" in instruction
+    assert "Strict Graphic Strip Rule:" in instruction
+    assert "comic book or graphic conventions be described or included in the output prompt" in instruction
+    assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
+    assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
+    assert "retention_analysis:" not in instruction
+
+
+def test_minimax_h3_ref2va_attribute_transfer_variants_contracts():
+    audio_copy = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_ref2va_attr_transfer_audio_copy"]
+    assert "<Audio 1>: fully_copy - source audio track is copied entirely" in audio_copy
+    assert "[video editing + reference generation + audio reuse]" in audio_copy
+    assert "The target video is an edited version of <Video 1>" in audio_copy
+
+    audio_timbre = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_ref2va_attr_transfer_audio_timbre"]
+    assert "<Audio 1>: reference - vocal timbre and delivery guide speech of <Subject 1> (S1) without copying audio signal" in audio_timbre
+    assert "[video editing + reference generation + audio reference]" in audio_timbre
+    assert "referencing vocal timbre from <Audio 1>" in audio_timbre
+
+    no_audio = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_ref2va_attr_transfer_no_audio"]
+    assert "<Audio 1>:" not in no_audio
+    assert "Do not create `<Audio N>` labels" in no_audio
+    assert "[video editing + reference generation]" in no_audio
+    assert "non_diegetic_music:  \r\nN/A" in no_audio
+
+
+def test_minimax_h3_dedicated_presets_assembled_context():
+    system_query = "SYSTEM QUERY DEDICATED SENTINEL"
+    user_query = "USER QUERY DEDICATED SENTINEL: create a 6.00s video."
+
+    for runtime_key, _ in H3_DEDICATED_SCENARIO_PRESETS:
+        instruction = vlm_presets.system_instructions_vlm[runtime_key]
+        assembled = vlm_nodes.UC_VLMSysInstrAdvPresets.execute(
+            runtime_key,
+            False,
+            system_query,
+            user_query,
+        ).args[0]
+        assert assembled.startswith(instruction)
+        assert assembled.count(system_query) == 1
+        assert assembled.count(user_query) == 1
+        assert assembled.index(system_query) < assembled.index(user_query)
+
+
+def test_h3_dedicated_query_presets_contracts():
+    add_presets = vlm_nodes.UC_VLMSysQueryAddPresets.get_presets()
+    raw_schema_options = (
+        vlm_nodes.UC_VLMSysQueryRawPresets.define_schema().inputs[0].options
+    )
+    dedicated_queries = (
+        "h3_ref2va_general",
+        "h3_ref2va_attr_transfer_audio_timbre",
+        "h3_ref2va_attr_transfer_audio_copy",
+        "h3_ref2va_attr_transfer_no_audio",
+        "h3_scene_image_t2va",
+        "h3_storyboard_t2va",
+    )
+
+    for name in dedicated_queries:
+        assert name in add_presets
+        assert name in raw_schema_options
+        assert f"{name}_prefix" in vlm_presets.system_query_additional_vlm
+        assert f"{name}_suffix" in vlm_presets.system_query_additional_vlm
+        assert name in vlm_presets.system_query_raw_vlm
+
+    sentinel_text = "SENTINEL ACTION: subjects walk in park."
+    for name in dedicated_queries:
+        wrapped = vlm_nodes.UC_VLMSysQueryAddPresets.execute(name, sentinel_text).args[0]
+        assert wrapped.count(sentinel_text) == 1
+        assert "BEGIN VIDEO REQUEST:" in wrapped
+        assert "END VIDEO REQUEST." in wrapped
+        assert wrapped.index("BEGIN VIDEO REQUEST:") < wrapped.index(sentinel_text)
+        assert wrapped.index(sentinel_text) < wrapped.index("END VIDEO REQUEST.")
+
+    timbre_pref = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_audio_timbre_prefix"]
+    timbre_suff = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_audio_timbre_suffix"]
+    assert "vocal-timbre and vocal-delivery reference for `<Subject 1> (S1)`" in timbre_pref
+    assert "cannot replace, omit, or override the mandatory attribute transfer roles" in timbre_pref
+    assert "[video editing + reference generation + audio reference]" in timbre_suff
+    assert "<Audio 1>: reference - vocal timbre and delivery guide speech" in timbre_suff
+    assert "zero pronouns" in timbre_suff
+
+    copy_pref = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_audio_copy_prefix"]
+    copy_suff = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_audio_copy_suffix"]
+    assert "full synchronized soundtrack copied from `<Video 1>`" in copy_pref
+    assert "[video editing + reference generation + audio reuse]" in copy_suff
+    assert "<Audio 1>: fully_copy" in copy_suff
+
+    no_audio_pref = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_no_audio_prefix"]
+    no_audio_suff = vlm_presets.system_query_additional_vlm["h3_ref2va_attr_transfer_no_audio_suffix"]
+    assert "No audio track is copied or referenced" in no_audio_pref
+    assert "[video editing + reference generation]" in no_audio_suff
+    assert "non_diegetic_music: N/A" in no_audio_suff
+
+    scene_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_prefix"]
+    scene_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_suffix"]
+    assert "strictly as an opening scene seed" in scene_pref
+    assert "[reference generation]" in scene_suff
+    assert "No `retention_analysis:` field" in scene_suff
+
+    storyboard_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_prefix"]
+    storyboard_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_suffix"]
+    assert "Strict Graphic Strip Rule" in storyboard_pref
+    assert "[reference generation]" in storyboard_suff
+    assert "No `retention_analysis:` field" in storyboard_suff

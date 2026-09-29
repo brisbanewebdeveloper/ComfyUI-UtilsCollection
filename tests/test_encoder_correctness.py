@@ -27,6 +27,8 @@ try:
         TextEncodeKrea2SystemEditScaledAdv,
         TextEncodeKrea2SysEditScaledAdvAttn,
         UC_AdvancedMiniMaxH3ImageToVideo,
+        UC_AdvancedMiniMaxH3RefMediaImageToVideo,
+        UC_MiniMaxH3ReferenceMedia,
         UC_MiniMaxH3MediaConfig,
         UC_AdvancedVisualConditioningEncode,
         UC_AttentionBiasTextEncode,
@@ -664,15 +666,44 @@ def test_visual_fusion_images_schema_and_passthrough():
     assert output.result == (test_dict,)
 
 
+def test_minimax_h3_reference_media_schema_and_execution():
+    schema = UC_MiniMaxH3ReferenceMedia.define_schema()
+    assert schema.node_id == "UC_MiniMaxH3ReferenceMedia"
+    assert [output.io_type for output in schema.outputs] == ["MINIMAX_H3_REFERENCE_MEDIA"]
+    inputs = {value.id: value for value in schema.inputs}
+    assert "reference_videos" in inputs
+    assert "reference_video_audios" in inputs
+    assert "reference_audios" in inputs
+
+    out = UC_MiniMaxH3ReferenceMedia.execute(
+        reference_videos={"reference_video_1": "vid1"},
+        reference_video_audios={"reference_video_audio_1": "aud1"},
+        reference_audios={"reference_audio_1": "aud2"},
+    )
+    data = out.args[0]
+    assert data["reference_videos"] == {"reference_video_1": "vid1"}
+    assert data["reference_video_audios"] == {"reference_video_audio_1": "aud1"}
+    assert data["reference_audios"] == {"reference_audio_1": "aud2"}
+
+
+def test_advanced_minimax_h3_ref_media_node_schema():
+    schema = UC_AdvancedMiniMaxH3RefMediaImageToVideo.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert schema.node_id == "UC_AdvancedMiniMaxH3RefMediaImageToVideo"
+    assert "reference_media" in inputs
+    assert inputs["reference_media"].io_type == "MINIMAX_H3_REFERENCE_MEDIA"
+    assert "audio_vae" in inputs
+    assert "video" not in inputs
+    assert "audio" not in inputs
+
+
 def test_minimax_h3_media_config_schema_and_payload():
     schema = UC_MiniMaxH3MediaConfig.define_schema()
     inputs = {value.id: value for value in schema.inputs}
     assert schema.is_input_list is True
-    assert inputs["timestamps"].optional is True
-    assert inputs["timestamp_format"].default == "0.0s"
-    assert inputs["structure"].default == encoder_helpers.MINIMAX_H3_MEDIA_STRUCTURE
-    assert inputs["structure"].default == "<<picture>>: <<visual>>"
-    assert "At <<time>>, <<picture>>: <<visual>> (from <<shot>>)" in inputs["structure"].tooltip
+    assert "timestamps" not in inputs
+    assert "timestamp_format" not in inputs
+    assert "structure" not in inputs
     assert inputs["video_fps"].default == 2
     assert inputs["video_fps"].min == 1
     assert inputs["video_fps"].max == 24
@@ -1436,9 +1467,9 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
         if call["minimax_ref_items"] and call["minimax_ref_items"][0]["type"] == "video"
     )
     assert [float(frame.mean()) for frame in video_item["data"]] == pytest.approx(
-        [index / 21 for index in [*range(1, 22), 21]]
+        [0 / 21, 12 / 21]
     )
-    assert video_item["timestamps"] == [Fraction(index, 24) for index in [*range(1, 22), 21]]
+    assert video_item["timestamps"] == [Fraction(0, 24), Fraction(12, 24)]
     tokens = clip.encoded_tokens[-1]["qwen3vl_32b"][0]
     text = "".join(entry[0] for entry in tokens if isinstance(entry[0], str))
     assert text.index("<Picture 1>") < text.index("<Picture 2>") < text.index("<Video 1>")
@@ -1662,22 +1693,28 @@ def test_clip_continuation_qwen_video_keeps_interior_tail_before_ordinary_video(
     frames, timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2
     )
-    assert frames.shape == (23, 64, 96, 3)
-    torch.testing.assert_close(frames[:21], continuation[1:])
-    torch.testing.assert_close(frames[21:], torch.ones(2, 64, 96, 3))
+    assert frames.shape == (4, 64, 96, 3)
+    torch.testing.assert_close(frames[:2], continuation[[0, 12]])
+    torch.testing.assert_close(frames[2:], torch.ones(2, 64, 96, 3))
 
     prepended, prepended_timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
         continuation, video, 2, "prepend"
     )
-    assert prepended.shape == (25, 64, 96, 3)
+    assert prepended.shape == (6, 64, 96, 3)
     assert prepended_timestamps == [
-        *[Fraction(index, 24) for index in range(1, 22)],
+        Fraction(0, 24), Fraction(12, 24),
         Fraction(22, 24), Fraction(34, 24), Fraction(46, 24), Fraction(58, 24),
     ]
     assert timestamps == [
-        *[Fraction(index, 24) for index in range(1, 22)],
+        Fraction(0, 24), Fraction(12, 24),
         Fraction(22, 24), Fraction(34, 24),
     ]
+
+    solo_frames, solo_timestamps = encoder_helpers.minimax_h3_qwen_video_samples(
+        continuation, None, 2
+    )
+    assert solo_frames.shape == (2, 64, 96, 3)
+    assert solo_timestamps == [Fraction(0, 24), Fraction(12, 24)]
 
 
 def test_clip_continuation_encoder_keeps_autogrow_inputs_last():

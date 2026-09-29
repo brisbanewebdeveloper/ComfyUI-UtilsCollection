@@ -2,6 +2,8 @@ import { app } from "../../scripts/app.js";
 
 const NODE_IDS = new Set([
   "UC_AdvancedMiniMaxH3ImageToVideo",
+  "UC_AdvancedMiniMaxH3RefMediaImageToVideo",
+  "UC_MiniMaxH3ReferenceMedia",
   "UC_MiniMaxH3ClipContinuationEncoder",
   "UC_AdvMiniMaxH3ImageToVideoTokenFusion",
   "UC_AdvMiniMaxH3ImageToVideoTemporalFusion",
@@ -12,6 +14,9 @@ const NODE_IDS = new Set([
 const GROUPS = [
   ["reference_images", "reference_image_"],
   ["fusion_images", "fusion_image_"],
+  ["reference_videos", "reference_video_"],
+  ["reference_video_audios", "reference_video_audio_"],
+  ["reference_audios", "reference_audio_"],
 ];
 
 export function trimH3AutogrowInputs(node) {
