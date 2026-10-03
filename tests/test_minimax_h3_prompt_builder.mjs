@@ -126,3 +126,17 @@ test("multiline text overlay closes when outside pointerdown occurs or on blur",
   assert.ok(baseSource.includes("document.removeEventListener(\"pointerdown\", this.outsidePointer, true);"));
   assert.ok(baseSource.includes("element.addEventListener(\"blur\""));
 });
+
+test("canvas draw-loop tooltips are rendered with upward offset and no DOM elements", () => {
+  const dynamicSource = readFileSync(new URL("../web/minimax_h3_prompt.js", import.meta.url), "utf8");
+  assert.ok(dynamicSource.includes("drawCanvasTooltip("));
+  assert.ok(dynamicSource.includes("by = region.y - boxH - 8"));
+  assert.ok(dynamicSource.includes("onPointerMove(event)"));
+  assert.ok(dynamicSource.includes("clearHoveredTooltip()"));
+
+  const baseSource = readFileSync(new URL("../web/minimax_h3_base_prompt.js", import.meta.url), "utf8");
+  assert.ok(baseSource.includes("drawCanvasTooltip("));
+  assert.ok(baseSource.includes("by = region.y - boxH - 8"));
+  assert.ok(baseSource.includes("onPointerMove(event)"));
+  assert.ok(baseSource.includes("clearHoveredTooltip()"));
+});

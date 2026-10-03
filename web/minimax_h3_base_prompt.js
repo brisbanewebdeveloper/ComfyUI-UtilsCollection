@@ -27,6 +27,7 @@ class H3BaseCanvasPromptEditor {
     this.viewportY = 0;
     this.viewportHeight = 380;
     this.hitRegions = [];
+    this.hoveredRegion = null;
     this.textEditor = null;
     this.outsidePointer = null;
     this.abort = new AbortController();
@@ -53,6 +54,12 @@ class H3BaseCanvasPromptEditor {
       return found === this.widget ? undefined : found;
     };
 
+    app.canvas?.canvas?.addEventListener("pointermove", event => this.onPointerMove(event), {
+      passive: true, signal: this.abort.signal,
+    });
+    app.canvas?.canvas?.addEventListener("pointerleave", () => this.clearHoveredTooltip(), {
+      passive: true, signal: this.abort.signal,
+    });
     app.canvas?.canvas?.addEventListener("wheel", event => this.onWheel(event), {
       capture: true, passive: false, signal: this.abort.signal,
     });
@@ -163,7 +170,7 @@ class H3BaseCanvasPromptEditor {
     return curY;
   }
 
-  button(ctx, x, y, w, h, label, action, accent = false, align = "center", active = false, danger = false) {
+  button(ctx, x, y, w, h, label, action, accent = false, align = "center", active = false, danger = false, tooltip = null) {
     let fill = accent ? "#26394e" : "#202329";
     let stroke = accent ? "#709ecc" : "#59606a";
     let textColor = accent ? "#d7ebff" : "#ddd";
@@ -186,15 +193,111 @@ class H3BaseCanvasPromptEditor {
     else if (align === "right") tx = x + w - tw - 8;
 
     this.text(ctx, label, tx, y + h / 2, textColor, "11px sans-serif", w - 8);
-    this.hit(x, y, w, h, action);
+    this.hit(x, y, w, h, action, tooltip);
   }
 
-  hit(x, y, w, h, action) {
-    this.hitRegions.push({ x, y, w, h, action });
+  hit(x, y, w, h, action, tooltip = null) {
+    this.hitRegions.push({ x, y, w, h, action, tooltip });
+  }
+
+  onPointerMove(event) {
+    if (this.textEditor) {
+      this.clearHoveredTooltip();
+      return;
+    }
+    const canvas = app.canvas;
+    if (!canvas?.graph) return;
+    const bounds = canvas.canvas.getBoundingClientRect();
+    const scale = canvas.ds.scale;
+    const graphX = (event.clientX - bounds.left) / scale - canvas.ds.offset[0];
+    const graphY = (event.clientY - bounds.top) / scale - canvas.ds.offset[1];
+    const x = graphX - this.node.pos[0];
+    const y = graphY - this.node.pos[1];
+
+    if (x < 0 || x > (this.node.size[0] || 480) || y < 0 || y > (this.node.size[1] || 500)) {
+      this.clearHoveredTooltip();
+      return;
+    }
+
+    const matched = this.hitRegions.find(r => r.tooltip && this.contains(r, x, y));
+    if (matched !== this.hoveredRegion) {
+      this.hoveredRegion = matched || null;
+      canvas.setDirty(true, false);
+    }
+  }
+
+  clearHoveredTooltip() {
+    if (this.hoveredRegion) {
+      this.hoveredRegion = null;
+      app.canvas?.setDirty(true, false);
+    }
+  }
+
+  drawCanvasTooltip(ctx, region, nodeWidth, yTop, nodeHeight) {
+    if (!region?.tooltip) return;
+    const text = region.tooltip;
+    const maxWidth = Math.min(280, nodeWidth - 28);
+    const font = "11px sans-serif";
+    const lineHeight = 15;
+
+    ctx.save();
+    ctx.font = font;
+
+    const words = String(text).split(/\s+/);
+    const lines = [];
+    let currentLine = "";
+    for (let i = 0; i < words.length; i++) {
+      const testLine = currentLine ? `${currentLine} ${words[i]}` : words[i];
+      if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = words[i];
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    let maxMeasured = 0;
+    for (const l of lines) {
+      maxMeasured = Math.max(maxMeasured, ctx.measureText(l).width);
+    }
+
+    const paddingX = 8;
+    const paddingY = 6;
+    const boxW = Math.max(60, maxMeasured + paddingX * 2);
+    const boxH = lines.length * lineHeight + paddingY * 2;
+
+    let bx = region.x + region.w / 2 - boxW / 2;
+    bx = Math.max(10, Math.min(nodeWidth - boxW - 10, bx));
+
+    let by = region.y - boxH - 8;
+    if (by < yTop + 4) {
+      by = region.y + region.h + 8;
+    }
+
+    ctx.shadowColor = "rgba(0, 0, 0, 0.7)";
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 3;
+
+    this.box(ctx, bx, by, boxW, boxH, "#0f1218", "#475569", 4);
+
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = "#f1f5f9";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], bx + paddingX, by + paddingY + i * lineHeight);
+    }
+
+    ctx.restore();
   }
 
   openMultilineEditor(rect, value, apply, tagSpawner = null) {
     this.closeTextEditor();
+    this.clearHoveredTooltip();
 
     const container = document.createElement("div");
     container.dataset.testid = "h3-base-prompt-editor-container";
@@ -333,11 +436,18 @@ class H3BaseCanvasPromptEditor {
       this.change(() => {
         this.state.precision = this.state.precision === 2 ? 3 : 2;
       });
-    }, true);
+    }, true, "center", false, false, "Switches timestamps between two decimal places (00.00s) and three decimal places (00.000s) across the entire prompt.");
 
     // Tab Navigation Bar
     const tabY = y + 28;
     const tabWidth = Math.floor(available / BASE_TABS.length);
+    const tabTooltips = {
+      task: "Select your video generation mode (text-to-video or keyframe pictures) and configure frame alignment.",
+      description: "Write what happens in the video, either as chronological timed segments or as continuous shot-by-shot text.",
+      soundscape: "Describe the background ambience, environment noise, and physical action sounds heard across the entire video.",
+      music: "Describe the audience-only background music, including instruments, tempo, and rhythm.",
+    };
+
     BASE_TABS.forEach((tab, index) => {
       const active = (this.state.activeTab || "task") === tab;
       const tx = left + index * tabWidth;
@@ -351,11 +461,12 @@ class H3BaseCanvasPromptEditor {
       const label = `${BASE_TAB_LABELS[tab].split(" ")[1]}${countStr}`;
       this.button(ctx, tx, tabY, tw, 26, label, () => {
         this.closeTextEditor();
+        this.clearHoveredTooltip();
         this.change(() => {
           this.state.activeTab = tab;
           this.scroll = 0;
         });
-      }, false, "center", active);
+      }, false, "center", active, false, tabTooltips[tab]);
     });
 
     const contentTopY = tabY + 32;
@@ -408,6 +519,11 @@ class H3BaseCanvasPromptEditor {
     const promptPreview = compileBasePrompt(this.state) || "Prompt preview will appear here...";
     const previewLine = promptPreview.replace(/\n+/g, " ❚ ");
     this.text(ctx, previewLine, left + 6, previewY + 34, "#94a3b8", "11px monospace", available - 12);
+
+    // Canvas Draw-Loop Tooltip (Offset upwards on vertical axis)
+    if (this.hoveredRegion?.tooltip) {
+      this.drawCanvasTooltip(ctx, this.hoveredRegion, width, y, totalHeight);
+    }
   }
 
   drawTaskTab(ctx, left, cy, available, sy) {
@@ -416,10 +532,17 @@ class H3BaseCanvasPromptEditor {
 
     const taskW = Math.floor((available - 12) / 4);
     const curTask = this.state.task || "T2VA";
+    const taskTooltips = {
+      T2VA: "Text-to-Video: Generates a complete video purely from text description without using any starting image.",
+      I2VA: "Image-to-Video: Uses Picture 1 as the exact opening first frame (at 00.00s) and develops action forward from it.",
+      FL2VA: "First & Last Frame: Uses Picture 1 as the opening frame and Picture 2 as the ending frame, generating the motion connecting them.",
+      L2VA: "Last Frame Landing: Begins with action that gradually leads up to and settles into Picture 1 at the end of the video.",
+    };
+
     BASE_TASKS.forEach((t, i) => {
       this.button(ctx, left + i * (taskW + 4), sy(cy), taskW, 26, t, () => {
         this.change(() => { this.state.task = t; });
-      }, false, "center", curTask === t);
+      }, false, "center", curTask === t, false, taskTooltips[t]);
     });
     cy += 34;
 
@@ -448,14 +571,14 @@ class H3BaseCanvasPromptEditor {
       this.text(ctx, `Target Duration: ${Number(this.state.duration || 5.0).toFixed(2)}s`, left, sy(cy + 10), "#e2e8f0", "11px sans-serif");
       this.button(ctx, left + 140, sy(cy), 42, 20, "-1.0s", () => this.change(() => {
         this.state.duration = Math.max(1.0, (Number(this.state.duration) || 5.0) - 1.0);
-      }));
+      }), false, "center", false, false, "Shortens target video duration by 1 second.");
       this.button(ctx, left + 186, sy(cy), 42, 20, "+1.0s", () => this.change(() => {
         this.state.duration = (Number(this.state.duration) || 5.0) + 1.0;
-      }));
+      }), false, "center", false, false, "Lengthens target video duration by 1 second.");
       [5.0, 6.0, 8.0, 10.0].forEach((d, i) => {
         this.button(ctx, left + 236 + i * 38, sy(cy), 34, 20, `${d}s`, () => this.change(() => {
           this.state.duration = d;
-        }), false, "center", Math.abs((this.state.duration || 5.0) - d) < 0.05);
+        }), false, "center", Math.abs((this.state.duration || 5.0) - d) < 0.05, false, `Sets total video duration to ${d} seconds.`);
       });
       cy += 28;
 
@@ -465,15 +588,15 @@ class H3BaseCanvasPromptEditor {
       this.text(ctx, `Final Shot: Shot ${finalShotNum}`, left, sy(cy + 10), "#e2e8f0", "11px sans-serif");
       this.button(ctx, left + 140, sy(cy), 130, 20, autoShot ? "Auto (From Segments)" : "Manual", () => this.change(() => {
         this.state.autoFinalShot = !autoShot;
-      }), false, "center", autoShot);
+      }), false, "center", autoShot, false, "When Auto is on, the final keyframe automatically locks to your highest shot number. Turn off to set a custom shot number.");
 
       if (!autoShot) {
         this.button(ctx, left + 276, sy(cy), 30, 20, "-1", () => this.change(() => {
           this.state.finalShot = Math.max(1, (Number(this.state.finalShot) || 1) - 1);
-        }));
+        }), false, "center", false, false, "Decreases the landing shot number.");
         this.button(ctx, left + 310, sy(cy), 30, 20, "+1", () => this.change(() => {
           this.state.finalShot = (Number(this.state.finalShot) || 1) + 1;
-        }));
+        }), false, "center", false, false, "Increases the landing shot number.");
       }
       cy += 32;
     }
@@ -509,12 +632,12 @@ class H3BaseCanvasPromptEditor {
       this.closeTextEditor();
       if (!this.state.description) this.state.description = {};
       this.state.description.mode = "timeline";
-    }), false, "center", isTimeline);
+    }), false, "center", isTimeline, false, "Divides your video into timed chronological segments with separate visual, dialogue, and sound controls.");
     this.button(ctx, left + 236, sy(cy), 110, 22, "Continuous Text", () => this.change(() => {
       this.closeTextEditor();
       if (!this.state.description) this.state.description = {};
       this.state.description.mode = "continuous";
-    }), false, "center", !isTimeline);
+    }), false, "center", !isTimeline, false, "Allows writing freely in continuous paragraphs using shot labels like [Shot 1] and camera cuts.");
     cy += 30;
 
     // Quick tag chips bar
@@ -523,24 +646,30 @@ class H3BaseCanvasPromptEditor {
     const task = this.state.task || "T2VA";
     const tags = [];
     if (task !== "T2VA") {
-      tags.push("<Picture 1>");
-      if (task === "FL2VA") tags.push("<Picture 2>");
+      tags.push({ label: "<Picture 1>", tip: "Inserts the Picture 1 reference tag where the first keyframe applies." });
+      if (task === "FL2VA") tags.push({ label: "<Picture 2>", tip: "Inserts the Picture 2 reference tag where the ending keyframe applies." });
     }
-    tags.push("(S1)", "(S2)", "<d>[English] ...</d>", "<scenetrans>", "<cutoff>");
+    tags.push(
+      { label: "(S1)", tip: "Labels the speaker so the character's vocal identity remains consistent." },
+      { label: "(S2)", tip: "Labels the speaker so the character's vocal identity remains consistent." },
+      { label: "<d>[English] ...</d>", tip: "Inserts dialogue tags. Characters speak the exact words written inside." },
+      { label: "<scenetrans>", tip: "Marks that spoken dialogue continues seamlessly across a camera cut without pausing." },
+      { label: "<cutoff>", tip: "Marks that speech is suddenly cut off by the end of the video clip." }
+    );
 
     let chipX = left;
-    tags.forEach(tag => {
-      const tagW = Math.max(50, ctx.measureText ? ctx.measureText(tag).width + 16 : 60);
+    tags.forEach(item => {
+      const tagW = Math.max(50, ctx.measureText ? ctx.measureText(item.label).width + 16 : 60);
       if (chipX + tagW > left + available) {
         chipX = left;
         cy += 24;
       }
-      this.button(ctx, chipX, sy(cy), tagW, 20, tag, () => {
+      this.button(ctx, chipX, sy(cy), tagW, 20, item.label, () => {
         if (!isTimeline) {
           const cur = this.state.description?.continuousText || "";
-          this.change(() => { this.state.description.continuousText = cur ? `${cur} ${tag}` : tag; });
+          this.change(() => { this.state.description.continuousText = cur ? `${cur} ${item.label}` : item.label; });
         }
-      }, true);
+      }, true, "center", false, false, item.tip);
       chipX += tagW + 4;
     });
     cy += 28;
@@ -562,7 +691,7 @@ class H3BaseCanvasPromptEditor {
           editorRect,
           this.state.description?.continuousText || "",
           (val) => { this.state.description.continuousText = val; },
-          ["[Shot 1]", "[Shot 2] At 00:03.500, the camera cuts to ", ...tags]
+          ["[Shot 1]", "[Shot 2] At 00:03.500, the camera cuts to ", ...tags.map(t => t.label)]
         );
       });
       cy += boxH + 16;
@@ -575,7 +704,7 @@ class H3BaseCanvasPromptEditor {
 
     this.button(ctx, left + 140, sy(cy), 96, 22, "+ Add Segment", () => this.change(() => {
       addBaseSegment(this.state);
-    }), true);
+    }), true, "center", false, false, "Adds a new timed scene segment starting right after the previous one.");
 
     // Duration Stepper Controls
     this.text(ctx, "Dur:", left + 246, sy(cy + 10), "#94a3b8", "11px sans-serif");
@@ -583,13 +712,13 @@ class H3BaseCanvasPromptEditor {
       const nextSec = h3StepDuration(segDur, -1);
       if (!this.state.description) this.state.description = {};
       this.state.description.segmentDuration = nextSec;
-    }));
+    }), false, "center", false, false, "Shortens segment duration by 17 frames (about 0.71 seconds), matching H3 native steps.");
     this.button(ctx, left + 314, sy(cy), 36, 22, "+17f", () => this.change(() => {
       const nextSec = h3StepDuration(segDur, 1);
       if (!this.state.description) this.state.description = {};
       this.state.description.segmentDuration = nextSec;
-    }));
-    this.button(ctx, left + 354, sy(cy), 48, 22, `${segDur.toFixed(2)}s`, () => {}, true);
+    }), false, "center", false, false, "Lengthens segment duration by 17 frames (about 0.71 seconds), matching H3 native steps.");
+    this.button(ctx, left + 354, sy(cy), 48, 22, `${segDur.toFixed(2)}s`, () => {}, true, "center", false, false, "Current default segment duration.");
     cy += 30;
 
     // Segment List
@@ -614,13 +743,14 @@ class H3BaseCanvasPromptEditor {
       this.button(ctx, left + available - 130, sy(cy + 6), 70, 20, hasShot ? `[Shot ${shotNum}]` : "No Cut", () => this.change(() => {
         seg.hasShot = !hasShot;
         if (seg.hasShot && !seg.shot) seg.shot = idx + 1;
-      }), false, "center", hasShot);
+      }), false, "center", hasShot, false, "Toggles whether this segment introduces an instant camera cut or smoothly continues previous movement.");
 
       // Delete Segment
       this.button(ctx, left + available - 26, sy(cy + 6), 20, 20, "✕", () => this.change(() => {
         this.closeTextEditor();
+        this.clearHoveredTooltip();
         this.state.segments.splice(idx, 1);
-      }), false, "center", false, true);
+      }), false, "center", false, true, "Deletes this scene segment from the timeline.");
 
       // Visual line
       const visualY = cy + 30;
@@ -635,9 +765,9 @@ class H3BaseCanvasPromptEditor {
         this.openMultilineEditor(visRect, seg.visual || "", (v) => { seg.visual = v; }, [
           "[Shot 1]", "[Shot 2] At 00:03.500, the camera cuts to ",
           ...CAMERA_MOTIONS.map(m => `The camera ${m.toLowerCase()} with small amplitude at slow speed`),
-          ...tags,
+          ...tags.map(t => t.label),
         ]);
-      });
+      }, "Click to edit visual description and camera action for this segment.");
 
       // Speech Channel
       const speechY = visualY + 42;
@@ -645,7 +775,7 @@ class H3BaseCanvasPromptEditor {
       this.button(ctx, left + 8, sy(speechY), 54, 20, "Speech", () => this.change(() => {
         if (!seg.speech) seg.speech = { enabled: false, speaker: "S1", language: "English", text: "" };
         seg.speech.enabled = !speechEnabled;
-      }), false, "center", speechEnabled);
+      }), false, "center", speechEnabled, false, "Enables spoken dialogue, speaker identity, and spoken language for this segment.");
 
       if (speechEnabled) {
         this.text(ctx, `(${seg.speech?.speaker || "S1"}) <d>[${seg.speech?.language || "English"}]`, left + 68, sy(speechY + 10), "#cbd5e1", "10px monospace");
@@ -660,7 +790,7 @@ class H3BaseCanvasPromptEditor {
             if (!seg.speech) seg.speech = { enabled: true, speaker: "S1", language: "English", text: "" };
             seg.speech.text = v;
           });
-        });
+        }, "Click to edit spoken dialogue words.");
       }
 
       // Sounds Channel
@@ -669,7 +799,7 @@ class H3BaseCanvasPromptEditor {
       this.button(ctx, left + 8, sy(audioY), 54, 20, "Sounds", () => this.change(() => {
         if (!seg.sounds) seg.sounds = { enabled: false, text: "" };
         seg.sounds.enabled = !soundsEnabled;
-      }), false, "center", soundsEnabled);
+      }), false, "center", soundsEnabled, false, "Enables synchronized physical action sounds, impacts, and ambient effects for this segment.");
 
       if (soundsEnabled) {
         const sndBoxW = available - 80;
@@ -683,7 +813,7 @@ class H3BaseCanvasPromptEditor {
             if (!seg.sounds) seg.sounds = { enabled: true, text: "" };
             seg.sounds.text = v;
           });
-        });
+        }, "Click to edit synchronized physical action sounds.");
       }
 
       cy += cardH + 8;
@@ -702,16 +832,16 @@ class H3BaseCanvasPromptEditor {
     // Quick snippets
     this.button(ctx, left, sy(cy), 105, 20, "Rain & Ambience", () => this.change(() => {
       this.state.overall_soundscape = "Steady rain taps against the café windows while low room ambience continues underneath. Wet footsteps echo softly.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for gentle indoor rain ambience and quiet room tone.");
     this.button(ctx, left + 110, sy(cy), 78, 20, "Room Tone", () => this.change(() => {
       this.state.overall_soundscape = "Quiet indoor room tone and a low ventilation hum continue throughout the video.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for subtle room tone and ventilation hum.");
     this.button(ctx, left + 192, sy(cy), 86, 20, "Urban Traffic", () => this.change(() => {
       this.state.overall_soundscape = "Distant city traffic hums with intermittent car horns and passing footsteps on the pavement.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for distant city traffic and street footsteps.");
     this.button(ctx, left + 282, sy(cy), 54, 20, "Set N/A", () => this.change(() => {
       this.state.overall_soundscape = "N/A";
-    }));
+    }), false, "center", false, false, "Sets soundscape to N/A for silent background audio.");
     cy += 28;
 
     const boxH = 120;
@@ -723,7 +853,7 @@ class H3BaseCanvasPromptEditor {
     const rect = { x: left, y: sy(cy), w: available, h: boxH };
     this.hit(left, sy(cy), available, boxH, () => {
       this.openMultilineEditor(rect, this.state.overall_soundscape || "", (v) => { this.state.overall_soundscape = v; });
-    });
+    }, "Click to edit overall background soundscape summary.");
     cy += boxH + 16;
 
     return cy;
@@ -739,16 +869,16 @@ class H3BaseCanvasPromptEditor {
     // Quick snippets
     this.button(ctx, left, sy(cy), 100, 20, "Acoustic Guitar", () => this.change(() => {
       this.state.non_diegetic_music = "A soft acoustic-guitar pattern at a moderate tempo, joined by sparse upright-bass notes and a gentle fade at the end.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for gentle acoustic guitar background music.");
     this.button(ctx, left + 105, sy(cy), 100, 20, "Piano & Strings", () => this.change(() => {
       this.state.non_diegetic_music = "Sparse piano notes at a slow tempo, joined by sustained low strings that gradually increase in volume before fading out.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for slow, emotive solo piano with subtle background strings.");
     this.button(ctx, left + 210, sy(cy), 78, 20, "Synth Pulse", () => this.change(() => {
       this.state.non_diegetic_music = "A low electronic pulse at a slow tempo, ending immediately after the action.";
-    }));
+    }), false, "center", false, false, "Fills in a ready-made description for a low atmospheric synthesizer rhythm.");
     this.button(ctx, left + 292, sy(cy), 54, 20, "Set N/A", () => this.change(() => {
       this.state.non_diegetic_music = "N/A";
-    }));
+    }), false, "center", false, false, "Sets background music to N/A when no music should play.");
     cy += 28;
 
     const boxH = 120;
@@ -760,7 +890,7 @@ class H3BaseCanvasPromptEditor {
     const rect = { x: left, y: sy(cy), w: available, h: boxH };
     this.hit(left, sy(cy), available, boxH, () => {
       this.openMultilineEditor(rect, this.state.non_diegetic_music || "", (v) => { this.state.non_diegetic_music = v; });
-    });
+    }, "Click to edit audience background music description.");
     cy += boxH + 16;
 
     return cy;
@@ -768,6 +898,7 @@ class H3BaseCanvasPromptEditor {
 
   mouse(event, position) {
     if (event.button !== 0 || !/up$/.test(event.type)) return true;
+    this.clearHoveredTooltip();
     const region = this.hitRegions.find(item => this.contains(item, position[0], position[1]));
     region?.action(event, position);
     return true;
@@ -775,6 +906,7 @@ class H3BaseCanvasPromptEditor {
 
   onWheel(event) {
     if (this.textEditor) this.closeTextEditor();
+    this.clearHoveredTooltip();
     if (event.ctrlKey || event.metaKey || !this.state) return;
     const canvas = app.canvas;
     if (!canvas?.graph || this.contentHeight <= this.viewportHeight) return;

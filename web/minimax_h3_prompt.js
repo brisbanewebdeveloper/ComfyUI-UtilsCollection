@@ -18,6 +18,7 @@ class H3CanvasPromptEditor {
     this.viewportY = 0;
     this.viewportHeight = 380;
     this.hitRegions = [];
+    this.hoveredRegion = null;
     this.textEditor = null;
     this.abort = new AbortController();
     this.restore(this.raw);
@@ -42,6 +43,12 @@ class H3CanvasPromptEditor {
       const found = getWidgetOnPos.call(node, graphX, graphY, includeDisabled);
       return found === this.widget ? undefined : found;
     };
+    app.canvas?.canvas?.addEventListener("pointermove", event => this.onPointerMove(event), {
+      passive: true, signal: this.abort.signal,
+    });
+    app.canvas?.canvas?.addEventListener("pointerleave", () => this.clearHoveredTooltip(), {
+      passive: true, signal: this.abort.signal,
+    });
     app.canvas?.canvas?.addEventListener("wheel", event => this.onWheel(event), {
       capture: true, passive: false, signal: this.abort.signal,
     });
@@ -96,10 +103,10 @@ class H3CanvasPromptEditor {
     return x >= region.x && x < region.x + region.w && y >= region.y && y < region.y + region.h;
   }
 
-  hit(x, y, w, h, action) {
+  hit(x, y, w, h, action, tooltip = null) {
     const top = Math.max(y, this.viewportY);
     const bottom = Math.min(y + h, this.viewportY + this.viewportHeight);
-    if (bottom > top) this.hitRegions.push({ x, y: top, w, h: bottom - top, action });
+    if (bottom > top) this.hitRegions.push({ x, y: top, w, h: bottom - top, action, tooltip });
   }
 
   box(ctx, x, y, w, h, fill, stroke = "#4b505a", radius = 4) {
@@ -128,7 +135,7 @@ class H3CanvasPromptEditor {
     ctx.fillText(line.slice(0, end) + "…", x, y);
   }
 
-  button(ctx, x, y, w, h, label, action, accent = false, align = "center", active = false) {
+  button(ctx, x, y, w, h, label, action, accent = false, align = "center", active = false, danger = false, tooltip = null) {
     let fill = accent ? "#26394e" : "#202329";
     let stroke = accent ? "#709ecc" : "#59606a";
     let textColor = accent ? "#d7ebff" : "#ddd";
@@ -137,6 +144,10 @@ class H3CanvasPromptEditor {
       fill = "#1d4ed8";
       stroke = "#93c5fd";
       textColor = "#ffffff";
+    } else if (danger) {
+      fill = "#7f1d1d";
+      stroke = "#f87171";
+      textColor = "#fecaca";
     }
 
     this.box(ctx, x, y, w, h, fill, stroke, 4);
@@ -144,15 +155,110 @@ class H3CanvasPromptEditor {
     const tw = ctx.measureText(label).width;
     const tx = align === "left" ? x + 8 : x + Math.max(4, (w - tw) / 2);
     this.text(ctx, label, tx, y + h / 2, textColor, "11px sans-serif", w - 8);
-    this.hit(x, y, w, h, action);
+    this.hit(x, y, w, h, action, tooltip);
   }
 
-  chip(ctx, x, y, label, action, active = false, accent = false) {
+  chip(ctx, x, y, label, action, active = false, accent = false, tooltip = null) {
     ctx.font = "11px sans-serif";
     const w = Math.ceil(ctx.measureText(label).width) + 16;
     const h = 24;
-    this.button(ctx, x, y, w, h, label, action, accent, "center", active);
+    this.button(ctx, x, y, w, h, label, action, accent, "center", active, false, tooltip);
     return w;
+  }
+
+  onPointerMove(event) {
+    if (this.textEditor) {
+      this.clearHoveredTooltip();
+      return;
+    }
+    const canvas = app.canvas;
+    if (!canvas?.graph) return;
+    const bounds = canvas.canvas.getBoundingClientRect();
+    const scale = canvas.ds.scale;
+    const graphX = (event.clientX - bounds.left) / scale - canvas.ds.offset[0];
+    const graphY = (event.clientY - bounds.top) / scale - canvas.ds.offset[1];
+    const x = graphX - this.node.pos[0];
+    const y = graphY - this.node.pos[1];
+
+    if (x < 0 || x > (this.node.size[0] || 480) || y < 0 || y > (this.node.size[1] || 500)) {
+      this.clearHoveredTooltip();
+      return;
+    }
+
+    const matched = this.hitRegions.find(r => r.tooltip && this.contains(r, x, y));
+    if (matched !== this.hoveredRegion) {
+      this.hoveredRegion = matched || null;
+      canvas.setDirty(true, false);
+    }
+  }
+
+  clearHoveredTooltip() {
+    if (this.hoveredRegion) {
+      this.hoveredRegion = null;
+      app.canvas?.setDirty(true, false);
+    }
+  }
+
+  drawCanvasTooltip(ctx, region, nodeWidth, yTop, nodeHeight) {
+    if (!region?.tooltip) return;
+    const text = region.tooltip;
+    const maxWidth = Math.min(280, nodeWidth - 28);
+    const font = "11px sans-serif";
+    const lineHeight = 15;
+
+    ctx.save();
+    ctx.font = font;
+
+    const words = String(text).split(/\s+/);
+    const lines = [];
+    let currentLine = "";
+    for (let i = 0; i < words.length; i++) {
+      const testLine = currentLine ? `${currentLine} ${words[i]}` : words[i];
+      if (ctx.measureText(testLine).width > maxWidth && currentLine) {
+        lines.push(currentLine);
+        currentLine = words[i];
+      } else {
+        currentLine = testLine;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    let maxMeasured = 0;
+    for (const l of lines) {
+      maxMeasured = Math.max(maxMeasured, ctx.measureText(l).width);
+    }
+
+    const paddingX = 8;
+    const paddingY = 6;
+    const boxW = Math.max(60, maxMeasured + paddingX * 2);
+    const boxH = lines.length * lineHeight + paddingY * 2;
+
+    let bx = region.x + region.w / 2 - boxW / 2;
+    bx = Math.max(10, Math.min(nodeWidth - boxW - 10, bx));
+
+    let by = region.y - boxH - 8;
+    if (by < yTop + 4) {
+      by = region.y + region.h + 8;
+    }
+
+    ctx.shadowColor = "rgba(0, 0, 0, 0.7)";
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 3;
+
+    this.box(ctx, bx, by, boxW, boxH, "#0f1218", "#475569", 4);
+
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = "#f1f5f9";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], bx + paddingX, by + paddingY + i * lineHeight);
+    }
+
+    ctx.restore();
   }
 
   field(ctx, label, value, x, y, w, action) {
@@ -170,6 +276,7 @@ class H3CanvasPromptEditor {
 
   openTextEditor(value, apply, rect, tagSpawner = null) {
     this.closeTextEditor();
+    this.clearHoveredTooltip();
     const container = document.createElement("div");
     container.className = "comfy-multiline-container";
     container.dataset.testid = "h3-prompt-editor-container";
@@ -307,11 +414,20 @@ class H3CanvasPromptEditor {
       this.change(() => {
         this.state.precision = this.state.precision === 2 ? 3 : 2;
       });
-    }, true);
+    }, true, "center", false, false, "Switches timestamps between two decimal places (00.00s) and three decimal places (00.000s) across the entire prompt.");
 
     // Tab Navigation Bar
     const tabY = y + 28;
     const tabWidth = Math.floor(available / TABS.length);
+    const tabTooltips = {
+      subjects: "Define people, creatures, reference pictures, source videos, or audio tracks used in your prompt.",
+      summary: "Choose your video task type and write a high-level summary of the overall scene.",
+      retention: "Specify how much identity, motion, or audio from your references should carry over into the new video.",
+      detailed: "Break down the video into timed intervals detailing what is seen, spoken, and heard.",
+      soundscape: "Describe the background ambience, environment noise, and physical action sounds heard across the entire video.",
+      music: "Describe the audience-only background music, including instruments, tempo, and rhythm.",
+    };
+
     TABS.forEach((tab, index) => {
       const active = this.state.activeTab === tab;
       const tx = left + index * tabWidth;
@@ -324,11 +440,13 @@ class H3CanvasPromptEditor {
 
       const label = `${TAB_LABELS[tab].split(" ")[1]}${countStr}`;
       this.button(ctx, tx, tabY, tw, 26, label, () => {
+        this.closeTextEditor();
+        this.clearHoveredTooltip();
         this.change(() => {
           this.state.activeTab = tab;
           this.scroll = 0;
         });
-      }, false, "center", active);
+      }, false, "center", active, false, tabTooltips[tab]);
     });
 
     const contentTopY = tabY + 32;
@@ -359,19 +477,19 @@ class H3CanvasPromptEditor {
       const btnW = Math.floor((available - 18) / 4);
       this.button(ctx, left, sy(cy), btnW, 26, `+ <Subject ${nextSubId}>`, () => {
         this.change(() => addDefinition(this.state, "subject", { hasRef: false }));
-      }, true);
+      }, true, "center", false, false, "Adds a character, creature, or key object to describe appearance, clothing, or link them to a reference image.");
 
       this.button(ctx, left + btnW + 6, sy(cy), btnW, 26, `+ <Picture ${nextPicId}>`, () => {
         this.change(() => addDefinition(this.state, "picture", { role: "first_frame" }));
-      }, false);
+      }, false, "center", false, false, "Adds a reference picture definition, such as a starting frame, ending frame, or storyboard composition.");
 
       this.button(ctx, left + (btnW + 6) * 2, sy(cy), btnW, 26, `+ <Video ${nextVidId}>`, () => {
         this.change(() => addDefinition(this.state, "video", { role: "edit" }));
-      }, false);
+      }, false, "center", false, false, "Adds a source video reference for video editing, motion transfer, or video continuation.");
 
       this.button(ctx, left + (btnW + 6) * 3, sy(cy), available - (btnW + 6) * 3, 26, `+ <Audio ${nextAudId}>`, () => {
         this.change(() => addDefinition(this.state, "audio", { role: "timbre" }));
-      }, false);
+      }, false, "center", false, false, "Adds a reference audio track to copy a speaker's voice timbre or reuse background music.");
       cy += 34;
 
       if (!this.state.definitions.length) {
@@ -398,20 +516,20 @@ class H3CanvasPromptEditor {
         // Action buttons (Remove / Up / Down)
         this.button(ctx, right - 28, cardY + 6, 24, 22, "×", () => {
           this.change(() => removeDefinition(this.state, idx));
-        });
+        }, false, "center", false, true, "Removes this reference definition.");
         this.button(ctx, right - 54, cardY + 6, 22, 22, "↑", () => {
           this.change(() => moveItem(this.state.definitions, idx, -1));
-        });
+        }, false, "center", false, false, "Moves this item up in order.");
         this.button(ctx, right - 78, cardY + 6, 22, 22, "↓", () => {
           this.change(() => moveItem(this.state.definitions, idx, 1));
-        });
+        }, false, "center", false, false, "Moves this item down in order.");
 
         // Config Controls per Kind
         if (item.kind === "subject") {
           // Reference Switcher: Standalone (No Ref) vs Referenced
           const noRefW = this.chip(ctx, left + 104, cardY + 7, item.hasRef ? "[With Ref]" : "[Standalone (No Ref)]", () => {
             this.change(() => { item.hasRef = !item.hasRef; });
-          }, !item.hasRef, item.hasRef);
+          }, !item.hasRef, item.hasRef, item.hasRef ? "This character takes visual identity and clothing from a reference Picture or Video." : "This character is described entirely through text without requiring an image reference.");
 
           if (item.hasRef) {
             const pic1W = this.chip(ctx, left + 110 + noRefW, cardY + 7, "<Pic 1>", () => {
@@ -447,16 +565,16 @@ class H3CanvasPromptEditor {
         else if (item.kind === "picture") {
           // Role selector for Standalone Picture
           const roles = [
-            { id: "first_frame", label: "First Frame (00.00s)" },
-            { id: "final_frame", label: "Final Frame" },
-            { id: "storyboard", label: "Storyboard" },
-            { id: "custom", label: "Custom" },
+            { id: "first_frame", label: "First Frame (00.00s)", tip: "Locks this picture as the exact starting frame at 00.00s." },
+            { id: "final_frame", label: "Final Frame", tip: "Locks this picture as the exact ending frame at the end of the video." },
+            { id: "storyboard", label: "Storyboard", tip: "Uses this picture as a camera angle and composition reference for shots." },
+            { id: "custom", label: "Custom", tip: "Custom image reference role." },
           ];
           let rx = left + 104;
           roles.forEach(r => {
             rx += this.chip(ctx, rx, cardY + 7, r.label, () => {
               this.change(() => { item.role = r.id; });
-            }, item.role === r.id) + 4;
+            }, item.role === r.id, false, r.tip) + 4;
           });
 
           if (item.role === "custom") {
@@ -473,16 +591,16 @@ class H3CanvasPromptEditor {
         else if (item.kind === "video") {
           // Role selector for Standalone Video
           const vRoles = [
-            { id: "edit", label: "Edit Source" },
-            { id: "continue", label: "Continuation" },
-            { id: "structure", label: "Pacing & Motion" },
-            { id: "custom", label: "Custom" },
+            { id: "edit", label: "Edit Source", tip: "Uses this video as the source video to edit or modify." },
+            { id: "continue", label: "Continuation", tip: "Extends this video forward in time from its ending." },
+            { id: "structure", label: "Pacing & Motion", tip: "Uses this video as a guide for camera motion and rhythm without copying characters." },
+            { id: "custom", label: "Custom", tip: "Custom video reference role." },
           ];
           let vx = left + 104;
           vRoles.forEach(r => {
             vx += this.chip(ctx, vx, cardY + 7, r.label, () => {
               this.change(() => { item.role = r.id; });
-            }, item.role === r.id) + 4;
+            }, item.role === r.id, false, r.tip) + 4;
           });
 
           if (item.role === "custom") {
@@ -499,16 +617,16 @@ class H3CanvasPromptEditor {
         else if (item.kind === "audio") {
           // Role selector for Standalone Audio
           const aRoles = [
-            { id: "timbre", label: "Voice Timbre" },
-            { id: "full", label: "Full Track" },
-            { id: "music", label: "Music & Rhythm" },
-            { id: "custom", label: "Custom" },
+            { id: "timbre", label: "Voice Timbre", tip: "Copies the vocal sound and tone of this audio onto a speaking character." },
+            { id: "full", label: "Full Track", tip: "Reuses this audio track as the complete final sound of the video." },
+            { id: "music", label: "Music & Rhythm", tip: "Uses this audio as a reference for background music style and rhythm." },
+            { id: "custom", label: "Custom", tip: "Custom audio reference role." },
           ];
           let ax = left + 104;
           aRoles.forEach(r => {
             ax += this.chip(ctx, ax, cardY + 7, r.label, () => {
               this.change(() => { item.role = r.id; });
-            }, item.role === r.id) + 4;
+            }, item.role === r.id, false, r.tip) + 4;
           });
 
           if (item.role === "timbre") {
@@ -617,11 +735,11 @@ class H3CanvasPromptEditor {
             });
           }
         }, event);
-      }, true);
+      }, true, "center", false, false, "Adds a tracked reference label to define its retention or transfer rules.");
 
       this.button(ctx, left + 178, sy(cy), 120, 26, "Clear All (T2V)", () => {
         this.change(() => { this.state.retention = []; });
-      });
+      }, false, "center", false, false, "Clears retention analysis (cleanly omitted when generating without references).");
       cy += 32;
 
       if (!this.state.retention.length) {
@@ -649,21 +767,21 @@ class H3CanvasPromptEditor {
             const nextIdx = (markers.indexOf(item.marker) + 1) % markers.length;
             item.marker = markers[nextIdx];
           });
-        }, true);
+        }, true, "center", false, false, "Cycles through retention markers: attribute transfer, partially preserved, fully preserved, or weak reference.");
 
         // Autofill default button
         this.button(ctx, left + 112 + mw, cardY + 7, 72, 22, "Autofill", () => {
           this.change(() => {
             item.text = defaultRetentionText(item.label, item.marker);
           });
-        });
+        }, false, "center", false, false, "Fills in recommended retention description text for this marker.");
 
         // Remove button
         this.button(ctx, right - 28, cardY + 6, 24, 22, "×", () => {
           this.change(() => {
             this.state.retention.splice(idx, 1);
           });
-        });
+        }, false, "center", false, true, "Removes this retention item.");
 
         // Formatted preview line
         this.text(ctx, `${item.label}: ${item.marker} -`, left + 10, cardY + 40, "#94a3b8", "11px monospace", available - 20);
@@ -686,11 +804,11 @@ class H3CanvasPromptEditor {
       const hasTimeline = this.state.detailed.hasTimeline !== false;
       this.button(ctx, left, sy(cy), 130, 26, "Timeline Mode", () => {
         this.change(() => { this.state.detailed.hasTimeline = true; });
-      }, false, "center", hasTimeline);
+      }, false, "center", hasTimeline, false, "Divides your video into timed chronological segments with separate visual, dialogue, and sound controls.");
 
       this.button(ctx, left + 136, sy(cy), 150, 26, "Continuous (No Timeline)", () => {
         this.change(() => { this.state.detailed.hasTimeline = false; });
-      }, false, "center", !hasTimeline);
+      }, false, "center", !hasTimeline, false, "Allows writing freely in continuous paragraphs using shot labels like [Shot 1] and camera cuts.");
       cy += 34;
 
       if (!hasTimeline) {
@@ -711,7 +829,7 @@ class H3CanvasPromptEditor {
           this.change(() => {
             this.state.detailed.segmentDuration = h3StepDuration(curDur, -1);
           });
-        });
+        }, false, "center", false, false, "Shortens segment duration by 17 frames (about 0.71 seconds), matching H3 native steps.");
 
         // Duration display/edit
         this.button(ctx, left + 160, sy(cy), 110, 24, durLabel, event => {
@@ -719,19 +837,19 @@ class H3CanvasPromptEditor {
             const s = parseFloat(val);
             if (s > 0) this.state.detailed.segmentDuration = s;
           }, event);
-        }, true);
+        }, true, "center", false, false, "Current default segment duration. Click to edit manually.");
 
         // Increment button (+17 frames)
         this.button(ctx, left + 274, sy(cy), 26, 24, "+", () => {
           this.change(() => {
             this.state.detailed.segmentDuration = h3StepDuration(curDur, 1);
           });
-        });
+        }, false, "center", false, false, "Lengthens segment duration by 17 frames (about 0.71 seconds), matching H3 native steps.");
 
         // Add Segment Button
         this.button(ctx, left + 310, sy(cy), available - 310, 24, `+ Add Segment (${curDur.toFixed(2)}s)`, () => {
           this.change(() => addSegment(this.state));
-        }, true);
+        }, true, "center", false, false, "Adds a new timed scene segment starting right after the previous one.");
         cy += 36;
 
         // Segments List
@@ -749,16 +867,16 @@ class H3CanvasPromptEditor {
             if (this.collapsed.has(sIdx)) this.collapsed.delete(sIdx);
             else this.collapsed.add(sIdx);
             app.canvas?.setDirty(true, true);
-          });
+          }, false, "center", false, false, "Collapses or expands this segment card.");
           this.button(ctx, right - 80, cardY + 5, 22, 22, "⧉", () => {
             this.change(() => this.state.segments.splice(sIdx + 1, 0, JSON.parse(JSON.stringify(seg))));
-          });
+          }, false, "center", false, false, "Duplicates this segment.");
           this.button(ctx, right - 54, cardY + 5, 22, 22, "↑", () => {
             this.change(() => moveItem(this.state.segments, sIdx, -1));
-          });
+          }, false, "center", false, false, "Moves this segment earlier in time.");
           this.button(ctx, right - 28, cardY + 5, 22, 22, "×", () => {
             this.change(() => this.state.segments.splice(sIdx, 1));
-          });
+          }, false, "center", false, true, "Deletes this scene segment.");
 
           if (!collapsed) {
             let scy = cardY + 36;
@@ -778,7 +896,7 @@ class H3CanvasPromptEditor {
             const shotLabel = seg.hasShot ? `[Shot ${seg.shot || sIdx + 1}] ✓` : `[+ Shot]`;
             qx += this.chip(ctx, qx, scy, shotLabel, () => {
               this.change(() => { seg.hasShot = !seg.hasShot; });
-            }, seg.hasShot, true) + 6;
+            }, seg.hasShot, true, "Toggles whether this segment introduces an instant camera cut or smoothly continues previous movement.") + 6;
 
             // Camera Motion quick insert
             ["Push In", "Pan Left", "Tilt Up", "Static Shot"].forEach(cam => {
@@ -816,15 +934,15 @@ class H3CanvasPromptEditor {
                 seg.speech = seg.speech || {};
                 seg.speech.enabled = !spkActive;
               });
-            }, false, "center", spkActive);
+            }, false, "center", spkActive, false, "Enables spoken dialogue, speaker identity, and spoken language for this segment.");
 
             if (spkActive) {
               this.button(ctx, left + 92, scy + 8, 50, 22, seg.speech.speaker || "S1", event => {
                 this.editSingleLine("Speaker ID (e.g. S1)", seg.speech.speaker || "S1", val => { seg.speech.speaker = val; }, event);
-              });
+              }, false, "center", false, false, "Speaker ID for this line (e.g. S1 or S2).");
               this.button(ctx, left + 146, scy + 8, 60, 22, seg.speech.language || "English", event => {
                 this.editSingleLine("Language", seg.speech.language || "English", val => { seg.speech.language = val; }, event);
-              });
+              }, false, "center", false, false, "Spoken language name inside the dialogue tag.");
               this.field(ctx, "Spoken Words", seg.speech.text, left + 210, scy - 8, available - 218, (_ev, _pos, rect) => {
                 this.openTextEditor(seg.speech.text, val => { seg.speech.text = val; }, rect, availableTags);
               });
@@ -838,7 +956,7 @@ class H3CanvasPromptEditor {
                 seg.sounds = seg.sounds || {};
                 seg.sounds.enabled = !sndActive;
               });
-            }, false, "center", sndActive);
+            }, false, "center", sndActive, false, "Enables synchronized physical action sounds, impacts, and ambient effects for this segment.");
 
             if (sndActive) {
               this.field(ctx, "Ambience & Sound Effects", seg.sounds.text, left + 92, scy - 8, available - 100, (_ev, _pos, rect) => {
@@ -854,7 +972,7 @@ class H3CanvasPromptEditor {
                 seg.music = seg.music || {};
                 seg.music.enabled = !musActive;
               });
-            }, false, "center", musActive);
+            }, false, "center", musActive, false, "Enables background music notes specific to this segment.");
 
             if (musActive) {
               this.field(ctx, "Diegetic Music", seg.music.text, left + 92, scy - 8, available - 100, (_ev, _pos, rect) => {
@@ -887,7 +1005,7 @@ class H3CanvasPromptEditor {
       const isNA = (this.state.non_diegetic_music || "").trim() === "N/A";
       this.button(ctx, left, sy(cy), 90, 26, "Set N/A", () => {
         this.change(() => { this.state.non_diegetic_music = "N/A"; });
-      }, false, "center", isNA);
+      }, false, "center", isNA, false, "Sets background music to N/A when no music should play.");
       cy += 32;
 
       this.field(ctx, "Background Score / Music Description", this.state.non_diegetic_music, left, sy(cy), available, (_ev, _pos, rect) => {
@@ -928,10 +1046,16 @@ class H3CanvasPromptEditor {
     const promptPreview = compilePrompt(this.state) || "Prompt preview will appear here...";
     const previewLine = promptPreview.replace(/\n+/g, " ❚ ");
     this.text(ctx, previewLine, left + 6, previewY + 34, "#94a3b8", "11px monospace", available - 12);
+
+    // Canvas Draw-Loop Tooltip (Offset upwards on vertical axis)
+    if (this.hoveredRegion?.tooltip) {
+      this.drawCanvasTooltip(ctx, this.hoveredRegion, width, y, this.viewportHeight);
+    }
   }
 
   mouse(event, position) {
     if (event.button !== 0 || !/up$/.test(event.type)) return true;
+    this.clearHoveredTooltip();
     const region = this.hitRegions.find(item => this.contains(item, position[0], position[1]));
     region?.action(event, position);
     return true;
@@ -939,6 +1063,7 @@ class H3CanvasPromptEditor {
 
   onWheel(event) {
     if (this.textEditor) this.closeTextEditor();
+    this.clearHoveredTooltip();
     if (event.ctrlKey || event.metaKey || !this.state) return;
     const canvas = app.canvas;
     if (!canvas?.graph || this.contentHeight <= this.viewportHeight) return;
