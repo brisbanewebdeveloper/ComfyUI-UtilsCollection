@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from typing import Any, Union
 
@@ -444,3 +445,117 @@ def concatenate_aligned_text_inputs(
         ]
         outputs.append(str(delimiter).join(str(value) for value in parts))
     return outputs
+
+
+TEXT_FILE_DELIMITER_OPTIONS = [
+    "Newline [\n] or [\r\n]",
+    'Triple Quote ["""]',
+    "Triple Equals [===]",
+    "Triple Dash [---]",
+    "Period [.]",
+    "Comma [,]",
+    "Colon [:]",
+    "Semicolon [;]",
+    "Space [ ]",
+    "Tab [\t]",
+    "Pipe [|]",
+    "Double Newline [\n\n] (Paragraphs)",
+    "None (Single Entry)",
+    "Custom",
+]
+
+TEXT_FILE_DELIMITER_MAP = {
+    "Newline [\n] or [\r\n]": r"\r?\n",
+    'Triple Quote ["""]': '"""',
+    "Triple Equals [===]": "===",
+    "Triple Dash [---]": "---",
+    "Period [.]": ".",
+    "Comma [,]": ",",
+    "Colon [:]": ":",
+    "Semicolon [;]": ";",
+    "Space [ ]": " ",
+    "Tab [\t]": "\t",
+    "Pipe [|]": "|",
+    "Double Newline [\n\n] (Paragraphs)": r"(?:\r?\n){2,}",
+}
+
+
+def normalize_text_file_path(path: str) -> str:
+    if not path:
+        return ""
+    path = path.strip().strip('"').strip("'")
+    path = path.replace("\\", "/")
+    path = os.path.normpath(path)
+    if not os.path.isabs(path):
+        path = os.path.abspath(path)
+    return path
+
+
+def read_arbitrary_text_file(file_path: str) -> str:
+    with open(file_path, "rb") as f:
+        raw_bytes = f.read()
+
+    if raw_bytes.startswith(b"\xef\xbb\xbf"):
+        return raw_bytes.decode("utf-8-sig", errors="replace")
+    if raw_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw_bytes.decode("utf-16", errors="replace")
+    if raw_bytes.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return raw_bytes.decode("utf-32", errors="replace")
+
+    try:
+        return raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw_bytes.decode("utf-8", errors="replace")
+
+
+def split_text_content(
+    content: str,
+    delimiter: str,
+    custom_delimiter: str = "",
+    trim_entries: bool = True,
+    skip_empty: bool = True,
+) -> list[str]:
+    if delimiter == "Newline [\n] or [\r\n]":
+        parts = re.split(r"\r?\n", content)
+    elif delimiter == "Double Newline [\n\n] (Paragraphs)":
+        parts = re.split(r"(?:\r?\n){2,}", content)
+    elif delimiter == "None (Single Entry)":
+        parts = [content]
+    elif delimiter == "Custom":
+        if custom_delimiter:
+            parts = content.split(custom_delimiter)
+        else:
+            parts = [content]
+    else:
+        delim = TEXT_FILE_DELIMITER_MAP.get(delimiter, delimiter)
+        parts = content.split(delim)
+
+    if trim_entries:
+        parts = [p.strip() for p in parts]
+
+    if skip_empty:
+        parts = [p for p in parts if p]
+
+    return parts
+
+
+def load_text_file_as_list(
+    file_path: str,
+    delimiter: str = "Newline [\n] or [\r\n]",
+    custom_delimiter: str = "",
+    trim_entries: bool = True,
+    skip_empty: bool = True,
+) -> list[str]:
+    normalized = normalize_text_file_path(file_path)
+    if not normalized or not os.path.isfile(normalized):
+        raise ValueError(
+            f"Invalid file path: {file_path} (resolved to: {normalized})"
+        )
+    content = read_arbitrary_text_file(normalized)
+    return split_text_content(
+        content,
+        delimiter=delimiter,
+        custom_delimiter=custom_delimiter,
+        trim_entries=trim_entries,
+        skip_empty=skip_empty,
+    )

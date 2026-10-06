@@ -142,3 +142,147 @@ def test_newline_node_has_no_inputs_and_outputs_one_newline():
     assert schema.outputs[0].get_io_type() == "STRING"
     assert schema.outputs[0].display_name == r"\n"
     assert text_nodes.UC_Newline.execute().args == ("\n",)
+
+
+def test_load_text_file_path_schema():
+    schema = text_nodes.UC_LoadTextFilePath.define_schema()
+    assert schema.node_id == "UC_LoadTextFilePath"
+    assert schema.display_name == "Load Text (Path)"
+    assert schema.category == "advanced/text"
+    input_ids = [inp.id for inp in schema.inputs]
+    assert input_ids == [
+        "file_path",
+        "delimiter",
+        "custom_delimiter",
+        "trim_entries",
+        "skip_empty",
+    ]
+    assert schema.outputs[0].id == "text_list"
+    assert schema.outputs[0].is_output_list is True
+
+
+def test_load_text_helpers_splitting():
+    from utils_collection_text_nodes_test.helpers.text_helpers import split_text_content
+
+    # Period
+    assert split_text_content("First sentence. Second sentence.", "Period [.]") == [
+        "First sentence",
+        "Second sentence",
+    ]
+
+    # Comma
+    assert split_text_content("apple, banana , cherry,", "Comma [,]", trim_entries=True, skip_empty=True) == [
+        "apple",
+        "banana",
+        "cherry",
+    ]
+
+    # Colon
+    assert split_text_content("key: value: other", "Colon [:]") == ["key", "value", "other"]
+
+    # Semicolon
+    assert split_text_content("one; two; three;", "Semicolon [;]") == ["one", "two", "three"]
+
+    # Newline (mixed CRLF and LF)
+    assert split_text_content("line 1\r\nline 2\nline 3\n\n", "Newline [\n] or [\r\n]") == [
+        "line 1",
+        "line 2",
+        "line 3",
+    ]
+
+    # Double Newline (Paragraphs)
+    para_text = "Paragraph 1.\nStill para 1.\n\nParagraph 2.\n\n\nParagraph 3."
+    assert split_text_content(para_text, "Double Newline [\n\n] (Paragraphs)") == [
+        "Paragraph 1.\nStill para 1.",
+        "Paragraph 2.",
+        "Paragraph 3.",
+    ]
+
+    # Space
+    assert split_text_content("word1 word2   word3", "Space [ ]") == ["word1", "word2", "word3"]
+
+    # Tab
+    assert split_text_content("col1\tcol2\tcol3", "Tab [\t]") == ["col1", "col2", "col3"]
+
+    # Pipe
+    assert split_text_content("item1 | item2 | item3", "Pipe [|]") == ["item1", "item2", "item3"]
+
+    # Triple Quote
+    tq_text = 'line 1\nline 2\n"""\nline 1\nline 2\nline 3\n"""\nline 1line 2\nline 3\nline 4'
+    assert split_text_content(tq_text, 'Triple Quote ["""]') == [
+        "line 1\nline 2",
+        "line 1\nline 2\nline 3",
+        "line 1line 2\nline 3\nline 4",
+    ]
+
+    # Triple Equals
+    te_text = "line 1\nline 2\n===\nline 1\nline 2\nline 3\n===\nline 1line 2\nline 3\nline 4"
+    assert split_text_content(te_text, "Triple Equals [===]") == [
+        "line 1\nline 2",
+        "line 1\nline 2\nline 3",
+        "line 1line 2\nline 3\nline 4",
+    ]
+
+    # Triple Dash
+    td_text = "section 1\n---\nsection 2\n---\nsection 3"
+    assert split_text_content(td_text, "Triple Dash [---]") == [
+        "section 1",
+        "section 2",
+        "section 3",
+    ]
+
+    # None (Single Entry)
+    assert split_text_content("  entire content  ", "None (Single Entry)", trim_entries=False) == [
+        "  entire content  "
+    ]
+
+    # Custom
+    assert split_text_content("a<=>b<=>c", "Custom", custom_delimiter="<=>") == ["a", "b", "c"]
+
+
+def test_load_text_file_path_execute_and_validation(tmp_path):
+    from utils_collection_text_nodes_test.helpers.text_helpers import (
+        read_arbitrary_text_file,
+    )
+
+    # 1. UTF-8 file
+    utf8_file = tmp_path / "test_utf8.txt"
+    utf8_file.write_text("prompt 1\nprompt 2\nprompt 3\n", encoding="utf-8")
+
+    out = text_nodes.UC_LoadTextFilePath.execute(str(utf8_file), "Newline [\n] or [\r\n]")
+    assert out.args == (["prompt 1", "prompt 2", "prompt 3"],)
+
+    # 2. UTF-8 with BOM
+    bom_file = tmp_path / "test_bom.txt"
+    bom_file.write_bytes(b"\xef\xbb\xbfalpha, beta, gamma")
+    out = text_nodes.UC_LoadTextFilePath.execute(str(bom_file), "Comma [,]")
+    assert out.args == (["alpha", "beta", "gamma"],)
+
+    # 3. UTF-16 file with BOM
+    utf16_file = tmp_path / "test_utf16.txt"
+    utf16_file.write_text("entry1; entry2; entry3", encoding="utf-16")
+    out = text_nodes.UC_LoadTextFilePath.execute(str(utf16_file), "Semicolon [;]")
+    assert out.args == (["entry1", "entry2", "entry3"],)
+
+    # 4. Arbitrary binary content loaded as text without crashing
+    bin_file = tmp_path / "arbitrary.bin"
+    bin_file.write_bytes(b"\x00\x01\x02hello\xffworld\x00\nsecond line\n")
+    text_content = read_arbitrary_text_file(str(bin_file))
+    assert "hello" in text_content
+    assert "world" in text_content
+
+    # 5. Missing file raises ValueError
+    import pytest
+
+    with pytest.raises(ValueError, match="Invalid file path"):
+        text_nodes.UC_LoadTextFilePath.execute(str(tmp_path / "non_existent.txt"))
+
+    # 6. fingerprint_inputs and validate_inputs
+    fp = text_nodes.UC_LoadTextFilePath.fingerprint_inputs(str(utf8_file))
+    assert fp != ""
+    assert str(utf8_file.name) in fp or str(utf8_file.stat().st_size) in fp
+
+    assert text_nodes.UC_LoadTextFilePath.validate_inputs(str(utf8_file)) is True
+    assert text_nodes.UC_LoadTextFilePath.validate_inputs("") == "File path cannot be empty"
+    assert "Invalid file path" in text_nodes.UC_LoadTextFilePath.validate_inputs(str(tmp_path / "missing.txt"))
+
