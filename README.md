@@ -299,6 +299,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_ImagesToVideoTimeline`
 - `UC_VideoTimelineText`
 - `UC_LoraLoaderCLIPOnly`
+- `UC_LoraLoaderModelOnly`
 - `UC_LoadLaMaModel`
 - `UC_TextGenerate`
 - `UC_TextGenerateQwen35SystemPrompt`

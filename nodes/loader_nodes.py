@@ -3,7 +3,7 @@ from folder_paths import get_filename_list, get_folder_paths, get_full_path_or_r
 from comfy.sd import load_lora_for_models
 from comfy.utils import load_torch_file
 from comfy_api.latest import io
-from ..helpers.loader_helpers import load_sam31_checkpoint
+from ..helpers.loader_helpers import load_filtered_lora_for_model, load_sam31_checkpoint
 
 _LORA_LOADER_CACHE = None
 
@@ -46,6 +46,74 @@ class UC_LoraLoaderCLIPOnly(io.ComfyNode):
 
         clip_lora = load_lora_for_models(None, clip, lora, 0, strength_clip)[1]
         return io.NodeOutput(clip_lora)
+
+
+class UC_LoraLoaderModelOnly(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_LoraLoaderModelOnly",
+            display_name="Load LoRA for Model Only (Filtered)",
+            category="advanced/model",
+            description="Loads a LoRA into the diffusion model with layer regex and transformer block filtering.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Combo.Input(
+                    "lora_name",
+                    options=get_filename_list("loras"),
+                    tooltip="Choose a LoRA to apply to the diffusion model.",
+                ),
+                io.Float.Input(
+                    "strength_model",
+                    default=1.0,
+                    min=-100.0,
+                    max=100.0,
+                    step=0.01,
+                    tooltip="How strongly to modify the diffusion model. This value can be negative.",
+                ),
+                io.String.Input(
+                    "layer_filter",
+                    multiline=True,
+                    default="",
+                    tooltip="Substring regex patterns (one per line) to match layer names.",
+                ),
+                io.String.Input(
+                    "block_filter",
+                    default="",
+                    tooltip="Comma-separated block numbers or ranges (e.g. '1, 2, 3', '1,2,4-5,7') for transformer blocks.",
+                ),
+                io.Boolean.Input(
+                    "whitelist",
+                    default=True,
+                    tooltip="When True, matching layers are loaded (whitelist). When False, matching layers are excluded (blacklist).",
+                ),
+            ],
+            outputs=[
+                io.Model.Output("model", display_name="model"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        model,
+        lora_name: str,
+        strength_model: float,
+        layer_filter: str = "",
+        block_filter: str = "",
+        whitelist: bool = True,
+    ) -> io.NodeOutput:
+        global _LORA_LOADER_CACHE
+        new_model, _LORA_LOADER_CACHE = load_filtered_lora_for_model(
+            model=model,
+            lora_name=lora_name,
+            strength_model=strength_model,
+            layer_filter=layer_filter,
+            block_filter=block_filter,
+            whitelist=whitelist,
+            cache=_LORA_LOADER_CACHE,
+        )
+        return io.NodeOutput(new_model)
 
 
 class UC_SAM31CheckpointLoader(io.ComfyNode):

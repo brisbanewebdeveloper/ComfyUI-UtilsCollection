@@ -112,6 +112,7 @@ DESCRIPTIONS = {
     "UC_CompositeNodesGuide": "Returns documentation for background replacement, staged compositing, and MediaPipe face workflows.",
     "UC_HighResolutionTilingGuide": "Returns documentation for splitting, sampling, and recombining high-resolution image tiles.",
     "UC_LoraLoaderCLIPOnly": "Loads a LoRA into the text encoder without modifying the diffusion model.",
+    "UC_LoraLoaderModelOnly": "Loads a LoRA into the diffusion model with layer regex and transformer block filtering.",
     "UC_BoldFrakturTextStyle": "Converts supported text characters to bold Fraktur Unicode styling.",
     "UC_UnBoldFrakturTextStyle": "Converts bold Fraktur Unicode characters back to plain text.",
     "UC_WordJoiner": "Joins words with Unicode word-joiner characters.",
@@ -190,6 +191,7 @@ EXTRA_ALIASES = {
     "UC_TextGenerateQwen35SystemPrompt": ["llm", "vlm", "qwen", "chat", "system prompt"],
     "UC_VLMInputEmbeds": ["embedding export", "visual embeddings", "qwen embeddings", "krea embeddings"],
     "UC_LoraLoaderCLIPOnly": ["clip lora", "text encoder lora", "load lora"],
+    "UC_LoraLoaderModelOnly": ["model lora", "filter lora", "filtered lora", "load lora", "block filter"],
 }
 
 

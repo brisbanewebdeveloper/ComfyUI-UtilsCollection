@@ -183,6 +183,7 @@ paths = [
   "helpers/model_helpers.py",
 ]
 python_tests = [
+  "tests/test_loader_nodes.py",
   "tests/test_node_metadata.py",
   "tests/test_node_module_structure.py",
   "tests/test_sam3_tiling.py",

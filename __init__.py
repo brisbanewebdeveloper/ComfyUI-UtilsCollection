@@ -188,6 +188,7 @@ class SamplingUtils(ComfyExtension):
             UC_HighResolutionTilingGuide,
             UC_MarkdownPreview,
             UC_LoraLoaderCLIPOnly,
+            UC_LoraLoaderModelOnly,
             UC_SAM31CheckpointLoader,
             UC_SAM3Detect,
             UC_LoadImageWithAlpha,
