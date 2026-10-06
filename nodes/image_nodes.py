@@ -33,6 +33,7 @@ from ..helpers.image_helpers import (
     VIDEO_TEXT_TIMELINE_TEXT_STRUCTURE,
     VIDEO_TIMELINE_TEXT_STRUCTURE,
     downscale_nohalo_lohalo,
+    stitch_image_grid,
     images_to_video_timeline,
     mask_to_bounding_box,
     match_image_properties,
@@ -2421,3 +2422,77 @@ class UC_ImageBatchToList(io.ComfyNode):
     @classmethod
     def execute(cls, images):
         return ([images[i].unsqueeze(0) for i in range(images.shape[0])], )
+
+
+class UC_StitchImageGrid(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_StitchImageGrid",
+            display_name="Stitch Image Grid",
+            category="advanced/image",
+            description="Stitches a batch or list of images into a grid, row-by-row then vertically, using configurable spacing.",
+            is_input_list=True,
+            inputs=[
+                io.Image.Input("images", tooltip="Batch or list of images to stitch into a grid."),
+                io.Int.Input(
+                    "max_images_per_row",
+                    default=4,
+                    min=1,
+                    max=128,
+                    step=1,
+                    tooltip="Maximum number of images per row.",
+                ),
+                io.Int.Input(
+                    "max_rows",
+                    default=0,
+                    min=0,
+                    max=128,
+                    step=1,
+                    tooltip="Maximum number of rows. Set to 0 for unlimited rows.",
+                ),
+                io.Boolean.Input(
+                    "match_image_size",
+                    default=True,
+                    tooltip="Match image sizes during stitching.",
+                ),
+                io.Int.Input(
+                    "spacing_width",
+                    default=0,
+                    min=0,
+                    max=1024,
+                    step=2,
+                    tooltip="Width of spacing between images in pixels.",
+                ),
+                io.Combo.Input(
+                    "spacing_color",
+                    options=["white", "black", "red", "green", "blue"],
+                    default="white",
+                    tooltip="Color of spacing between images.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output("image", display_name="IMAGE"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        images,
+        max_images_per_row: int = 4,
+        max_rows: int = 0,
+        match_image_size: bool = True,
+        spacing_width: int = 0,
+        spacing_color: str = "white",
+    ) -> io.NodeOutput:
+        result = stitch_image_grid(
+            images=images,
+            max_images_per_row=max_images_per_row,
+            max_rows=max_rows,
+            match_image_size=match_image_size,
+            spacing_width=spacing_width,
+            spacing_color=spacing_color,
+        )
+        return io.NodeOutput(result)
+

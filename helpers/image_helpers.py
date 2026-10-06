@@ -2968,3 +2968,92 @@ def video_timeline_text(
             duration, timestamps, structured_timeline_text_structure
         ),
     )
+
+
+def stitch_image_grid(
+    images: Sequence[torch.Tensor] | torch.Tensor,
+    max_images_per_row: int = 4,
+    max_rows: int = 0,
+    match_image_size: bool = True,
+    spacing_width: int = 0,
+    spacing_color: str = "white",
+) -> torch.Tensor:
+    if isinstance(max_images_per_row, (list, tuple)):
+        max_images_per_row = max_images_per_row[0] if max_images_per_row else 4
+    if isinstance(max_rows, (list, tuple)):
+        max_rows = max_rows[0] if max_rows else 0
+    if isinstance(match_image_size, (list, tuple)):
+        match_image_size = match_image_size[0] if match_image_size else True
+    if isinstance(spacing_width, (list, tuple)):
+        spacing_width = spacing_width[0] if spacing_width else 0
+    if isinstance(spacing_color, (list, tuple)):
+        spacing_color = spacing_color[0] if spacing_color else "white"
+
+    flat_images: list[torch.Tensor] = []
+    if isinstance(images, (list, tuple)):
+        for item in images:
+            if isinstance(item, torch.Tensor):
+                if item.ndim == 4:
+                    for b in range(item.shape[0]):
+                        flat_images.append(item[b : b + 1])
+                elif item.ndim == 3:
+                    flat_images.append(item.unsqueeze(0))
+    elif isinstance(images, torch.Tensor):
+        if images.ndim == 4:
+            for b in range(images.shape[0]):
+                flat_images.append(images[b : b + 1])
+        elif images.ndim == 3:
+            flat_images.append(images.unsqueeze(0))
+
+    if not flat_images:
+        return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+    max_cols = max(1, int(max_images_per_row))
+    if max_rows > 0:
+        max_total = max_cols * int(max_rows)
+        flat_images = flat_images[:max_total]
+
+    if len(flat_images) == 1:
+        return flat_images[0]
+
+    try:
+        from comfy_extras.nodes_images import ImageStitch
+    except ImportError:
+        import sys
+        from pathlib import Path
+
+        comfy_root = str(Path(__file__).resolve().parents[3])
+        if comfy_root not in sys.path:
+            sys.path.insert(0, comfy_root)
+        from comfy_extras.nodes_images import ImageStitch
+
+    rows_images = [
+        flat_images[i : i + max_cols] for i in range(0, len(flat_images), max_cols)
+    ]
+
+    stitched_rows: list[torch.Tensor] = []
+    for row in rows_images:
+        current_row = row[0]
+        for next_img in row[1:]:
+            current_row = ImageStitch.execute(
+                current_row,
+                "right",
+                match_image_size,
+                spacing_width,
+                spacing_color,
+                next_img,
+            )[0]
+        stitched_rows.append(current_row)
+
+    grid = stitched_rows[0]
+    for next_row in stitched_rows[1:]:
+        grid = ImageStitch.execute(
+            grid,
+            "down",
+            match_image_size,
+            spacing_width,
+            spacing_color,
+            next_row,
+        )[0]
+
+    return grid
