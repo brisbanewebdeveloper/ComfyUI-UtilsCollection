@@ -875,17 +875,18 @@ def test_minimax_h3_media_config_rejects_invalid_video_latent_mode():
         )
 
 
-def test_minimax_h3_default_media_config_requires_one_visual():
-    with pytest.raises(ValueError, match="requires exactly one visual source"):
-        encoder_helpers.tokenize_minimax_h3_media_prompt(
-            None,
-            "prompt",
-            [object(), object()],
-            [Fraction(0)],
-            "0.0s",
-            encoder_helpers.MINIMAX_H3_MEDIA_STRUCTURE,
-            default_single_visual=True,
-        )
+def test_minimax_h3_default_media_config_allows_multiple_visuals():
+    clip = _MiniMaxH3TestClip()
+    tokens = encoder_helpers.tokenize_minimax_h3_media_prompt(
+        clip,
+        "prompt",
+        [torch.zeros(1, 64, 64, 3), torch.zeros(1, 64, 64, 3)],
+        [Fraction(0)],
+        "0.0s",
+        encoder_helpers.MINIMAX_H3_MEDIA_STRUCTURE,
+        default_single_visual=True,
+    )
+    assert len(tokens["qwen3vl_32b"][0]) > 0
 
 
 @pytest.mark.parametrize("video_fps", [0, 25, 2.5, True])
@@ -3817,3 +3818,31 @@ def test_visual_fusion_encoder_formula_defaults_are_blank():
     ]
     assert {value.id: value for value in schema.inputs}["semantic_anchor"].default is False
     assert list(inspect.signature(encoder_nodes.UC_AdvancedVisualConditioningEncode.execute).parameters)[-1] == "fusion_method"
+
+
+def test_temporal_fusion_encodes_multiple_references_with_ref_image_size_none_and_media_config():
+    clip = _MiniMaxH3TestClip()
+    ref1 = torch.zeros(1, 64, 64, 3)
+    ref2 = torch.ones(1, 64, 64, 3)
+    media_config = encoder_helpers.build_minimax_h3_media_config(None)
+    out = encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalFusion.execute(
+        clip=clip,
+        vae=None,
+        prompt="two references test",
+        width=64,
+        height=64,
+        length=22,
+        reference_images={"reference_image_1": ref1, "reference_image_2": ref2},
+        ref_image_size="none",
+        media_config=media_config,
+        enable_caching="disabled",
+    )
+    conditioning, latent = out.args
+    assert len(conditioning) == 1
+    assert conditioning[0][0].shape[0] == 1
+    images_tokenized = [
+        call.get("images")
+        for call in clip.tokenize_calls
+        if call.get("images") is not None
+    ]
+    assert any(len(imgs) == 2 for imgs in images_tokenized)

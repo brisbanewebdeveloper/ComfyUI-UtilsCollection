@@ -430,18 +430,8 @@ def tokenize_minimax_h3_media_prompt(
     continuation_frame_index=None,
 ):
     configured_video_frames = () if video_frames is None else video_frames
-    if (
-        default_single_visual
-        and pictures
-        and len(pictures) != 1
-        and not configured_video_frames
-        and default_video_frames is None
-    ):
-        raise ValueError(
-            "MiniMax H3 default media config requires exactly one visual source."
-        )
     effective_picture_timestamps = (
-        () if default_single_visual and not pictures else picture_timestamps
+        () if default_single_visual else picture_timestamps
     )
     if len(effective_picture_timestamps) > len(pictures):
         raise ValueError(
@@ -3961,12 +3951,6 @@ def execute_advanced_minimax_h3_image_to_video(
         if continuation_frames is not None
         else None
     )
-    default_media_index = None
-    if default_single_visual:
-        if first_frame is not None:
-            default_media_index = 0
-        elif flat_references:
-            default_media_index = int(last_frame is not None)
     config = dict(visual_fusion_config or {})
     visual_method = config.get("visual_fusion_method", "off")
     video_export_tokens = None
@@ -4008,16 +3992,7 @@ def execute_advanced_minimax_h3_image_to_video(
                     continuation_video_frames, vlm_video_resolution
                 )
         if media_config is not None:
-            collapse_default_picture = (
-                default_single_visual
-                and video_frames is None
-                and continuation_frames is None
-            )
-            presentation_images = (
-                [images[default_media_index]]
-                if collapse_default_picture and default_media_index is not None
-                else ([] if collapse_default_picture else images)
-            )
+            presentation_images = images
             default_video_frames = None
             default_video_timestamps = []
             if continuation_video_frames is not None:
