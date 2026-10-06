@@ -19,6 +19,9 @@ class H3CanvasPromptEditor {
     this.viewportHeight = 380;
     this.hitRegions = [];
     this.hoveredRegion = null;
+    this.activeMenu = null;
+    this.menuHitRegions = [];
+    this.hoveredMenuIndex = -1;
     this.textEditor = null;
     this.abort = new AbortController();
     this.restore(this.raw);
@@ -180,6 +183,15 @@ class H3CanvasPromptEditor {
     const x = graphX - this.node.pos[0];
     const y = graphY - this.node.pos[1];
 
+    if (this.activeMenu) {
+      const hitIdx = this.menuHitRegions.findIndex(item => this.contains(item, x, y));
+      if (hitIdx !== this.hoveredMenuIndex) {
+        this.hoveredMenuIndex = hitIdx;
+        canvas.setDirty(true, false);
+      }
+      return;
+    }
+
     if (x < 0 || x > (this.node.size[0] || 480) || y < 0 || y > (this.node.size[1] || 500)) {
       this.clearHoveredTooltip();
       return;
@@ -261,6 +273,94 @@ class H3CanvasPromptEditor {
     ctx.restore();
   }
 
+  openMenu(x, y, w, options, onSelect) {
+    this.closeTextEditor();
+    this.clearHoveredTooltip();
+    this.activeMenu = {
+      x,
+      y,
+      w: Math.max(150, w),
+      options,
+      onSelect,
+    };
+    app.canvas?.setDirty(true, true);
+  }
+
+  closeMenu() {
+    if (this.activeMenu) {
+      this.activeMenu = null;
+      this.hoveredMenuIndex = -1;
+      app.canvas?.setDirty(true, true);
+    }
+  }
+
+  drawActiveMenu(ctx, nodeWidth, yTop, nodeHeight) {
+    if (!this.activeMenu || !this.activeMenu.options?.length) return;
+    const { x, y, w, options, onSelect } = this.activeMenu;
+    const itemH = 24;
+    const pad = 4;
+    const totalH = options.length * itemH + pad * 2;
+
+    ctx.font = "11px sans-serif";
+    let maxTw = w;
+    options.forEach(opt => {
+      maxTw = Math.max(maxTw, ctx.measureText(opt.label).width + 28);
+    });
+    const mw = Math.min(nodeWidth - 20, maxTw);
+
+    let mx = Math.max(10, Math.min(nodeWidth - mw - 10, x));
+    let my = y;
+    if (my + totalH > yTop + nodeHeight - 10) {
+      my = Math.max(yTop + 10, y - totalH - 4);
+    }
+
+    ctx.save();
+    ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+    ctx.shadowBlur = 12;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 4;
+
+    this.box(ctx, mx, my, mw, totalH, "#11141a", "#60a5fa", 5);
+    ctx.shadowColor = "transparent";
+    ctx.shadowBlur = 0;
+
+    options.forEach((opt, idx) => {
+      const iy = my + pad + idx * itemH;
+      const active = Boolean(opt.active);
+      const isHovered = this.hoveredMenuIndex === idx;
+
+      const fill = active ? "#1d4ed8" : isHovered ? "#222733" : "transparent";
+      const textColor = active ? "#ffffff" : isHovered ? "#93c5fd" : "#cbd5e1";
+
+      if (fill !== "transparent") {
+        this.box(ctx, mx + 2, iy, mw - 4, itemH - 2, fill, null, 3);
+      }
+
+      ctx.fillStyle = textColor;
+      ctx.font = active ? "bold 11px sans-serif" : "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(opt.label, mx + 8, iy + (itemH - 2) / 2, mw - 16);
+
+      this.menuHitRegions.push({
+        x: mx,
+        y: iy,
+        w: mw,
+        h: itemH,
+        action: () => {
+          this.closeMenu();
+          if (opt.action) {
+            opt.action();
+          } else if (onSelect) {
+            onSelect(opt.value ?? opt);
+          }
+        },
+      });
+    });
+
+    ctx.restore();
+  }
+
   field(ctx, label, value, x, y, w, action) {
     this.text(ctx, label, x, y + 6, "#aeb5bf", "11px sans-serif");
     const rect = { x, y: y + 16, w, h: 26 };
@@ -276,6 +376,7 @@ class H3CanvasPromptEditor {
 
   openTextEditor(value, apply, rect, tagSpawner = null) {
     this.closeTextEditor();
+    this.closeMenu();
     this.clearHoveredTooltip();
     const container = document.createElement("div");
     container.className = "comfy-multiline-container";
@@ -394,6 +495,7 @@ class H3CanvasPromptEditor {
     if (this.textEditor) this.positionTextEditor();
     this.sync();
     this.hitRegions = [];
+    this.menuHitRegions = [];
     this.viewportY = y;
     this.viewportHeight = Math.max(360, (this.node.size[1] || 480) - y);
     const left = 10;
@@ -469,25 +571,20 @@ class H3CanvasPromptEditor {
       cy += 24;
 
       // 4 Action Buttons Bar: + Subject, + Picture, + Video, + Audio
-      const nextSubId = this.state.definitions.filter(d => d.kind === "subject").length + 1;
-      const nextPicId = this.state.definitions.filter(d => d.kind === "picture").length + 1;
-      const nextVidId = this.state.definitions.filter(d => d.kind === "video").length + 1;
-      const nextAudId = this.state.definitions.filter(d => d.kind === "audio").length + 1;
-
       const btnW = Math.floor((available - 18) / 4);
-      this.button(ctx, left, sy(cy), btnW, 26, `+ <Subject ${nextSubId}>`, () => {
+      this.button(ctx, left, sy(cy), btnW, 26, "+ Subject", () => {
         this.change(() => addDefinition(this.state, "subject", { hasRef: false }));
       }, true, "center", false, false, "Adds a character, creature, or key object to describe appearance, clothing, or link them to a reference image.");
 
-      this.button(ctx, left + btnW + 6, sy(cy), btnW, 26, `+ <Picture ${nextPicId}>`, () => {
+      this.button(ctx, left + btnW + 6, sy(cy), btnW, 26, "+ Picture", () => {
         this.change(() => addDefinition(this.state, "picture", { role: "first_frame" }));
       }, false, "center", false, false, "Adds a reference picture definition, such as a starting frame, ending frame, or storyboard composition.");
 
-      this.button(ctx, left + (btnW + 6) * 2, sy(cy), btnW, 26, `+ <Video ${nextVidId}>`, () => {
+      this.button(ctx, left + (btnW + 6) * 2, sy(cy), btnW, 26, "+ Video", () => {
         this.change(() => addDefinition(this.state, "video", { role: "edit" }));
       }, false, "center", false, false, "Adds a source video reference for video editing, motion transfer, or video continuation.");
 
-      this.button(ctx, left + (btnW + 6) * 3, sy(cy), available - (btnW + 6) * 3, 26, `+ <Audio ${nextAudId}>`, () => {
+      this.button(ctx, left + (btnW + 6) * 3, sy(cy), available - (btnW + 6) * 3, 26, "+ Audio", () => {
         this.change(() => addDefinition(this.state, "audio", { role: "timbre" }));
       }, false, "center", false, false, "Adds a reference audio track to copy a speaker's voice timbre or reuse background music.");
       cy += 34;
@@ -499,7 +596,8 @@ class H3CanvasPromptEditor {
 
       this.state.definitions.forEach((item, idx) => {
         const cardY = sy(cy);
-        const cardH = 86;
+        const isCustom = item.role === "custom" || item.kind === "subject";
+        const cardH = isCustom ? 96 : 68;
         this.box(ctx, left, cardY, available, cardH, "#22262e", "#444b56", 4);
 
         // Header badge & Tag
@@ -510,142 +608,243 @@ class H3CanvasPromptEditor {
           audio: { bg: "#4a1d96", border: "#a855f7", tag: `<Audio ${item.id}>` },
         };
         const cfg = kindColors[item.kind] || kindColors.subject;
-        this.box(ctx, left + 8, cardY + 8, 88, 20, cfg.bg, cfg.border, 3);
+        this.box(ctx, left + 8, cardY + 7, 88, 22, cfg.bg, cfg.border, 3);
         this.text(ctx, cfg.tag, left + 14, cardY + 18, "#ffffff", "bold 11px monospace");
 
-        // Action buttons (Remove / Up / Down)
-        this.button(ctx, right - 28, cardY + 6, 24, 22, "×", () => {
+        // Action buttons (Remove / Up / Down) neatly aligned to right
+        this.button(ctx, right - 26, cardY + 7, 22, 22, "×", () => {
           this.change(() => removeDefinition(this.state, idx));
         }, false, "center", false, true, "Removes this reference definition.");
-        this.button(ctx, right - 54, cardY + 6, 22, 22, "↑", () => {
+        this.button(ctx, right - 50, cardY + 7, 20, 22, "↑", () => {
           this.change(() => moveItem(this.state.definitions, idx, -1));
         }, false, "center", false, false, "Moves this item up in order.");
-        this.button(ctx, right - 78, cardY + 6, 22, 22, "↓", () => {
+        this.button(ctx, right - 72, cardY + 7, 20, 22, "↓", () => {
           this.change(() => moveItem(this.state.definitions, idx, 1));
         }, false, "center", false, false, "Moves this item down in order.");
 
         // Config Controls per Kind
         if (item.kind === "subject") {
-          // Reference Switcher: Standalone (No Ref) vs Referenced
-          const noRefW = this.chip(ctx, left + 104, cardY + 7, item.hasRef ? "[With Ref]" : "[Standalone (No Ref)]", () => {
-            this.change(() => { item.hasRef = !item.hasRef; });
-          }, !item.hasRef, item.hasRef, item.hasRef ? "This character takes visual identity and clothing from a reference Picture or Video." : "This character is described entirely through text without requiring an image reference.");
+          // Collapsing Reference Selector
+          const selLabel = item.hasRef
+            ? `Ref: <${item.refType === "video" ? "Video" : "Picture"} ${item.refIndex || 1}> ▾`
+            : "Mode: Standalone ▾";
+          ctx.font = "11px sans-serif";
+          const selW = Math.max(130, Math.ceil(ctx.measureText(selLabel).width) + 20);
 
-          if (item.hasRef) {
-            const pic1W = this.chip(ctx, left + 110 + noRefW, cardY + 7, "<Pic 1>", () => {
-              this.change(() => { item.refType = "picture"; item.refIndex = 1; });
-            }, item.refType === "picture" && item.refIndex === 1);
+          this.button(ctx, left + 102, cardY + 7, selW, 22, selLabel, () => {
+            const menuOpts = [
+              {
+                label: "Standalone (No Reference)",
+                active: !item.hasRef,
+                action: () => this.change(() => { item.hasRef = false; }),
+              },
+            ];
 
-            const pic2W = this.chip(ctx, left + 114 + noRefW + pic1W, cardY + 7, "<Pic 2>", () => {
-              this.change(() => { item.refType = "picture"; item.refIndex = 2; });
-            }, item.refType === "picture" && item.refIndex === 2);
-
-            const vid1W = this.chip(ctx, left + 118 + noRefW + pic1W + pic2W, cardY + 7, "<Vid 1>", () => {
-              this.change(() => { item.refType = "video"; item.refIndex = 1; });
-            }, item.refType === "video" && item.refIndex === 1);
-
-            this.chip(ctx, left + 122 + noRefW + pic1W + pic2W + vid1W, cardY + 7, "Idx #", event => {
-              this.editSingleLine("Reference Index Number", String(item.refIndex || 1), val => {
-                const n = parseInt(val, 10);
-                if (n > 0) item.refIndex = n;
-              }, event);
+            const pics = this.state.definitions.filter(d => d.kind === "picture");
+            pics.forEach(p => {
+              menuOpts.push({
+                label: `Reference <Picture ${p.id}>`,
+                active: item.hasRef && item.refType === "picture" && item.refIndex === p.id,
+                action: () => this.change(() => { item.hasRef = true; item.refType = "picture"; item.refIndex = p.id; }),
+              });
             });
-          }
 
-          // Field: details/traits
-          const prefixLabel = item.hasRef
-            ? `<Subject ${item.id}> is fully referenced in <${item.refType === "video" ? "Video" : "Picture"} ${item.refIndex}>:`
-            : `<Subject ${item.id}> is:`;
-          this.text(ctx, prefixLabel, left + 10, cardY + 40, "#cbd5e1", "11px monospace", available - 20);
+            const vids = this.state.definitions.filter(d => d.kind === "video");
+            vids.forEach(v => {
+              menuOpts.push({
+                label: `Reference <Video ${v.id}>`,
+                active: item.hasRef && item.refType === "video" && item.refIndex === v.id,
+                action: () => this.change(() => { item.hasRef = true; item.refType = "video"; item.refIndex = v.id; }),
+              });
+            });
 
-          this.field(ctx, "Visual Characteristics & Clothing", item.text, left + 8, cardY + 42, available - 16, (_ev, _pos, rect) => {
-            this.openTextEditor(item.text, val => { item.text = val; }, rect, availableTags);
-          });
+            if (!pics.length) {
+              menuOpts.push({
+                label: "Reference <Picture 1>",
+                active: item.hasRef && item.refType === "picture" && item.refIndex === 1,
+                action: () => this.change(() => { item.hasRef = true; item.refType = "picture"; item.refIndex = 1; }),
+              });
+            }
+
+            menuOpts.push({
+              label: "Custom Picture / Video #...",
+              active: false,
+              action: () => {
+                this.editSingleLine("Reference Media Tag (e.g. Picture 1 or Video 2)", `${item.refType === "video" ? "Video" : "Picture"} ${item.refIndex || 1}`, val => {
+                  if (!val) return;
+                  const m = val.match(/(picture|video)\s*(\d+)/i);
+                  if (m) {
+                    item.hasRef = true;
+                    item.refType = m[1].toLowerCase();
+                    item.refIndex = parseInt(m[2], 10) || 1;
+                  }
+                });
+              },
+            });
+
+            this.openMenu(left + 102, cardY + 31, selW + 30, menuOpts);
+          }, item.hasRef, "center", item.hasRef, false, "Click to choose standalone mode or reference picture/video.");
+
+          // Row 2: Clean single non-overlapping label (at cardY + 38)
+          const descLabel = item.hasRef
+            ? `<Subject ${item.id}> reference traits in <${item.refType === "video" ? "Video" : "Picture"} ${item.refIndex || 1}>:`
+            : `<Subject ${item.id}> visual characteristics & clothing:`;
+          this.text(ctx, descLabel, left + 10, cardY + 38, "#93c5fd", "bold 11px monospace", available - 20);
+
+          // Row 3: Click to edit box (at cardY + 54, height 30)
+          const editBoxH = 30;
+          this.box(ctx, left + 8, cardY + 54, available - 16, editBoxH, "#121418", "#333842", 3);
+          const displayText = item.text || "Click to describe clothing, appearance, and visual details...";
+          this.text(ctx, displayText, left + 14, cardY + 69, item.text ? "#f8fafc" : "#64748b", "11px sans-serif", available - 28);
+          this.hit(left + 8, cardY + 54, available - 16, editBoxH, () => {
+            this.openTextEditor(item.text, val => { item.text = val; }, { x: left + 8, y: cardY + 54, w: available - 16, h: editBoxH }, availableTags);
+          }, "Click to edit visual characteristics & clothing.");
         }
         else if (item.kind === "picture") {
-          // Role selector for Standalone Picture
-          const roles = [
-            { id: "first_frame", label: "First Frame (00.00s)", tip: "Locks this picture as the exact starting frame at 00.00s." },
-            { id: "final_frame", label: "Final Frame", tip: "Locks this picture as the exact ending frame at the end of the video." },
-            { id: "storyboard", label: "Storyboard", tip: "Uses this picture as a camera angle and composition reference for shots." },
-            { id: "custom", label: "Custom", tip: "Custom image reference role." },
-          ];
-          let rx = left + 104;
-          roles.forEach(r => {
-            rx += this.chip(ctx, rx, cardY + 7, r.label, () => {
-              this.change(() => { item.role = r.id; });
-            }, item.role === r.id, false, r.tip) + 4;
-          });
+          const roleLabels = {
+            first_frame: "First Frame (00.00s)",
+            final_frame: "Final Frame",
+            storyboard: "Storyboard",
+            custom: "Custom Role",
+          };
+          const curLabel = `Role: ${roleLabels[item.role] || "First Frame"} ▾`;
+          ctx.font = "11px sans-serif";
+          const selW = Math.max(140, Math.ceil(ctx.measureText(curLabel).width) + 20);
+
+          this.button(ctx, left + 102, cardY + 7, selW, 22, curLabel, () => {
+            this.openMenu(left + 102, cardY + 31, selW + 20, [
+              { label: "First Frame (00.00s)", active: item.role === "first_frame", action: () => this.change(() => { item.role = "first_frame"; }) },
+              { label: "Final Frame", active: item.role === "final_frame", action: () => this.change(() => { item.role = "final_frame"; }) },
+              { label: "Storyboard", active: item.role === "storyboard", action: () => this.change(() => { item.role = "storyboard"; }) },
+              { label: "Custom Role Description", active: item.role === "custom", action: () => this.change(() => { item.role = "custom"; }) },
+            ]);
+          }, true, "center", false, false, "Click to select how this reference picture is used.");
 
           if (item.role === "custom") {
-            this.field(ctx, "Picture Anchor Role Description", item.text, left + 8, cardY + 42, available - 16, (_ev, _pos, rect) => {
-              this.openTextEditor(item.text, val => { item.text = val; }, rect, availableTags);
-            });
+            const editBoxH = 30;
+            this.text(ctx, `<Picture ${item.id}> Custom Role Description:`, left + 10, cardY + 38, "#93c5fd", "bold 11px monospace", available - 20);
+            this.box(ctx, left + 8, cardY + 54, available - 16, editBoxH, "#121418", "#333842", 3);
+            const displayText = item.text || "Click to describe custom picture role...";
+            this.text(ctx, displayText, left + 14, cardY + 69, item.text ? "#f8fafc" : "#64748b", "11px sans-serif", available - 28);
+            this.hit(left + 8, cardY + 54, available - 16, editBoxH, () => {
+              this.openTextEditor(item.text, val => { item.text = val; }, { x: left + 8, y: cardY + 54, w: available - 16, h: editBoxH }, availableTags);
+            }, "Click to edit picture role description.");
           } else {
             let roleSummary = `<Picture ${item.id}> is the fixed first frame anchor at 00.00s.`;
             if (item.role === "final_frame") roleSummary = `<Picture ${item.id}> is the fixed final frame anchor at video endpoint.`;
             else if (item.role === "storyboard") roleSummary = `<Picture ${item.id}> is a storyboard reference for [Shot 1] and [Shot 2].`;
-            this.text(ctx, roleSummary, left + 10, cardY + 48, "#94a3b8", "11px monospace", available - 20);
+            this.text(ctx, roleSummary, left + 10, cardY + 44, "#94a3b8", "11px monospace", available - 20);
           }
         }
         else if (item.kind === "video") {
-          // Role selector for Standalone Video
-          const vRoles = [
-            { id: "edit", label: "Edit Source", tip: "Uses this video as the source video to edit or modify." },
-            { id: "continue", label: "Continuation", tip: "Extends this video forward in time from its ending." },
-            { id: "structure", label: "Pacing & Motion", tip: "Uses this video as a guide for camera motion and rhythm without copying characters." },
-            { id: "custom", label: "Custom", tip: "Custom video reference role." },
-          ];
-          let vx = left + 104;
-          vRoles.forEach(r => {
-            vx += this.chip(ctx, vx, cardY + 7, r.label, () => {
-              this.change(() => { item.role = r.id; });
-            }, item.role === r.id, false, r.tip) + 4;
-          });
+          const vRoleLabels = {
+            edit: "Edit Source",
+            continue: "Continuation",
+            structure: "Pacing & Motion",
+            custom: "Custom Role",
+          };
+          const curVLabel = `Role: ${vRoleLabels[item.role] || "Edit Source"} ▾`;
+          ctx.font = "11px sans-serif";
+          const selW = Math.max(140, Math.ceil(ctx.measureText(curVLabel).width) + 20);
+
+          this.button(ctx, left + 102, cardY + 7, selW, 22, curVLabel, () => {
+            this.openMenu(left + 102, cardY + 31, selW + 20, [
+              { label: "Edit Source (Video to modify)", active: item.role === "edit", action: () => this.change(() => { item.role = "edit"; }) },
+              { label: "Continuation (Extend in time)", active: item.role === "continue", action: () => this.change(() => { item.role = "continue"; }) },
+              { label: "Pacing & Motion (Camera guide)", active: item.role === "structure", action: () => this.change(() => { item.role = "structure"; }) },
+              { label: "Custom Role Description", active: item.role === "custom", action: () => this.change(() => { item.role = "custom"; }) },
+            ]);
+          }, true, "center", false, false, "Click to select how this reference video is used.");
 
           if (item.role === "custom") {
-            this.field(ctx, "Video Role Description", item.text, left + 8, cardY + 42, available - 16, (_ev, _pos, rect) => {
-              this.openTextEditor(item.text, val => { item.text = val; }, rect, availableTags);
-            });
+            const editBoxH = 30;
+            this.text(ctx, `<Video ${item.id}> Custom Role Description:`, left + 10, cardY + 38, "#93c5fd", "bold 11px monospace", available - 20);
+            this.box(ctx, left + 8, cardY + 54, available - 16, editBoxH, "#121418", "#333842", 3);
+            const displayText = item.text || "Click to describe custom video role...";
+            this.text(ctx, displayText, left + 14, cardY + 69, item.text ? "#f8fafc" : "#64748b", "11px sans-serif", available - 28);
+            this.hit(left + 8, cardY + 54, available - 16, editBoxH, () => {
+              this.openTextEditor(item.text, val => { item.text = val; }, { x: left + 8, y: cardY + 54, w: available - 16, h: editBoxH }, availableTags);
+            }, "Click to edit video role description.");
           } else {
             let vSummary = `<Video ${item.id}> is the source video for the target video edit.`;
             if (item.role === "continue") vSummary = `<Video ${item.id}> is the source video for continuation.`;
             else if (item.role === "structure") vSummary = `<Video ${item.id}> provides camera movement, cuts, and temporal structure.`;
-            this.text(ctx, vSummary, left + 10, cardY + 48, "#94a3b8", "11px monospace", available - 20);
+            this.text(ctx, vSummary, left + 10, cardY + 44, "#94a3b8", "11px monospace", available - 20);
           }
         }
         else if (item.kind === "audio") {
-          // Role selector for Standalone Audio
-          const aRoles = [
-            { id: "timbre", label: "Voice Timbre", tip: "Copies the vocal sound and tone of this audio onto a speaking character." },
-            { id: "full", label: "Full Track", tip: "Reuses this audio track as the complete final sound of the video." },
-            { id: "music", label: "Music & Rhythm", tip: "Uses this audio as a reference for background music style and rhythm." },
-            { id: "custom", label: "Custom", tip: "Custom audio reference role." },
-          ];
-          let ax = left + 104;
-          aRoles.forEach(r => {
-            ax += this.chip(ctx, ax, cardY + 7, r.label, () => {
-              this.change(() => { item.role = r.id; });
-            }, item.role === r.id, false, r.tip) + 4;
-          });
+          const aRoleLabels = {
+            timbre: "Voice Timbre",
+            full: "Full Track",
+            music: "Music & Rhythm",
+            custom: "Custom Role",
+          };
+          const curALabel = `Role: ${aRoleLabels[item.role] || "Voice Timbre"} ▾`;
+          ctx.font = "11px sans-serif";
+          const selW = Math.max(130, Math.ceil(ctx.measureText(curALabel).width) + 20);
+
+          this.button(ctx, left + 102, cardY + 7, selW, 22, curALabel, () => {
+            this.openMenu(left + 102, cardY + 31, selW + 20, [
+              { label: "Voice Timbre (Character vocal sound)", active: item.role === "timbre", action: () => this.change(() => { item.role = "timbre"; }) },
+              { label: "Full Track (Complete final audio)", active: item.role === "full", action: () => this.change(() => { item.role = "full"; }) },
+              { label: "Music & Rhythm (BGM reference)", active: item.role === "music", action: () => this.change(() => { item.role = "music"; }) },
+              { label: "Custom Role Description", active: item.role === "custom", action: () => this.change(() => { item.role = "custom"; }) },
+            ]);
+          }, true, "center", false, false, "Click to select how this reference audio is used.");
 
           if (item.role === "timbre") {
-            this.chip(ctx, ax, cardY + 7, `Speaker: <Subj ${item.targetSubject || 1}>`, event => {
-              this.editSingleLine("Target Subject ID for Voice Timbre", String(item.targetSubject || 1), val => {
-                const n = parseInt(val, 10);
-                if (n > 0) item.targetSubject = n;
-              }, event);
-            });
-            const timbreSummary = `<Audio ${item.id}> is the voice-timbre reference for <Subject ${item.targetSubject || 1}> (S${item.targetSubject || 1}).`;
-            this.text(ctx, timbreSummary, left + 10, cardY + 48, "#94a3b8", "11px monospace", available - 20);
-          } else if (item.role === "custom") {
-            this.field(ctx, "Audio Role Description", item.text, left + 8, cardY + 42, available - 16, (_ev, _pos, rect) => {
-              this.openTextEditor(item.text, val => { item.text = val; }, rect, availableTags);
-            });
+            const spkLabel = `Speaker: <Subj ${item.targetSubject || 1}> ▾`;
+            const spkW = Math.max(120, Math.ceil(ctx.measureText(spkLabel).width) + 18);
+            const spkX = left + 108 + selW;
+
+            this.button(ctx, spkX, cardY + 7, spkW, 22, spkLabel, () => {
+              const spkOpts = [];
+              const subs = this.state.definitions.filter(d => d.kind === "subject");
+              if (subs.length) {
+                subs.forEach(s => {
+                  spkOpts.push({
+                    label: `Speaker: <Subject ${s.id}> (S${s.id})`,
+                    active: (item.targetSubject || 1) === s.id,
+                    action: () => this.change(() => { item.targetSubject = s.id; }),
+                  });
+                });
+              } else {
+                [1, 2, 3].forEach(id => {
+                  spkOpts.push({
+                    label: `Speaker: <Subject ${id}> (S${id})`,
+                    active: (item.targetSubject || 1) === id,
+                    action: () => this.change(() => { item.targetSubject = id; }),
+                  });
+                });
+              }
+              spkOpts.push({
+                label: "Custom Subject ID...",
+                active: false,
+                action: () => {
+                  this.editSingleLine("Target Subject ID number for Voice Timbre", String(item.targetSubject || 1), val => {
+                    const n = parseInt(val, 10);
+                    if (n > 0) item.targetSubject = n;
+                  });
+                },
+              });
+              this.openMenu(spkX, cardY + 31, spkW + 20, spkOpts);
+            }, false, "center", false, false, "Select which subject receives this voice timbre.");
+          }
+
+          if (item.role === "custom") {
+            const editBoxH = 30;
+            this.text(ctx, `<Audio ${item.id}> Custom Role Description:`, left + 10, cardY + 38, "#93c5fd", "bold 11px monospace", available - 20);
+            this.box(ctx, left + 8, cardY + 54, available - 16, editBoxH, "#121418", "#333842", 3);
+            const displayText = item.text || "Click to describe custom audio role...";
+            this.text(ctx, displayText, left + 14, cardY + 69, item.text ? "#f8fafc" : "#64748b", "11px sans-serif", available - 28);
+            this.hit(left + 8, cardY + 54, available - 16, editBoxH, () => {
+              this.openTextEditor(item.text, val => { item.text = val; }, { x: left + 8, y: cardY + 54, w: available - 16, h: editBoxH }, availableTags);
+            }, "Click to edit audio role description.");
           } else {
             let aSummary = `<Audio ${item.id}> is reused as the target video's complete final audio track.`;
-            if (item.role === "music") aSummary = `<Audio ${item.id}> is the music-style and rhythm reference.`;
-            this.text(ctx, aSummary, left + 10, cardY + 48, "#94a3b8", "11px monospace", available - 20);
+            if (item.role === "timbre") aSummary = `<Audio ${item.id}> is the voice-timbre reference for <Subject ${item.targetSubject || 1}> (S${item.targetSubject || 1}).`;
+            else if (item.role === "music") aSummary = `<Audio ${item.id}> is the music-style and rhythm reference.`;
+            this.text(ctx, aSummary, left + 10, cardY + 44, "#94a3b8", "11px monospace", available - 20);
           }
         }
 
@@ -749,47 +948,54 @@ class H3CanvasPromptEditor {
 
       this.state.retention.forEach((item, idx) => {
         const cardY = sy(cy);
-        const cardH = 88;
+        const cardH = 96;
         this.box(ctx, left, cardY, available, cardH, "#22262e", "#444b56", 4);
 
         // Label Badge
-        this.box(ctx, left + 8, cardY + 8, 90, 20, "#1e293b", "#3b82f6", 3);
+        this.box(ctx, left + 8, cardY + 7, 90, 22, "#1e293b", "#3b82f6", 3);
         this.text(ctx, item.label || "<Label>", left + 14, cardY + 18, "#ffffff", "bold 11px monospace");
 
-        // Marker Selector (cycles on click)
+        // Collapsing Marker Selector
         const isAudio = item.label?.startsWith("<Audio");
         const markers = isAudio ? AUDIO_MARKERS : VISIBLE_MARKERS;
-        const markerLabel = `Marker: ${item.marker}`;
+        const markerLabel = `Marker: ${item.marker} ▾`;
         ctx.font = "11px sans-serif";
-        const mw = Math.ceil(ctx.measureText(markerLabel).width) + 16;
-        this.button(ctx, left + 106, cardY + 7, mw, 22, markerLabel, () => {
-          this.change(() => {
-            const nextIdx = (markers.indexOf(item.marker) + 1) % markers.length;
-            item.marker = markers[nextIdx];
-          });
-        }, true, "center", false, false, "Cycles through retention markers: attribute transfer, partially preserved, fully preserved, or weak reference.");
+        const mw = Math.max(140, Math.ceil(ctx.measureText(markerLabel).width) + 20);
+
+        this.button(ctx, left + 104, cardY + 7, mw, 22, markerLabel, () => {
+          const markerOpts = markers.map(m => ({
+            label: m,
+            active: item.marker === m,
+            action: () => this.change(() => { item.marker = m; }),
+          }));
+          this.openMenu(left + 104, cardY + 31, mw + 20, markerOpts);
+        }, true, "center", false, false, "Click to choose retention marker.");
 
         // Autofill default button
-        this.button(ctx, left + 112 + mw, cardY + 7, 72, 22, "Autofill", () => {
+        this.button(ctx, left + 110 + mw, cardY + 7, 70, 22, "Autofill", () => {
           this.change(() => {
             item.text = defaultRetentionText(item.label, item.marker);
           });
         }, false, "center", false, false, "Fills in recommended retention description text for this marker.");
 
         // Remove button
-        this.button(ctx, right - 28, cardY + 6, 24, 22, "×", () => {
+        this.button(ctx, right - 26, cardY + 7, 22, 22, "×", () => {
           this.change(() => {
             this.state.retention.splice(idx, 1);
           });
         }, false, "center", false, true, "Removes this retention item.");
 
-        // Formatted preview line
-        this.text(ctx, `${item.label}: ${item.marker} -`, left + 10, cardY + 40, "#94a3b8", "11px monospace", available - 20);
+        // Row 2: Formatted subtitle line (no overlap!)
+        this.text(ctx, `${item.label}: ${item.marker} - descriptor:`, left + 10, cardY + 38, "#93c5fd", "bold 11px monospace", available - 20);
 
-        // Descriptor text field
-        this.field(ctx, "Relationship Descriptor", item.text, left + 8, cardY + 42, available - 16, (_ev, _pos, rect) => {
-          this.openTextEditor(item.text, val => { item.text = val; }, rect, availableTags);
-        });
+        // Row 3: Click-to-edit box (clean vertical separation!)
+        const editBoxH = 30;
+        this.box(ctx, left + 8, cardY + 54, available - 16, editBoxH, "#121418", "#333842", 3);
+        const displayText = item.text || "Click to describe retention/transfer relationship...";
+        this.text(ctx, displayText, left + 14, cardY + 69, item.text ? "#f8fafc" : "#64748b", "11px sans-serif", available - 28);
+        this.hit(left + 8, cardY + 54, available - 16, editBoxH, () => {
+          this.openTextEditor(item.text, val => { item.text = val; }, { x: left + 8, y: cardY + 54, w: available - 16, h: editBoxH }, availableTags);
+        }, "Click to edit retention relationship descriptor.");
 
         cy += cardH + 8;
       });
@@ -1047,8 +1253,13 @@ class H3CanvasPromptEditor {
     const previewLine = promptPreview.replace(/\n+/g, " ❚ ");
     this.text(ctx, previewLine, left + 6, previewY + 34, "#94a3b8", "11px monospace", available - 12);
 
+    // Render active collapsing menu (if open)
+    if (this.activeMenu) {
+      this.drawActiveMenu(ctx, width, y, this.viewportHeight);
+    }
+
     // Canvas Draw-Loop Tooltip (Offset upwards on vertical axis)
-    if (this.hoveredRegion?.tooltip) {
+    if (!this.activeMenu && this.hoveredRegion?.tooltip) {
       this.drawCanvasTooltip(ctx, this.hoveredRegion, width, y, this.viewportHeight);
     }
   }
@@ -1056,6 +1267,17 @@ class H3CanvasPromptEditor {
   mouse(event, position) {
     if (event.button !== 0 || !/up$/.test(event.type)) return true;
     this.clearHoveredTooltip();
+
+    if (this.activeMenu) {
+      const hitMenu = this.menuHitRegions.find(item => this.contains(item, position[0], position[1]));
+      if (hitMenu) {
+        hitMenu.action();
+        return true;
+      }
+      this.closeMenu();
+      return true;
+    }
+
     const region = this.hitRegions.find(item => this.contains(item, position[0], position[1]));
     region?.action(event, position);
     return true;
@@ -1063,6 +1285,7 @@ class H3CanvasPromptEditor {
 
   onWheel(event) {
     if (this.textEditor) this.closeTextEditor();
+    this.closeMenu();
     this.clearHoveredTooltip();
     if (event.ctrlKey || event.metaKey || !this.state) return;
     const canvas = app.canvas;
