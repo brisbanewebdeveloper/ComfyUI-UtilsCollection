@@ -1,3 +1,4 @@
+from typing import Any, Optional
 import numpy
 import torch
 from scipy.interpolate import PchipInterpolator
@@ -191,7 +192,25 @@ def sigma_curve_pchip_scheduler(
     return result
 
 
+def dmad_scheduler(
+    model_sampling: Any = None,
+    steps: int = 4,
+    shift: Optional[float] = None,
+) -> torch.Tensor:
+    """Shifted linear grid matching DMAD / MiniMax H3 student training.
+
+    Generates steps + 1 sigma values from 1.0 down to 0.0 with time shift applied.
+    Defaults to model_sampling.shift (or 12.0 for H3 video).
+    """
+    if shift is None:
+        shift = getattr(model_sampling, "shift", 12.0) if model_sampling is not None else 12.0
+    t = torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float32)
+    s = float(shift)
+    return s * t / (1.0 + (s - 1.0) * t)
+
+
 SCHEDULER_HANDLERS = {
+    "dmad": dmad_scheduler,
     "sigmoid_offset": sigmoid_offset_scheduler,
     "power_shift": power_shift_scheduler,
     "radiance_shift": radiance_shift_scheduler,

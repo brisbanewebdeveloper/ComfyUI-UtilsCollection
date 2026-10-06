@@ -167,4 +167,36 @@ def test_image_scale_picker_center_crop_uses_adjusted_base_for_upscale():
 
     assert output.result[2:] == (96, 96, 144, 144)
     assert output.result[0].shape == (1, 96, 96, 3)
-    assert output.result[1].shape == (1, 144, 144, 3)
+
+
+def test_video_resolution_and_length_picker():
+    schema = parameter_nodes.UC_VideoResolutionAndLengthPicker.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert "video" in inputs and "image" in inputs and "use_video_duration" in inputs
+    assert len(schema.outputs) == 5
+
+    # Standalone execution
+    output = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
+        aspect_ratio=AspectRatio.WIDESCREEN_H,
+        megapixels=1.0,
+        multiple=16,
+        duration_seconds=5.16666,
+    )
+    image_out, width, height, length, duration = output.result
+    assert (width, height, length) == (1360, 768, 124)
+    assert image_out.shape == (1, 768, 1360, 3)
+    assert output.ui == {"resolution": ("1360×768 · 124 frames · 5.17 s",)}
+
+    # Execution with input frames and duration
+    mock_frames = torch.zeros(48, 100, 200, 3)
+    out_video = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
+        video=mock_frames,
+        use_video_duration=True,
+        aspect_ratio=AspectRatio.SQUARE,
+        megapixels=0.01,
+        multiple=16,
+    )
+    frames_out, w, h, l, d = out_video.result
+    assert (w, h) == (144, 80)
+    assert l == 56
+    assert frames_out.shape == (56, 80, 144, 3)

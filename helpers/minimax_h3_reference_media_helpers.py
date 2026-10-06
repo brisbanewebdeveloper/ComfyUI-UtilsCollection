@@ -60,19 +60,19 @@ def prepare_vlm_image(image: torch.Tensor, vlm_resolution: int) -> torch.Tensor:
     """Prepare a visual tensor for Qwen VLM presentation."""
     if not torch.is_tensor(image) or image.ndim != 4:
         raise ValueError("Expected 4D image tensor.")
-    target = image[0]
+    target = image[:1]
     if target.shape[-1] > 3:
         target = target[..., :3]
-    h, w, c = target.shape
+    b, h, w, c = target.shape
     if 256 <= vlm_resolution <= 4096:
         area = float(h * w)
         scale = math.sqrt(float(vlm_resolution * vlm_resolution) / area)
         th = max(28, round(h * scale / 28) * 28)
         tw = max(28, round(w * scale / 28) * 28)
         if (th, tw) != (h, w):
-            chw = target.permute(2, 0, 1).unsqueeze(0)
+            chw = target.permute(0, 3, 1, 2)
             resized = F.interpolate(chw, size=(th, tw), mode="bilinear", align_corners=False)
-            target = resized.squeeze(0).permute(1, 2, 0)
+            target = resized.permute(0, 2, 3, 1)
     return target
 
 
@@ -148,12 +148,37 @@ def prepare_minimax_h3_reference_video(
     frames = video
     if frames.shape[-1] > 3:
         frames = frames[..., :3]
-    aligned_h = (frames.shape[1] // 16) * 16
-    aligned_w = (frames.shape[2] // 16) * 16
-    if aligned_h != frames.shape[1] or aligned_w != frames.shape[2]:
+
+    # Snap frames to H3's 17k+5 temporal grid
+    n = min(frames.shape[0], int(frame_count))
+    if n < 5:
+        raise ValueError("MiniMax H3 reference videos need at least 5 frames (~0.2s at 24 fps).")
+    while n % 17 != 5:
+        n -= 1
+    frames = frames[:n]
+
+    # Canvas adaptation and strict 32-pixel spatial alignment for DiT 2x2 patches on 16x VAE
+    source_height, source_width = frames.shape[1:3]
+    ratio = source_width / source_height
+    if ratio >= 1.0:
+        target_width, target_height = 768.0 * ratio, 768.0
+    else:
+        target_width, target_height = 768.0, 768.0 / ratio
+    if target_width * target_height > 768.0 * 1344.0:
+        scale = math.sqrt((768.0 * 1344.0) / (target_width * target_height))
+        target_width *= scale
+        target_height *= scale
+    target_width = max(32, round(target_width / 32) * 32)
+    target_height = max(32, round(target_height / 32) * 32)
+    if source_width * source_height < target_width * target_height:
+        target_width = max(32, round(source_width / 32) * 32)
+        target_height = max(32, round(source_height / 32) * 32)
+
+    if (frames.shape[2], frames.shape[1]) != (target_width, target_height):
         samples = frames.movedim(-1, 1)
-        samples = comfy.utils.common_upscale(samples, aligned_w, aligned_h, "lanczos", "center")
+        samples = comfy.utils.common_upscale(samples, target_width, target_height, "lanczos", "disabled")
         frames = samples.movedim(1, -1)
+
     ref_dict = None
     if encode_reference and vae is not None:
         latent = vae.encode(frames) if cache is None else cache.encode_vae(vae, frames, media="video")
@@ -293,8 +318,8 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
                 target_latent_frames = max(
                     1, min(source_latent_t, round(source_latent_t * (video_latent_fps / 24.0)))
                 )
-                target_h = max(1, video_reference_resolution // 16)
-                target_w = max(1, video_reference_resolution // 16)
+                target_h = max(2, (video_reference_resolution // 32) * 2)
+                target_w = max(2, (video_reference_resolution // 32) * 2)
                 target_shape = (target_latent_frames, target_h, target_w)
                 if target_shape == tuple(v_ref["latent"].shape[2:]):
                     pooled_latent = v_ref["latent"].clone()
@@ -328,17 +353,42 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
 
     # Build reference items for presentation tokenization
     reference_items = []
-    # 1. Images
+    # 1. Frames & Images
+    if first_frame is not None:
+        vlm_first = prepare_vlm_image(first_frame, vlm_resolution)
+        reference_items.append({"type": "image", "data": vlm_first})
+    if last_frame is not None:
+        vlm_last = prepare_vlm_image(last_frame, vlm_resolution)
+        reference_items.append({"type": "image", "data": vlm_last})
     flat_images = []
     if reference_images is not None:
         if isinstance(reference_images, dict):
-            for k, v in reference_images.items():
+            def get_num(k):
+                digits = re.findall(r"\d+", k)
+                return int(digits[0]) if digits else 0
+
+            for k in sorted(reference_images.keys(), key=get_num):
+                v = reference_images[k]
                 if torch.is_tensor(v):
-                    flat_images.append(v)
+                    if v.ndim == 4:
+                        for i in range(v.shape[0]):
+                            flat_images.append(v[i:i+1])
+                    else:
+                        flat_images.append(v)
         elif isinstance(reference_images, (list, tuple)):
             for v in reference_images:
                 if torch.is_tensor(v):
-                    flat_images.append(v)
+                    if v.ndim == 4:
+                        for i in range(v.shape[0]):
+                            flat_images.append(v[i:i+1])
+                    else:
+                        flat_images.append(v)
+        elif torch.is_tensor(reference_images):
+            if reference_images.ndim == 4:
+                for i in range(reference_images.shape[0]):
+                    flat_images.append(reference_images[i:i+1])
+            else:
+                flat_images.append(reference_images)
     for img in flat_images:
         vlm_img = prepare_vlm_image(img, vlm_resolution)
         reference_items.append({"type": "image", "data": vlm_img})
@@ -375,7 +425,7 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
     for tensor, metadata in conditioning:
         tags = metadata.get("minimax_token_tags")
         if not torch.is_tensor(tags) or tags.numel() != tensor.shape[1]:
-            tags = token_tags_from_embeds_info(metadata.get("embeds_info", {}), tensor.shape[1])
+            tags = token_tags_from_embeds_info(tensor.shape[1], metadata.get("embeds_info", {}))
             metadata["minimax_token_tags"] = tags
         metadata = metadata.copy()
         boundary = tensor.shape[1]
@@ -393,8 +443,47 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
             scaled.append([tensor * multiplier, meta])
         conditioning = scaled
 
-    # Collect references
+    # Collect keyframes and references
+    keyframes = []
+    if first_frame is not None and ref_image_size != "none" and vae is not None:
+        samples = first_frame[..., :3].movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled")
+        prepared_first = samples.movedim(1, -1)
+        latent_first = vae.encode(prepared_first) if cache is None else cache.encode_vae(vae, prepared_first, media="image")
+        keyframes.append({"resolved_frame_index": 0, "latent": latent_first})
+    if last_frame is not None and ref_image_size != "none" and vae is not None:
+        samples = last_frame[..., :3].movedim(-1, 1)
+        samples = comfy.utils.common_upscale(samples, width, height, "lanczos", "center")
+        prepared_last = samples.movedim(1, -1)
+        latent_last = vae.encode(prepared_last) if cache is None else cache.encode_vae(vae, prepared_last, media="image")
+        keyframes.append({"resolved_frame_index": frame_count - 1, "latent": latent_last})
+
     references = []
+    for img in flat_images:
+        if ref_image_size != "none" and vae is not None:
+            img_h, img_w = img.shape[1], img.shape[2]
+            if ref_image_size == "match":
+                scale = min(1.0, math.sqrt((width * height) / (img_w * img_h)))
+            elif ref_image_size == "max":
+                scale = min(1.0, 2048.0 / min(img_w, img_h))
+            else:
+                scale = 1.0
+            tw = max(32, round(img_w * scale / 32) * 32)
+            th = max(32, round(img_h * scale / 32) * 32)
+
+            prepared_img = img
+            if (img.shape[2], img.shape[1]) != (tw, th):
+                samples = img[..., :3].movedim(-1, 1)
+                samples = comfy.utils.common_upscale(samples, tw, th, "lanczos", "disabled")
+                prepared_img = samples.movedim(1, -1)
+
+            latent_img = vae.encode(prepared_img) if cache is None else cache.encode_vae(vae, prepared_img, media="image")
+            references.append({
+                "kind": "image",
+                "latent_h": th // 16,
+                "latent_w": tw // 16,
+                "latent": latent_img,
+            })
     for _, _, v_ref, _ in prepared_reference_videos:
         if v_ref is not None:
             references.append(v_ref)
@@ -406,6 +495,8 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
             references.append(a_ref)
 
     metadata = {}
+    if keyframes:
+        metadata["minimax_keyframes"] = keyframes
     if references:
         metadata["minimax_refs"] = references
     metadata["minimax_frame_count"] = frame_count

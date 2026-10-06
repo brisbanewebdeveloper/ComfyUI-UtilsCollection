@@ -2,138 +2,141 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  CHANNELS, HEADER_CHOICES, addSegment, compilePrompt, createState, formatTime, moveItem,
-  restoreState, timelineWarnings,
+  createState,
+  restoreState,
+  compilePrompt,
+  addDefinition,
+  addSegment,
+  h3StepDuration,
+  timelineWarnings,
 } from "../web/minimax_h3_prompt_model.js";
+import {
+  createBaseState,
+  restoreBaseState,
+  compileBasePrompt,
+  addBaseSegment,
+  getFinalShot,
+  baseTimelineWarnings,
+} from "../web/minimax_h3_base_prompt_model.js";
 
-test("headers and enabled channels compile into H3 text", () => {
+test("full reference model compiles 6-field envelope and steps H3 frames", () => {
   const state = createState();
-  state.headers.push({ name: "summary", text: "A chase." });
-  state.headers.unshift({ name: "non_diegetic_music", text: "Low strings." });
-  state.headers.push({ name: "overall_soundscape", text: "Traffic." });
+  addDefinition(state, "subject", { hasRef: true, refType: "picture", refIndex: 1, text: "A young woman." });
+  addDefinition(state, "picture", { role: "first_frame" });
+  addDefinition(state, "video", { role: "edit" });
+  addDefinition(state, "audio", { role: "timbre", targetSubject: 1 });
+
+  state.summary.taskTypes = ["video editing", "reference generation"];
+  state.summary.text = "Target video edit.";
+
+  state.retention = [
+    { label: "<Subject 1>", marker: "attribute_transfer", text: "transfers appearance" },
+  ];
+
   addSegment(state);
-  state.segments[0].channels.visual.text = "Camera tracks runner.";
-  state.segments[0].channels.music.text = "Saved draft.";
-  assert.equal(compilePrompt(state), "summary:\nA chase.\n\ndetailed_description:\nTimeline:\n[00:00.00-00:05.00]:\n[VISUAL]: Camera tracks runner.\n\noverall_soundscape:\nTraffic.\n\nnon_diegetic_music:\nLow strings.");
-  state.segments[0].channels.music.enabled = true;
-  assert.match(compilePrompt(state), /\[MUSIC\]: Saved draft\.[\s\S]*non_diegetic_music:\nLow strings\.$/);
-  assert.equal(restoreState(JSON.stringify(state)).segments[0].channels.music.text, "Saved draft.");
+  state.segments[0].visual = "Camera pushes in on <Subject 1>.";
+  state.segments[0].speech = { enabled: true, speaker: "S1", language: "English", text: "Look here." };
+  state.segments[0].sounds = { enabled: true, text: "Wind blows." };
+
+  state.overall_soundscape = "Outdoor breeze.";
+  state.non_diegetic_music = "Soft guitar.";
+
+  const compiled = compilePrompt(state);
+  assert.match(compiled, /^subject_definitions:\n<Subject 1> is fully referenced in <Picture 1>: A young woman\./);
+  assert.match(compiled, /<Picture 1> is the fixed first frame anchor at 00\.00s\./);
+  assert.match(compiled, /<Video 1> is the source video for the target video edit\./);
+  assert.match(compiled, /<Audio 1> is the voice-timbre reference for <Subject 1> \(S1\)\./);
+  assert.match(compiled, /summary:\n\[video editing \+ reference generation\] Target video edit\./);
+  assert.match(compiled, /retention_analysis:\n<Subject 1>: attribute_transfer - transfers appearance/);
+  assert.match(compiled, /detailed_description:\nTimeline:\n\[00\.00s-02\.33s\]:\n\[VISUAL\]: \[Shot 1\] Camera pushes in on <Subject 1>\./);
+  assert.match(compiled, /\[SPEECH\]: \(S1\) <d>\[English\] Look here\.<\/d>/);
+  assert.match(compiled, /\[SOUNDS\]: Wind blows\./);
+  assert.match(compiled, /overall_soundscape:\nOutdoor breeze\./);
+  assert.match(compiled, /non_diegetic_music:\nSoft guitar\./);
+
+  // Stepping duration by 17 frames at 24fps
+  const nextDuration = h3StepDuration(2.333, 1);
+  assert.ok(Math.abs(nextDuration - 3.0416) < 0.01);
 });
 
-test("new segments continue from previous end; gaps warn without blocking", () => {
-  const state = createState();
-  addSegment(state);
-  addSegment(state);
-  assert.deepEqual(state.segments.map(segment => [segment.start, segment.end]), [["0", "5"], ["00:05.00", "00:10.00"]]);
-  state.segments.forEach(segment => { segment.channels.visual.text = "Motion."; });
-  state.segments[1].start = "7";
-  assert.deepEqual(timelineWarnings(state), ["Segment 2 starts after previous segment."]);
-  assert.match(compilePrompt(state), /\[00:07\.00-00:10\.00\]/);
-  moveItem(state.segments, 1, -1);
-  assert.equal(state.segments[0].start, "7");
-  assert.equal(formatTime(7125, 3), "00:07.125");
+test("base prompt model compiles T2VA, I2VA, FL2VA, and L2VA with 3 core fields", () => {
+  // 1. T2VA with Timeline
+  const t2vState = createBaseState();
+  t2vState.task = "T2VA";
+  addBaseSegment(t2vState);
+  t2vState.segments[0].visual = "A baker opens the shop.";
+  t2vState.overall_soundscape = "Morning street noise.";
+  t2vState.non_diegetic_music = "Acoustic guitar.";
+
+  const t2vCompiled = compileBasePrompt(t2vState);
+  assert.ok(!t2vCompiled.includes("How the reference pictures align"));
+  assert.ok(!t2vCompiled.includes("For the target video"));
+  assert.ok(!t2vCompiled.includes("subject_definitions:"));
+  assert.match(t2vCompiled, /^integrated_multimodal_description:\nTimeline:\n\[00\.00s-02\.33s\]:\n\[VISUAL\]: \[Shot 1\] A baker opens the shop\./);
+  assert.match(t2vCompiled, /overall_soundscape:\nMorning street noise\./);
+  assert.match(t2vCompiled, /non_diegetic_music:\nAcoustic guitar\./);
+
+  // 2. I2VA
+  const i2vState = createBaseState();
+  i2vState.task = "I2VA";
+  i2vState.description.mode = "continuous";
+  i2vState.description.continuousText = "[Shot 1] Live-action, cinematic, starting from <Picture 1>.";
+  i2vState.overall_soundscape = "Room tone.";
+  i2vState.non_diegetic_music = "N/A";
+
+  const i2vCompiled = compileBasePrompt(i2vState);
+  assert.ok(i2vCompiled.startsWith("For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\n"));
+  assert.match(i2vCompiled, /integrated_multimodal_description:\n\[Shot 1\] Live-action, cinematic, starting from <Picture 1>\./);
+
+  // 3. FL2VA with auto final shot
+  const fl2vState = createBaseState();
+  fl2vState.task = "FL2VA";
+  fl2vState.duration = 8.0;
+  addBaseSegment(fl2vState);
+  addBaseSegment(fl2vState);
+  fl2vState.segments[1].visual = "Lands on Picture 2.";
+  const fl2vFinalShot = getFinalShot(fl2vState);
+  assert.equal(fl2vFinalShot, 2);
+
+  const fl2vCompiled = compileBasePrompt(fl2vState);
+  assert.ok(fl2vCompiled.startsWith("How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 2) aligns with the 8.00-second mark of the target video.\n\n"));
+
+  // 4. L2VA
+  const l2vState = createBaseState();
+  l2vState.task = "L2VA";
+  l2vState.duration = 6.0;
+  l2vState.autoFinalShot = false;
+  l2vState.finalShot = 3;
+  l2vState.description.mode = "continuous";
+  l2vState.description.continuousText = "[Shot 1] Drops and lands on <Picture 1>.";
+  const l2vCompiled = compileBasePrompt(l2vState);
+  assert.ok(l2vCompiled.startsWith("How the reference pictures align with the target video — <Picture 1> (from [Shot 3]) aligns with the 6.00-second mark of the target video.\n\n"));
 });
 
-test("canvas editor keeps blank space draggable, scrolls, and overlays multiline text", () => {
+test("multiline text overlay closes when outside pointerdown occurs or on blur", () => {
   const source = readFileSync(new URL("../web/minimax_h3_prompt.js", import.meta.url), "utf8");
-  const canvasSource = source.slice(source.indexOf("class H3CanvasPromptEditor"));
-  let wheel;
-  let widget;
-  let singleLinePrompt;
-  const appended = [];
-  const created = [];
-  const document = {
-    body: {
-      append(element) { appended.push(element); },
-    },
-    createElement(tagName) {
-      created.push(tagName);
-      const listeners = new Map();
-      return {
-        tagName: tagName.toUpperCase(), style: {}, dataset: {}, value: "",
-        scrollHeight: 120, clientHeight: 84,
-        addEventListener(type, listener) {
-          listeners.set(type, [...(listeners.get(type) ?? []), listener]);
-        },
-        emit(type, event = {}) {
-          for (const listener of listeners.get(type) ?? []) {
-            listener({
-              key: "", ctrlKey: false, metaKey: false,
-              preventDefault() {}, stopPropagation() {}, ...event,
-            });
-          }
-        },
-        focus() { this.focused = true; },
-        remove() { this.removed = true; },
-      };
-    },
-  };
-  const node = {
-    pos: [0, 0], size: [410, 440],
-    graph: { beforeChange() {}, afterChange() {} },
-    addCustomWidget(value) { widget = value; return value; },
-    getWidgetOnPos() { return widget; },
-    setSize(size) { this.size = size; },
-  };
-  const canvas = {
-    canvas: {
-      addEventListener(type, listener) { if (type === "wheel") wheel = listener; },
-      getBoundingClientRect() { return { left: 0, top: 0 }; },
-    },
-    ds: { scale: 1, offset: [0, 0] },
-    graph: { getNodeOnPos() { return node; } },
-    setDirty() {},
-    prompt(...args) { singleLinePrompt = args; },
-  };
-  const app = { canvas, registerExtension() {} };
-  const Editor = new Function(
-    "app", "CHANNELS", "HEADER_CHOICES", "addSegment", "compilePrompt", "createState",
-    "moveItem", "restoreState", "timelineWarnings", "requestAnimationFrame", "document",
-    canvasSource + "\nreturn H3CanvasPromptEditor;",
-  )(app, CHANNELS, HEADER_CHOICES, addSegment, compilePrompt, createState,
-    moveItem, restoreState, timelineWarnings, callback => callback(), document);
-  const state = createState();
-  state.headers.push({ name: "summary", text: "Before." });
-  for (let i = 0; i < 4; i++) {
-    addSegment(state);
-    state.segments[i].channels.visual.text = "Movement.";
-  }
-  const editor = new Editor(node, "prompt_state", [null, { default: JSON.stringify(state) }]);
-  const ctx = {
-    beginPath() {}, roundRect() {}, fill() {}, stroke() {}, rect() {}, clip() {},
-    save() {}, restore() {}, fillText() {},
-    measureText(value) { return { width: value.length * 7 }; },
-  };
-  widget.draw(ctx, node, 410, 60);
-  assert.equal(node.getWidgetOnPos(200, 83), undefined);
-  assert.equal(node.getWidgetOnPos(320, 80), widget);
-  widget.mouse({ button: 0, type: "pointerup" }, [320, 80]);
-  assert.equal(JSON.parse(widget.serializeValue()).precision, 3);
-  widget.mouse({ button: 0, type: "pointerup" }, [30, 220]);
-  assert.equal(singleLinePrompt[0], "Header name");
-  singleLinePrompt[2]("renamed_summary");
-  assert.equal(editor.state.headers[0].name, "renamed_summary");
-  widget.mouse({ button: 0, type: "pointerup" }, [30, 250]);
-  const textEditor = editor.textEditor.element;
-  assert.equal(textEditor.tagName, "TEXTAREA");
-  assert.equal(textEditor.className, "comfy-multiline-input");
-  assert.equal(appended.length, 1);
-  assert.deepEqual(created, ["textarea"]);
-  textEditor.value = "Updated.";
-  textEditor.emit("input");
-  assert.equal(editor.state.headers[0].text, "Updated.");
-  textEditor.emit("blur");
-  assert.equal(editor.textEditor, null);
-  assert.equal(textEditor.removed, true);
-  assert.ok(editor.contentHeight > editor.viewportHeight);
-  let consumed = false;
-  wheel({
-    clientX: 200, clientY: 130, deltaY: 80, deltaMode: 0,
-    ctrlKey: false, metaKey: false,
-    preventDefault() { consumed = true; },
-    stopImmediatePropagation() {},
-  });
-  assert.ok(editor.scroll > 0);
-  assert.equal(consumed, true);
-  assert.equal(JSON.parse(widget.serializeValue()).segments.length, 4);
+  assert.ok(source.includes("this.outsidePointer = (event) =>"));
+  assert.ok(source.includes("document.addEventListener(\"pointerdown\", this.outsidePointer, true);"));
+  assert.ok(source.includes("document.removeEventListener(\"pointerdown\", this.outsidePointer, true);"));
+  assert.ok(source.includes("element.addEventListener(\"blur\""));
+
+  const baseSource = readFileSync(new URL("../web/minimax_h3_base_prompt.js", import.meta.url), "utf8");
+  assert.ok(baseSource.includes("this.outsidePointer = (event) =>"));
+  assert.ok(baseSource.includes("document.addEventListener(\"pointerdown\", this.outsidePointer, true);"));
+  assert.ok(baseSource.includes("document.removeEventListener(\"pointerdown\", this.outsidePointer, true);"));
+  assert.ok(baseSource.includes("element.addEventListener(\"blur\""));
+});
+
+test("canvas draw-loop tooltips are rendered with upward offset and no DOM elements", () => {
+  const dynamicSource = readFileSync(new URL("../web/minimax_h3_prompt.js", import.meta.url), "utf8");
+  assert.ok(dynamicSource.includes("drawCanvasTooltip("));
+  assert.ok(dynamicSource.includes("by = region.y - boxH - 8"));
+  assert.ok(dynamicSource.includes("onPointerMove(event)"));
+  assert.ok(dynamicSource.includes("clearHoveredTooltip()"));
+
+  const baseSource = readFileSync(new URL("../web/minimax_h3_base_prompt.js", import.meta.url), "utf8");
+  assert.ok(baseSource.includes("drawCanvasTooltip("));
+  assert.ok(baseSource.includes("by = region.y - boxH - 8"));
+  assert.ok(baseSource.includes("onPointerMove(event)"));
+  assert.ok(baseSource.includes("clearHoveredTooltip()"));
 });

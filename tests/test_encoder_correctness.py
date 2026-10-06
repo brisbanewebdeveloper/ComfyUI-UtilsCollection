@@ -81,6 +81,21 @@ def test_h3_rgba_preprocessing_preserves_rgb():
     assert torch.count_nonzero(rgba[..., 3]) == 0
 
 
+def test_h3_image_preprocessing_accepts_3d_and_4d():
+    from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import preprocess_h3_embed
+
+    seen = []
+    def visual(image, grid):
+        seen.append(image.shape)
+        return image, {"grid": grid}
+
+    model = types.SimpleNamespace(visual=visual)
+    preprocess_h3_embed(model, {"type": "image", "data": torch.rand(1, 256, 256, 3)}, "cpu")
+    preprocess_h3_embed(model, {"type": "image", "data": torch.rand(256, 256, 3)}, "cpu")
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+
+
 def test_h3_preprocessing_patch_is_clone_owned():
     from utils_collection_encoder_test.helpers.minimax_h3_preprocessing_helpers import (
         MiniMaxQwen3VL, prepare_h3_preprocessing_clip,
@@ -692,9 +707,106 @@ def test_advanced_minimax_h3_ref_media_node_schema():
     assert schema.node_id == "UC_AdvancedMiniMaxH3RefMediaImageToVideo"
     assert "reference_media" in inputs
     assert inputs["reference_media"].io_type == "MINIMAX_H3_REFERENCE_MEDIA"
+    assert "first_frame" in inputs
+    assert "last_frame" in inputs
     assert "audio_vae" in inputs
     assert "video" not in inputs
     assert "audio" not in inputs
+
+
+def test_minimax_h3_ref_media_image_to_video_with_all_reference_types():
+    from utils_collection_encoder_test.helpers import minimax_h3_reference_media_helpers
+
+    class MockVAE:
+        def encode(self, frames):
+            return torch.zeros(frames.shape[0], 24, 2, frames.shape[1] // 16, frames.shape[2] // 16)
+
+    class MockAudioVAE:
+        audio_sample_rate = 32000
+
+        def encode(self, samples):
+            return torch.zeros(1, 32, 2, 40)
+
+    # 1. Verify prepare_vlm_image preserves 4D shape
+    img_4d = torch.zeros(1, 100, 100, 3)
+    prepared = minimax_h3_reference_media_helpers.prepare_vlm_image(img_4d, 384)
+    assert prepared.ndim == 4
+    assert prepared.shape[0] == 1
+    assert prepared.shape[-1] == 3
+
+    # 2. Test full execution with reference_image, reference_video, paired audio, and standalone audio
+    clip = _MiniMaxH3TestClip()
+    vae = MockVAE()
+    audio_vae = MockAudioVAE()
+
+    ref_images = {"reference_image_1": torch.zeros(1, 64, 64, 3)}
+    ref_media = {
+        "reference_videos": {"reference_video_1": torch.zeros(5, 64, 64, 3)},
+        "reference_video_audios": {"reference_video_audio_1": {"waveform": torch.zeros(1, 2, 32000), "sample_rate": 32000}},
+        "reference_audios": {"reference_audio_1": {"waveform": torch.zeros(1, 2, 32000), "sample_rate": 32000}},
+    }
+
+    conditioning, latent = minimax_h3_reference_media_helpers.execute_advanced_minimax_h3_reference_media_image_to_video(
+        clip=clip,
+        vae=vae,
+        prompt="test prompt",
+        width=1344,
+        height=768,
+        length=124,
+        reference_images=ref_images,
+        reference_media=ref_media,
+        audio_vae=audio_vae,
+        enable_caching="disabled",
+    )
+
+    assert conditioning is not None
+    assert latent is not None
+    token_call = clip.tokenize_calls[0]
+    ref_items = token_call["minimax_ref_items"]
+    img_items = [item for item in ref_items if item["type"] == "image"]
+    assert len(img_items) == 1
+    assert img_items[0]["data"].ndim == 4
+
+    # Verify all references have strictly even latent spatial dimensions (multiples of 2 for DiT 2x2 patch)
+    refs = conditioning[0][1]["minimax_refs"]
+    for r in refs:
+        if "latent_h" in r and "latent_w" in r:
+            assert r["latent_h"] % 2 == 0, f"latent_h must be even, got {r['latent_h']}"
+            assert r["latent_w"] % 2 == 0, f"latent_w must be even, got {r['latent_w']}"
+
+    # 3. Test with an input image whose dimensions are multiples of 16 but NOT 32 (e.g. 2864x3520 where 2864//16 = 179)
+    unaligned_img = {"reference_image_1": torch.zeros(1, 2864, 3520, 3)}
+    conditioning_unaligned, _ = minimax_h3_reference_media_helpers.execute_advanced_minimax_h3_reference_media_image_to_video(
+        clip=clip,
+        vae=vae,
+        prompt="test prompt",
+        width=1344,
+        height=768,
+        length=124,
+        reference_images=unaligned_img,
+        enable_caching="disabled",
+    )
+    unaligned_refs = conditioning_unaligned[0][1]["minimax_refs"]
+    img_ref = next(r for r in unaligned_refs if r.get("kind") == "image")
+    assert img_ref["latent_h"] % 2 == 0, f"Latent height must be even, got {img_ref['latent_h']}"
+    assert img_ref["latent_w"] % 2 == 0, f"Latent width must be even, got {img_ref['latent_w']}"
+    # Verify DiT patchify_video reshape can succeed without remainder error
+    from comfy.ldm.minimax.model import patchify_video
+    patchified = patchify_video(img_ref["latent"])
+    assert patchified is not None
+
+    # 4. Test reference video temporal frame snapping to 17k+5
+    unaligned_vid = torch.zeros(30, 200, 200, 3)
+    frames, ref_dict = minimax_h3_reference_media_helpers.prepare_minimax_h3_reference_video(
+        unaligned_vid, vae, 124, encode_reference=True
+    )
+    assert frames.shape[0] % 17 == 5, f"Frames must satisfy 17k+5, got {frames.shape[0]}"
+    assert frames.shape[1] % 32 == 0, f"Height must be multiple of 32, got {frames.shape[1]}"
+    assert frames.shape[2] % 32 == 0, f"Width must be multiple of 32, got {frames.shape[2]}"
+    assert ref_dict["latent_h"] % 2 == 0
+    assert ref_dict["latent_w"] % 2 == 0
+    patchified_vid = patchify_video(ref_dict["latent"])
+    assert patchified_vid is not None
 
 
 def test_minimax_h3_media_config_schema_and_payload():

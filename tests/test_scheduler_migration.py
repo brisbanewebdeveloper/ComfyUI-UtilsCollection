@@ -19,6 +19,7 @@ EXPECTED_NODE_IDS = {
 }
 
 EXPECTED_HANDLER_NAMES = {
+    "dmad",
     "sigmoid_offset",
     "power_shift",
     "radiance_shift",

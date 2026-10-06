@@ -832,3 +832,96 @@ def split_h3_video_components_into_segments(
         transcript_list.append(t_audio)
 
     return frames_list, audio_list, out_w, out_h, length_list, video_list, transcript_list
+
+
+def _generate_noise_like(target: Any, generator: Optional[torch.Generator] = None) -> Any:
+    """Generate Gaussian noise matching target tensor or nested tensor shape and device."""
+    def _draw(t: torch.Tensor) -> torch.Tensor:
+        if generator is not None:
+            gen_device = getattr(generator, "device", None)
+            gen_type = getattr(gen_device, "type", str(gen_device)) if gen_device is not None else "cpu"
+            if gen_type == "cpu" and t.device.type != "cpu":
+                return torch.randn(t.shape, dtype=t.dtype, device="cpu", generator=generator).to(t.device)
+            return torch.randn(t.shape, dtype=t.dtype, device=t.device, generator=generator)
+        return torch.randn(t.shape, dtype=t.dtype, device=t.device)
+
+    if isinstance(target, NestedTensor):
+        return NestedTensor([_draw(t) for t in target.unbind()])
+    return _draw(target)
+
+
+def _blend_renoise(denoised: Any, noise: Any, sigma: float, s_noise: float = 1.0) -> Any:
+    """Blend clean endpoint prediction with fresh noise: (1 - sigma) * x0 + sigma * (e * s_noise)."""
+    weight_denoised = 1.0 - float(sigma)
+    weight_noise = float(sigma) * float(s_noise)
+    if isinstance(denoised, NestedTensor):
+        d_parts = denoised.unbind()
+        n_parts = noise.unbind() if isinstance(noise, NestedTensor) else [noise]
+        blended = [d * weight_denoised + n * weight_noise for d, n in zip(d_parts, n_parts)]
+        return NestedTensor(blended)
+    return denoised * weight_denoised + noise * weight_noise
+
+
+@torch.no_grad()
+def sample_dmad_renoise(
+    model: Any,
+    x: Any,
+    sigmas: torch.Tensor,
+    extra_args: Optional[dict[str, Any]] = None,
+    callback: Optional[Any] = None,
+    disable: Optional[bool] = None,
+    s_noise: float = 1.0,
+    noise_sampler: Optional[Any] = None,
+) -> Any:
+    """Few-step re-noise sampler for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).
+
+    At each intermediate step:
+      1. Evaluates model to predict clean endpoint x0 (denoised).
+      2. If next sigma is 0, outputs x0 directly.
+      3. Otherwise, discards prior noise and re-noises x0 with fresh Gaussian noise:
+         x_{next} = (1 - sigma_{next}) * x0 + sigma_{next} * (noise * s_noise)
+    """
+    extra_args = {} if extra_args is None else extra_args
+    seed = extra_args.get("seed", None)
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+
+    total_steps = len(sigmas) - 1
+    if total_steps <= 0:
+        return x
+
+    from comfy.utils import model_trange as trange
+
+    s_in = x.new_ones([x.shape[0]]) if hasattr(x, "new_ones") else torch.ones((1,), device=getattr(x, "device", "cpu"))
+
+    for i in trange(total_steps, disable=disable):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+
+        denoised = model(x, sigma * s_in, **extra_args)
+
+        if callback is not None:
+            callback({
+                "x": x,
+                "i": i,
+                "sigma": sigma,
+                "sigma_hat": sigma,
+                "denoised": denoised,
+            })
+
+        if float(sigma_next) == 0.0:
+            x = denoised
+        else:
+            if noise_sampler is not None:
+                try:
+                    e = noise_sampler(sigma, sigma_next)
+                except Exception:
+                    e = _generate_noise_like(denoised, generator=generator)
+            else:
+                e = _generate_noise_like(denoised, generator=generator)
+
+            x = _blend_renoise(denoised, e, float(sigma_next), s_noise=s_noise)
+
+    return x
+

@@ -88,7 +88,7 @@ class UC_ResolutionSelectorExtended(io.ComfyNode):
                     default=1.0,
                     min=0.1,
                     max=16.0,
-                    step=0.1,
+                    step=0.05,
                     tooltip="Target total megapixels. 1.0 MP ≈ 1024×1024 for square.",
                 ),
                 io.Int.Input(
@@ -153,7 +153,7 @@ class UC_VideoResolutionSelector(io.ComfyNode):
                     default=1.0,
                     min=0.1,
                     max=16.0,
-                    step=0.1,
+                    step=0.05,
                     tooltip="Nominal target total megapixels used to choose the nearest viable resolution.",
                 ),
                 io.Int.Input(
@@ -168,7 +168,7 @@ class UC_VideoResolutionSelector(io.ComfyNode):
                     "duration_seconds",
                     default=5.0,
                     min=0.0,
-                    step=0.1,
+                    step=0.05,
                     tooltip="Video duration in seconds at 24 fps. Rounds up to a supported H3 length; 5 seconds gives 124 frames. The minimum is 5 frames.",
                 ),
             ],
@@ -313,4 +313,171 @@ class UC_ImageScaleAndResolutionPicker(io.ComfyNode):
             adjusted_height,
             upscaled_width,
             upscaled_height,
+        )
+
+class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
+    upscale_methods = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+    crop_methods = ["disabled", "center"]
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_VideoResolutionAndLengthPicker",
+            display_name="Video Resolution & Length",
+            category="utils",
+            description="Calculates multiple-aligned video dimensions and generation frame length from aspect ratio and duration, with optional image/video input resizing and cropping.",
+            inputs=[
+                io.Video.Input("video", optional=True, tooltip="Optional video. When connected and use_video_duration is enabled, its duration replaces duration_seconds. When image is disconnected, its frames are used as the source."),
+                io.Boolean.Input("use_video_duration", default=True, tooltip="When enabled and video or multi-frame image batch is connected, uses its duration instead of duration_seconds."),
+                io.Boolean.Input("match_video_length", default=True, tooltip="When enabled and multiple frames are connected, resamples or slices the output frame count to match Length at 24 fps."),
+                io.Image.Input("image", optional=True, tooltip="Optional image or image batch to resize/crop to the target video resolution."),
+                io.Float.Input("duration_seconds", default=5.16667, min=0.20833, step=0.70833, tooltip="Video duration in seconds at 24 fps. Steps by 17 frames (~0.708s) on the MiniMax H3 5+17k temporal grid. Default is 124 frames (~5.17s). Minimum is 5 frames (~0.21s)."),
+                io.Combo.Input("scale_method", options=cls.upscale_methods, default="lanczos"),
+                io.Combo.Input("crop_method", options=cls.crop_methods, default="disabled", tooltip="If cropping is enabled, the image will be cropped to the target aspect ratio before resizing. Center cropping is used, so the center of the image will be preserved and equal amounts will be cropped from either side."),
+                io.Combo.Input(
+                    "aspect_ratio",
+                    options=AspectRatio,
+                    default=AspectRatio.SQUARE,
+                    tooltip="The aspect ratio for the output dimensions and cropping.",
+                ),
+                io.Float.Input("megapixels", default=1.0, min=0.01, max=16.0, step=0.05),
+                io.Int.Input(
+                    "resolution_steps",
+                    default=1,
+                    min=1,
+                    max=256,
+                    advanced=True,
+                    tooltip="Does not affect output size. Use Multiple to align dimensions.",
+                ),
+                io.Int.Input(
+                    id="multiple",
+                    default=32,
+                    min=4,
+                    max=128,
+                    step=4,
+                    tooltip="Round the resolution to this pixel multiple.",
+                ),
+            ],
+            outputs=[
+                io.Image.Output("images", tooltip="The adjusted/cropped base image or video frames."),
+                io.Int.Output(display_name="Width"),
+                io.Int.Output(display_name="Height"),
+                io.Int.Output(display_name="Length"),
+                io.Float.Output(display_name="Duration (s)", tooltip="The effective duration in seconds, either from the video, image batch, or duration_seconds."),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        video=None,
+        use_video_duration: bool = True,
+        match_video_length: bool = True,
+        image=None,
+        duration_seconds: float = 5.16667,
+        scale_method: str = "lanczos",
+        crop_method: str = "disabled",
+        aspect_ratio: AspectRatio = AspectRatio.SQUARE,
+        megapixels: float = 1.0,
+        resolution_steps: int = 1,
+        multiple: int = 32,
+    ) -> io.NodeOutput:
+        total = megapixels * 1024 * 1024
+        _ = resolution_steps
+
+        # 1. Resolve source frames and source fps
+        source_frames = image
+        source_fps = 24.0
+        if source_frames is None and video is not None:
+            if hasattr(video, "get_components"):
+                components = video.get_components()
+                source_frames = getattr(components, "images", None)
+                fps_val = getattr(components, "frame_rate", None)
+                if fps_val is not None:
+                    source_fps = float(fps_val)
+            elif torch.is_tensor(video):
+                source_frames = video
+            elif hasattr(video, "get_stream_source"):
+                try:
+                    from ..helpers.image_helpers import cached_video_components
+                    components = cached_video_components(video)
+                    source_frames = getattr(components, "images", None)
+                    fps_val = getattr(components, "frame_rate", None)
+                    if fps_val is not None:
+                        source_fps = float(fps_val)
+                except Exception:
+                    pass
+
+        # 2. Resolve duration
+        effective_duration = duration_seconds
+        if use_video_duration:
+            if video is not None and hasattr(video, "get_duration"):
+                try:
+                    effective_duration = float(video.get_duration())
+                except Exception:
+                    effective_duration = duration_seconds
+            elif video is not None and torch.is_tensor(video) and video.ndim == 4 and video.shape[0] > 0:
+                effective_duration = video.shape[0] / 24.0
+            elif source_frames is not None and torch.is_tensor(source_frames) and source_frames.ndim == 4 and source_frames.shape[0] > 1:
+                effective_duration = source_frames.shape[0] / 24.0
+
+        length = h3_video_length_from_seconds(effective_duration)
+
+        # 3. Match video length if multiple frames are connected
+        if match_video_length and source_frames is not None and torch.is_tensor(source_frames) and source_frames.shape[0] > 1:
+            frame_count = source_frames.shape[0]
+            if abs(source_fps - 24.0) > 0.01:
+                indices = [min(frame_count - 1, round(i * source_fps / 24.0)) for i in range(length)]
+                source_frames = source_frames[indices]
+            elif frame_count > length:
+                source_frames = source_frames[:length]
+            elif frame_count < length:
+                pad_count = length - frame_count
+                source_frames = torch.cat([source_frames, source_frames[-1:].repeat(pad_count, 1, 1, 1)], dim=0)
+
+        # 4. Calculate target dimensions and scale frames if present
+        if source_frames is not None and torch.is_tensor(source_frames):
+            samples = source_frames.movedim(-1, 1)  # B, C, H, W
+            img_h, img_w = samples.shape[2], samples.shape[3]
+
+            if crop_method == "center":
+                target_ratio_w, target_ratio_h = ASPECT_RATIOS[aspect_ratio]
+                base_scale = math.sqrt(total / (target_ratio_w * target_ratio_h))
+                width = target_ratio_w * base_scale
+                height = target_ratio_h * base_scale
+            else:
+                megapixel_scale = math.sqrt(total / (img_w * img_h))
+                width = img_w * megapixel_scale
+                height = img_h * megapixel_scale
+
+            adjusted_width = max(multiple, round_to_nearest(width, multiple))
+            adjusted_height = max(multiple, round_to_nearest(height, multiple))
+            adjusted_samples = resize_nchw(
+                samples, int(adjusted_width), int(adjusted_height), scale_method, crop_method
+            )
+            adjusted_image_out = adjusted_samples.movedim(1, -1)
+        else:
+            target_ratio_w, target_ratio_h = ASPECT_RATIOS[aspect_ratio]
+            base_scale = math.sqrt(total / (target_ratio_w * target_ratio_h))
+            width = target_ratio_w * base_scale
+            height = target_ratio_h * base_scale
+
+            adjusted_width = max(multiple, round_to_nearest(width, multiple))
+            adjusted_height = max(multiple, round_to_nearest(height, multiple))
+
+            device = mm.intermediate_device()
+            dtype = mm.intermediate_dtype()
+            adjusted_image_out = torch.zeros(
+                [1, adjusted_height, adjusted_width, 3], dtype=dtype, device=device
+            )
+
+        length = h3_video_length_from_seconds(effective_duration)
+
+        return io.NodeOutput(
+            adjusted_image_out,
+            adjusted_width,
+            adjusted_height,
+            length,
+            effective_duration,
+            ui={"resolution": (f"{adjusted_width}×{adjusted_height} · {length} frames · {effective_duration:.2f} s",)},
         )

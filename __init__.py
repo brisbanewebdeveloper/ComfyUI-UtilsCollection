@@ -33,6 +33,7 @@ class SamplingUtils(ComfyExtension):
             UC_AdjustedResolutionParameters,
             UC_ResolutionSelectorExtended,
             UC_VideoResolutionSelector,
+            UC_VideoResolutionAndLengthPicker,
             UC_ImageScaleAndResolutionPicker,
             UC_Image_Color_Noise,
             UC_ExtractPrevalentColors,
@@ -128,6 +129,7 @@ class SamplingUtils(ComfyExtension):
             UC_TagNormalizeCombine,
             UC_ImageToVideoPrompt,
             UC_MiniMaxH3DynamicPromptBuilder,
+            UC_MiniMaxH3BasePromptBuilder,
             UC_LoadImagePath,
             UC_LoadImageDirectory,
             UC_LoadVideoPath,
@@ -266,6 +268,7 @@ class SamplingUtils(ComfyExtension):
             ColorConvertNode,
             UC_H3LoopSampler,
             UC_H3RefVideoSegments,
+            UC_SamplerDMADReNoise,
             *LOGIC_MATH_NODES,
             *SCHEDULER_NODES,
         ])

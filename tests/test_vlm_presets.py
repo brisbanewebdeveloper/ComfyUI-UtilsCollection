@@ -68,6 +68,14 @@ H3_DEDICATED_SCENARIO_PRESETS = (
         "VIDEO_TIMELINE_MINIMAX_H3_FL2VA_SYSTEM_INSTRUCTION",
     ),
     (
+        "video_timeline_minimax_h3_scene_image_any2va_system_instruction",
+        "VIDEO_TIMELINE_MINIMAX_H3_SCENE_IMAGE_ANY2VA_SYSTEM_INSTRUCTION",
+    ),
+    (
+        "video_timeline_minimax_h3_storyboard_any2va_system_instruction",
+        "VIDEO_TIMELINE_MINIMAX_H3_STORYBOARD_ANY2VA_SYSTEM_INSTRUCTION",
+    ),
+    (
         "video_timeline_minimax_h3_scene_image_t2va_system_instruction",
         "VIDEO_TIMELINE_MINIMAX_H3_SCENE_IMAGE_T2VA_SYSTEM_INSTRUCTION",
     ),
@@ -1061,7 +1069,7 @@ def test_minimax_h3_timeline_presets_mark_actual_cuts_with_shot_references():
         assert "**Shot Continuity:**" in instruction or "Place [Shot 1]" in instruction
         assert (
             "Introduce sequential `[Shot N]` markers inside [VISUAL] only when the "
-            "scene actually cuts or transitions."
+            "scene changes or perspective shifts instantly."
             in instruction
             or "Introduce sequential later [Shot N] markers only when the scene "
             "actually cuts or transitions."
@@ -1389,10 +1397,15 @@ def test_minimax_h3_full_reference_keeps_shot_terms_inside_timeline_context():
         assert "(appears in applicable Shots)" not in retention
         assert "shot-planning role" not in instruction
         assert "Put [Shot 1] right after [VISUAL]:" in instruction
-        assert "In every later segment, put the next [Shot N]" in instruction
-        assert "Give every segment a new Shot number." in instruction
-        assert "Never skip or repeat one." in instruction
-        assert "Never skip or repeat a Shot number." in instruction
+        assert (
+            "Use [Shot N] only when the scene changes or perspective shifts instantly."
+            in instruction
+        )
+        assert (
+            "Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually."
+            in instruction
+        )
+        assert "advance the shot number sequentially without skipping or repeating." in instruction
 
     for runtime_key in (
         "video_timeline_minimax_h3_ref2va_general",
@@ -1730,13 +1743,21 @@ def test_minimax_h3_dedicated_presets_trailing_whitespace_integrity():
         if runtime_key == "video_timeline_minimax_h3_ref2va_attribute_transfer":
             continue
         instruction = vlm_presets.system_instructions_vlm[runtime_key]
-        for field in (
-            "subject_definitions:  \r\n",
-            "summary:  \r\n",
-            "detailed_description:  \r\n",
-            "overall_soundscape:  \r\n",
-            "non_diegetic_music:  \r\n",
-        ):
+        if "t2va" in runtime_key and "any2va" not in runtime_key:
+            fields = (
+                "integrated_multimodal_description:  \r\n",
+                "overall_soundscape:  \r\n",
+                "non_diegetic_music:  \r\n",
+            )
+        else:
+            fields = (
+                "subject_definitions:  \r\n",
+                "summary:  \r\n",
+                "detailed_description:  \r\n",
+                "overall_soundscape:  \r\n",
+                "non_diegetic_music:  \r\n",
+            )
+        for field in fields:
             assert field in instruction, f"{field!r} missing two trailing spaces in {runtime_key}"
 
 
@@ -1772,13 +1793,42 @@ def test_minimax_h3_fl2va_contract():
     assert "retention_analysis:" in instruction
 
 
-def test_minimax_h3_scene_image_t2va_contract():
-    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_t2va_system_instruction"]
+def test_minimax_h3_scene_image_any2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_any2va_system_instruction"]
     assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
     assert "The single supplied image acts as the visual seed" in instruction
     assert "extrapolate a continuous, escalating progression of motion" in instruction
     assert "Do not emit `<Picture 1>` or any media identifier inside the summary or timeline" in instruction
     assert "Do not create a Video namespace from the image" in instruction
+    assert "subject_definitions:" in instruction
+    assert "summary:" in instruction
+    assert "detailed_description:" in instruction
+    assert "retention_analysis:" not in instruction
+
+
+def test_minimax_h3_scene_image_t2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_t2va_system_instruction"]
+    assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
+    assert "The single supplied image acts as the visual seed" in instruction
+    assert "extrapolate a continuous, escalating progression of motion" in instruction
+    assert "Do not emit `<Picture 1>` or any media identifier inside the timeline" in instruction
+    assert "Do not create a Video namespace from the image" in instruction
+    assert "integrated_multimodal_description:" in instruction
+    assert "subject_definitions:" not in instruction
+    assert "summary:" not in instruction
+    assert "retention_analysis:" not in instruction
+
+
+def test_minimax_h3_storyboard_any2va_contract():
+    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_storyboard_any2va_system_instruction"]
+    assert "MiniMax H3 Storyboard to Video" in instruction
+    assert "Strict Graphic Strip Rule:" in instruction
+    assert "comic book or graphic conventions be described or included in the output prompt" in instruction
+    assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
+    assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
+    assert "subject_definitions:" in instruction
+    assert "summary:" in instruction
+    assert "detailed_description:" in instruction
     assert "retention_analysis:" not in instruction
 
 
@@ -1789,6 +1839,9 @@ def test_minimax_h3_storyboard_t2va_contract():
     assert "comic book or graphic conventions be described or included in the output prompt" in instruction
     assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
     assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
+    assert "integrated_multimodal_description:" in instruction
+    assert "subject_definitions:" not in instruction
+    assert "summary:" not in instruction
     assert "retention_analysis:" not in instruction
 
 
@@ -1838,6 +1891,8 @@ def test_h3_dedicated_query_presets_contracts():
         "h3_ref2va_attr_transfer_audio_timbre",
         "h3_ref2va_attr_transfer_audio_copy",
         "h3_ref2va_attr_transfer_no_audio",
+        "h3_scene_image_any2va",
+        "h3_storyboard_any2va",
         "h3_scene_image_t2va",
         "h3_storyboard_t2va",
     )
@@ -1878,14 +1933,43 @@ def test_h3_dedicated_query_presets_contracts():
     assert "[video editing + reference generation]" in no_audio_suff
     assert "non_diegetic_music: N/A" in no_audio_suff
 
-    scene_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_prefix"]
-    scene_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_suffix"]
-    assert "strictly as an opening scene seed" in scene_pref
-    assert "[reference generation]" in scene_suff
-    assert "No `retention_analysis:` field" in scene_suff
+    scene_any_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_any2va_prefix"]
+    scene_any_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_any2va_suffix"]
+    assert "strictly as an opening scene seed" in scene_any_pref
+    assert "[reference generation]" in scene_any_suff
+    assert "No `retention_analysis:` field" in scene_any_suff
 
-    storyboard_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_prefix"]
-    storyboard_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_suffix"]
-    assert "Strict Graphic Strip Rule" in storyboard_pref
-    assert "[reference generation]" in storyboard_suff
-    assert "No `retention_analysis:` field" in storyboard_suff
+    scene_t2va_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_prefix"]
+    scene_t2va_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_suffix"]
+    assert "strictly as an opening scene seed" in scene_t2va_pref
+    assert "integrated_multimodal_description:" in scene_t2va_suff
+    assert "overall_soundscape:" in scene_t2va_suff
+
+    story_any_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_any2va_prefix"]
+    story_any_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_any2va_suffix"]
+    assert "Strict Graphic Strip Rule" in story_any_pref
+    assert "[reference generation]" in story_any_suff
+    assert "No `retention_analysis:` field" in story_any_suff
+
+    story_t2va_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_prefix"]
+    story_t2va_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_suffix"]
+    assert "Strict Graphic Strip Rule" in story_t2va_pref
+    assert "integrated_multimodal_description:" in story_t2va_suff
+    assert "overall_soundscape:" in story_t2va_suff
+
+
+def test_minimax_h3_attr_transfer_multi_subject_contracts():
+    keys = (
+        "video_timeline_minimax_h3_ref2va_attr_transfer_audio_timbre",
+        "video_timeline_minimax_h3_ref2va_attr_transfer_audio_copy",
+        "video_timeline_minimax_h3_ref2va_attr_transfer_no_audio",
+    )
+    for key in keys:
+        instruction = vlm_presets.system_instructions_vlm[key]
+        assert "Original subjects from `<Video 1>` designated for replacement must NEVER be defined under `subject_definitions:`" in instruction
+        assert "`<Subject {N}>` is a {visual description of the subject that will be used in the video}, referenced from `<Picture {N}>`." in instruction
+        assert "where on-screen subject(s) are replaced by defined `<Subject {N}>` entities from `<Picture {N}>`" in instruction
+        assert "with source subjects replaced by defined `<Subject {N}>` entities" in instruction
+        assert "Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`" in instruction
+        assert "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned `<Subject N>` aliases under `subject_definitions:`" in instruction
+

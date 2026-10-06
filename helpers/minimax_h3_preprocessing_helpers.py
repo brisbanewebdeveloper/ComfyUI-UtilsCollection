@@ -11,8 +11,11 @@ from comfy.text_encoders.qwen_vl import process_qwen2vl_images
 def preprocess_h3_embed(self, embed, device):
     if embed["type"] != "image" or embed.get("minimax_video_block", False):
         return MiniMaxQwen3VL.preprocess_embed(self, embed, device)
+    data = embed["data"]
+    if data.ndim == 3:
+        data = data.unsqueeze(0)
     image, grid = process_qwen2vl_images(
-        embed["data"][..., :3], min_pixels=65536, max_pixels=16777216,
+        data[..., :3], min_pixels=65536, max_pixels=16777216,
         patch_size=16, temporal_patch_size=2, merge_size=2,
         image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5],
     )

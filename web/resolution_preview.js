@@ -124,6 +124,47 @@ function fitPreview(node) {
   node.setDirtyCanvas(true, true);
 }
 
+function connectedOrigin(node, inputName) {
+  const slot = (node.inputs || []).findIndex((input) => (
+    input.name === inputName || input.name?.endsWith(`.${inputName}`) || input.label === inputName
+  ));
+  const linkId = slot >= 0 ? node.inputs?.[slot]?.link : null;
+  const link = linkId != null ? node.graph?.links?.[linkId] : null;
+  return link ? { link, node: node.graph?._nodes_by_id?.[link.origin_id] } : null;
+}
+
+function resolveConnectedImageDimensions(node, inputName = "image") {
+  const origin = connectedOrigin(node, inputName);
+  if (!origin?.node || [2, 4].includes(origin.node.mode)) return null;
+  const originNode = origin.node;
+
+  // 1. Direct preview element on the origin node (e.g. LoadImage, LoadImageWithAlpha)
+  const candidate = originNode.imgs?.[0];
+  if (candidate?.complete && (candidate.naturalWidth || candidate.width)) {
+    return [candidate.naturalWidth || candidate.width, candidate.naturalHeight || candidate.height];
+  }
+  if (candidate && !candidate.complete) {
+    candidate.addEventListener("load", () => {
+      updatePreview(node);
+    }, { once: true });
+  }
+
+  // 2. Latest execution outputs from server
+  const descriptor = app.nodeOutputs?.[String(origin.link.origin_id)]?.images?.[0];
+  if (descriptor?.width && descriptor?.height) {
+    return [descriptor.width, descriptor.height];
+  }
+
+  // 3. Fallback: check if origin node has explicit width/height widgets
+  const w = originNode.widgets?.find((w) => w.name === "width")?.value;
+  const h = originNode.widgets?.find((w) => w.name === "height")?.value;
+  if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+    return [Number(w), Number(h)];
+  }
+
+  return null;
+}
+
 function updatePreview(node, backendValue) {
   if (node.__ucH3ReferenceVideo) {
     const range = backendValue ?? h3ReferenceFrameRange(
@@ -140,7 +181,16 @@ function updatePreview(node, backendValue) {
   if (backendValue !== undefined) {
     node.__ucResolutionPreview = String(Array.isArray(backendValue) ? backendValue[0] : backendValue);
   } else {
-    const ratio = ratioFromValue(widgetValue(node, "aspect_ratio"));
+    let ratio = ratioFromValue(widgetValue(node, "aspect_ratio"));
+    if (node.__ucVideoLengthPicker) {
+      const cropMethod = widgetValue(node, "crop_method");
+      if (cropMethod !== "center") {
+        const connectedDims = resolveConnectedImageDimensions(node, "image") || resolveConnectedImageDimensions(node, "video");
+        if (connectedDims && connectedDims[0] > 0 && connectedDims[1] > 0) {
+          ratio = [connectedDims[0], connectedDims[1]];
+        }
+      }
+    }
     const megapixels = Number(widgetValue(node, "megapixels"));
     const multiple = Number(widgetValue(node, "multiple"));
     const minimum = Number(widgetValue(node, "minimum")) || 256;
@@ -148,12 +198,17 @@ function updatePreview(node, backendValue) {
     const [width, height] = node.__ucVideoResolutionSelector
       ? videoResolution(...ratio, megapixels, multiple, minimum)
       : regularResolution(...ratio, megapixels, multiple, minimum);
-    const length = node.__ucVideoResolutionSelector && !widgetIsLinked(node, "duration_seconds")
+    const length = (node.__ucVideoResolutionSelector || node.__ucVideoLengthPicker) && !widgetIsLinked(node, "duration_seconds")
       ? h3VideoLengthFromSeconds(Number(widgetValue(node, "duration_seconds")))
+      : null;
+    const duration = node.__ucVideoLengthPicker && !widgetIsLinked(node, "duration_seconds")
+      ? Number(widgetValue(node, "duration_seconds"))
       : null;
     node.__ucResolutionPreview = length === null
       ? `${width}×${height}`
-      : `${width}×${height} · ${length} frames`;
+      : duration !== null
+        ? `${width}×${height} · ${length} frames · ${duration.toFixed(2)} s`
+        : `${width}×${height} · ${length} frames`;
   }
   fitPreview(node);
 }
@@ -161,7 +216,7 @@ function updatePreview(node, backendValue) {
 app.registerExtension({
   name: "ComfyUI.UtilsCollection.ResolutionPreview",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector", "UC_MiniMaxH3RefVid"].includes(nodeData.name)) return;
+    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector", "UC_VideoResolutionAndLengthPicker", "UC_MiniMaxH3RefVid"].includes(nodeData.name)) return;
 
     const computeSize = nodeType.prototype.computeSize;
     nodeType.prototype.computeSize = function (out) {
@@ -180,8 +235,22 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const result = onNodeCreated?.apply(this, arguments);
       this.__ucVideoResolutionSelector = nodeData.name === "UC_VideoResolutionSelector";
+      this.__ucVideoLengthPicker = nodeData.name === "UC_VideoResolutionAndLengthPicker";
       this.__ucH3ReferenceVideo = nodeData.name === "UC_MiniMaxH3RefVid";
       this.__ucResolutionPreview = "";
+      if (this.__ucVideoLengthPicker) {
+        const durationWidget = this.widgets?.find((w) => w.name === "duration_seconds");
+        if (durationWidget) {
+          const originalCallback = durationWidget.callback;
+          durationWidget.callback = function (value) {
+            const k = Math.max(0, Math.round((Number(value) - 5 / 24) / (17 / 24)));
+            const snappedFrames = 5 + 17 * k;
+            const snappedSeconds = Number((snappedFrames / 24).toFixed(5));
+            durationWidget.value = snappedSeconds;
+            originalCallback?.call(this, snappedSeconds);
+          };
+        }
+      }
       const minimum = this.computeSize();
       this.setSize([
         Math.max(this.size[0], minimum[0]),
@@ -206,7 +275,7 @@ app.registerExtension({
     const onWidgetChanged = nodeType.prototype.onWidgetChanged;
     nodeType.prototype.onWidgetChanged = function (name) {
       const result = onWidgetChanged?.apply(this, arguments);
-      if (["aspect_ratio", "megapixels", "multiple", "minimum", "duration_seconds", "start_at_timestamp", "segment_count", "segment_index"].includes(name)) updatePreview(this);
+      if (["aspect_ratio", "crop_method", "megapixels", "multiple", "minimum", "duration_seconds", "start_at_timestamp", "segment_count", "segment_index"].includes(name)) updatePreview(this);
       return result;
     };
 
@@ -224,13 +293,24 @@ app.registerExtension({
       updatePreview(this, message?.resolution);
     };
 
-    if (nodeData.name === "UC_MiniMaxH3RefVid") {
+    if (["UC_MiniMaxH3RefVid", "UC_VideoResolutionAndLengthPicker"].includes(nodeData.name)) {
       const onConnectionsChange = nodeType.prototype.onConnectionsChange;
       nodeType.prototype.onConnectionsChange = function (type, slot) {
         const result = onConnectionsChange?.apply(this, arguments);
         if (type === 1) {
           if (this.inputs?.[slot]?.name === "video") this.__ucH3SourceSeconds = null;
           updatePreview(this);
+          const origin = connectedOrigin(this, this.inputs?.[slot]?.name);
+          if (origin?.node) {
+            const originNode = origin.node;
+            const origOnWidget = originNode.onWidgetChanged;
+            const self = this;
+            originNode.onWidgetChanged = function () {
+              const res = origOnWidget?.apply(this, arguments);
+              updatePreview(self);
+              return res;
+            };
+          }
         }
         return result;
       };

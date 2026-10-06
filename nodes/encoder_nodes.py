@@ -404,17 +404,23 @@ class UC_MiniMaxH3ReferenceMedia(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         video_template = io.Autogrow.TemplateNames(
-            io.Image.Input("reference_video", tooltip="Video frame batch for reference video guidance."),
+            io.Image.Input("reference_video", tooltip="Reference video frame batch [F, H, W, C] (24 fps native; sampled at configured video_fps for Qwen VLM conditioning and encoded into reference video latents)."),
             names=[f"reference_video_{index}" for index in range(1, 33)],
             min=0,
         )
         video_audio_template = io.Autogrow.TemplateNames(
-            io.Audio.Input("reference_video_audio", tooltip="Paired audio track for reference video."),
+            io.Audio.Input(
+                "reference_video_audio",
+                tooltip="Audio track paired with reference video by matching index number (e.g. reference_video_audio_1 pairs with reference_video_1). Video soundtracks are numbered first in prompt <Audio N> tags (<Audio 1>, etc.).",
+            ),
             names=[f"reference_video_audio_{index}" for index in range(1, 33)],
             min=0,
         )
         audio_template = io.Autogrow.TemplateNames(
-            io.Audio.Input("reference_audio", tooltip="Audio track for standalone audio reference conditioning."),
+            io.Audio.Input(
+                "reference_audio",
+                tooltip="Standalone reference audio track for acoustic conditioning. Numbered in prompt <Audio N> tags after all video audio soundtracks (e.g. if reference_video_audio_1 is connected, reference_audio_1 becomes <Audio 2>).",
+            ),
             names=[f"reference_audio_{index}" for index in range(1, 33)],
             min=0,
         )
@@ -422,14 +428,33 @@ class UC_MiniMaxH3ReferenceMedia(io.ComfyNode):
             node_id="UC_MiniMaxH3ReferenceMedia",
             display_name="MiniMax H3 Reference Media",
             category="advanced/conditioning",
-            description="Collects multiple reference videos, paired reference video audio tracks, and standalone reference audio tracks for MiniMax H3.",
+            description="Collects multiple reference videos, paired reference video audio tracks (paired by matching index, e.g. reference_video_1 with reference_video_audio_1), and standalone reference audio tracks into a media container for MiniMax H3.",
             inputs=[
-                io.Autogrow.Input("reference_videos", template=video_template, optional=True),
-                io.Autogrow.Input("reference_video_audios", template=video_audio_template, optional=True),
-                io.Autogrow.Input("reference_audios", template=audio_template, optional=True),
+                io.Autogrow.Input(
+                    "reference_videos",
+                    template=video_template,
+                    optional=True,
+                    tooltip="Connect reference video frame batches. Each video is sampled for Qwen VLM presentation and VAE-encoded into reference video latents.",
+                ),
+                io.Autogrow.Input(
+                    "reference_video_audios",
+                    template=video_audio_template,
+                    optional=True,
+                    tooltip="Connect audio tracks paired with reference videos (pairs with reference_video_N by index). Video soundtracks are numbered first in prompt <Audio N> tags (<Audio 1>, etc.).",
+                ),
+                io.Autogrow.Input(
+                    "reference_audios",
+                    template=audio_template,
+                    optional=True,
+                    tooltip="Connect standalone reference audio tracks for acoustic conditioning. Numbered in prompt <Audio N> tags after all video audio soundtracks (e.g. if reference_video_audio_1 is connected, reference_audio_1 becomes <Audio 2>).",
+                ),
             ],
             outputs=[
-                MiniMaxH3ReferenceMedia.Output("reference_media", display_name="Reference Media")
+                MiniMaxH3ReferenceMedia.Output(
+                    "reference_media",
+                    display_name="Reference Media",
+                    tooltip="Bundled media container. Connect to reference_media input on 'Advanced MiniMax H3 Reference Media to Video'.",
+                )
             ],
         )
 
@@ -4368,11 +4393,13 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
             inputs=[
                 io.Clip.Input("clip", tooltip="MiniMax H3 Qwen3-VL 32B text encoder (qwen3vl_32b)."),
                 io.Vae.Input("vae", optional=True, tooltip="Encodes reference videos and reference images."),
+                io.Image.Input("first_frame", optional=True, tooltip="Optional frame-zero VAE anchor and first Qwen picture."),
+                io.Image.Input("last_frame", optional=True, tooltip="Optional final-frame VAE anchor and next Qwen picture."),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True, tooltip="MiniMax H3 prompt."),
                 io.Int.Input("width", default=1344, min=32, max=nodes.MAX_RESOLUTION, step=32),
                 io.Int.Input("height", default=768, min=32, max=nodes.MAX_RESOLUTION, step=32),
                 io.Int.Input("length", default=124, min=5, max=3600, step=17, tooltip="Frame count at 24 fps."),
-                MiniMaxH3ReferenceMedia.Input("reference_media", optional=True, tooltip="Connect MiniMax H3 Reference Media containing reference videos and audios."),
+                MiniMaxH3ReferenceMedia.Input("reference_media", optional=True, tooltip="Connect MiniMax H3 Reference Media containing reference videos, paired video audios, and standalone audios."),
                 io.Vae.Input("audio_vae", optional=True, lazy=True, tooltip="Audio VAE for encoding reference audio tracks."),
                 io.Float.Input("multiplier", default=1.0, min=-1000.0, max=1000.0, step=0.1),
                 io.Combo.Input("ref_image_size", options=["match", "max", "none"], default="match"),
@@ -4380,11 +4407,21 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
                 io.Int.Input("vlm_video_resolution", default=384, min=0, max=4096, step=32),
                 io.Combo.Input("enable_caching", options=list(H3_CACHE_MODES), default="all"),
                 MiniMaxH3MediaConfig.Input("media_config", optional=True),
-                io.Autogrow.Input("reference_images", template=reference_template, optional=True),
+                io.Autogrow.Input(
+                    "reference_images",
+                    template=reference_template,
+                    optional=True,
+                    tooltip="Ordered native H3 image references and separately numbered Qwen pictures (Picture 1, Picture 2, ...). Encoded by VAE and presented to Qwen VLM.",
+                ),
             ],
             outputs=[
-                io.Conditioning.Output(display_name="positive"),
-                io.Latent.Output(),
+                io.Conditioning.Output(
+                    display_name="positive",
+                    tooltip="Conditioning output containing MiniMax H3 prompt, VLM visual presentations, video and audio reference latents, and layout.",
+                ),
+                io.Latent.Output(
+                    tooltip="Empty joint video/audio latent matching configured width, height, and length (at 24 fps).",
+                ),
             ],
         )
 
@@ -4404,6 +4441,8 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
         width=1344,
         height=768,
         length=124,
+        first_frame=None,
+        last_frame=None,
         reference_media=None,
         audio_vae=None,
         multiplier=1.0,
@@ -4422,6 +4461,8 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
             width=width,
             height=height,
             length=length,
+            first_frame=first_frame,
+            last_frame=last_frame,
             reference_media=reference_media,
             audio_vae=audio_vae,
             multiplier=multiplier,

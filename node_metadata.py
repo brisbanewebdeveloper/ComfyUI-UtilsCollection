@@ -4,6 +4,7 @@ import re
 DESCRIPTIONS = {
     "UC_AdjustedResolutionParameters": "Calculates aligned base and upscaled image dimensions from width, height, scale, and multiple.",
     "UC_ResolutionSelectorExtended": "Calculates width and height from an aspect ratio and target megapixel count.",
+    "UC_VideoResolutionAndLengthPicker": "Calculates multiple-aligned video dimensions and generation frame length from aspect ratio and duration, with optional image or video frame resizing and cropping.",
     "UC_ImageScaleAndResolutionPicker": "Resizes an image to a megapixel target and returns base and upscaled dimensions.",
     "UC_Image_Color_Noise": "Adds configurable color noise to an image.",
     "UC_LoadImagePath": "Loads an image and mask from an explicit filesystem path.",
@@ -150,6 +151,8 @@ DESCRIPTIONS = {
     "UC_LogicXOR": "Returns true when an odd number of connected inputs are true.",
     "UC_SigmoidOffsetScheduler": "Creates a curved denoising sigma schedule with adjustable steepness and early/late emphasis; originally made for the Chroma model.",
     "Ideogram4SchedulerPreset": "Provides scheduler and sampling parameters tuned for Ideogram 4 workflows.",
+    "UC_SamplerDMADReNoise": "Few-step re-noise sampler for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
+    "UC_DMADSchedule": "Shifted linear sigma schedule for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
 }
 
 
@@ -178,6 +181,7 @@ EXTRA_ALIASES = {
     "UC_StagedIndividualComposites": ["staged separate composites", "one foreground per image", "interactive placement"],
     "UC_LayeredBackgroundComposite": ["scene composite", "layered composite", "object placement", "background replacement", "cutout"],
     "UC_ResolutionSelectorExtended": ["megapixels", "aspect ratio", "width height", "resolution"],
+    "UC_VideoResolutionAndLengthPicker": ["video resolution", "video length", "video dimensions", "duration", "aspect ratio"],
     "UC_ImageScaleAndResolutionPicker": ["megapixels", "image resize", "upscale", "resolution"],
     "UC_LoadImagePath": ["load image", "image path", "absolute path"],
     "UC_LoadImageDirectory": ["image folder", "batch loader", "directory loader"],

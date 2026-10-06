@@ -6,6 +6,7 @@ from comfy_extras.nodes_ideogram4 import Ideogram4Scheduler
 from ..helpers.scheduler_helpers import (
     BASE_SIGMA_POINTS,
     discard_penultimate_sigma,
+    dmad_scheduler,
     parse_float_list,
     power_shift_scheduler,
     radiance_shift_scheduler,
@@ -452,6 +453,31 @@ class UC_SigmaCurvePchipScheduler(io.ComfyNode):
     get_sigmas = execute
 
 
+class UC_DMADSchedule(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_DMADSchedule",
+            display_name="DMAD Schedule",
+            category="sampling/custom_sampling/schedulers",
+            description="Shifted linear sigma schedule for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
+            inputs=[
+                io.Int.Input("steps", default=4, min=1, max=1000, tooltip="Number of model evaluations (4 for DMAD student)."),
+                io.Float.Input("shift", default=12.0, min=0.0, max=100.0, step=0.1, tooltip="Time shift for the sigma schedule (12.0 for H3 video)."),
+            ],
+            outputs=[
+                io.Sigmas.Output("sigmas", display_name="Sigmas"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, steps: int = 4, shift: float = 12.0) -> io.NodeOutput:
+        sigmas = dmad_scheduler(None, steps=steps, shift=shift).cpu()
+        return io.NodeOutput(sigmas)
+
+    get_sigmas = execute
+
+
 MIGRATED_SCHEDULER_NODES = [
     UC_SigmoidOffsetScheduler,
     UC_PowerShiftScheduler,
@@ -464,6 +490,7 @@ SCHEDULER_NODES = [
     Ideogram4SchedulerPreset,
     UC_SigmaRescale,
     UC_DiscardPenultimateSigma,
+    UC_DMADSchedule,
     *MIGRATED_SCHEDULER_NODES,
 ]
 

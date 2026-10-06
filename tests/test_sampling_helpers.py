@@ -31,13 +31,22 @@ from utils_collection_sampling_test.helpers.sampling_helpers import (
     plan_h3_windows,
     prepare_chunk_guider,
     prepare_h3_source_audio,
+    sample_dmad_renoise,
     start_sampling_loop,
     strip_stale_keyframes,
     split_h3_video_components_into_segments,
 )
+from utils_collection_sampling_test.helpers.scheduler_helpers import (
+    dmad_scheduler,
+    register_scheduler_handlers,
+)
 from utils_collection_sampling_test.nodes.sampling_nodes import (
     UC_H3LoopSampler,
     UC_H3RefVideoSegments,
+    UC_SamplerDMADReNoise,
+)
+from utils_collection_sampling_test.nodes.scheduler_nodes import (
+    UC_DMADSchedule,
 )
 
 
@@ -401,3 +410,110 @@ def test_node_schema():
     frames_list, _, out_w, out_h, lengths, _, _ = out
     assert (out_w, out_h) == (120, 60)
     assert tuple(frames_list[0].shape[1:3]) == (60, 120)
+
+
+def test_dmad_scheduler_exact_values():
+    """Verify dmad_scheduler matches exact grid from reference/DMAD/dmad_h3/sampling.py."""
+    sigmas_4 = dmad_scheduler(None, steps=4, shift=12.0)
+    assert len(sigmas_4) == 5
+    assert pytest.approx(sigmas_4[0].item(), rel=1e-5) == 1.0
+    assert pytest.approx(sigmas_4[1].item(), rel=1e-5) == 12.0 * 0.75 / (1.0 + 11.0 * 0.75)  # 0.97297
+    assert pytest.approx(sigmas_4[2].item(), rel=1e-5) == 12.0 * 0.50 / (1.0 + 11.0 * 0.50)  # 0.92308
+    assert pytest.approx(sigmas_4[3].item(), rel=1e-5) == 12.0 * 0.25 / (1.0 + 11.0 * 0.25)  # 0.80000
+    assert pytest.approx(sigmas_4[4].item(), rel=1e-5) == 0.0
+
+    # Node output
+    node_out = UC_DMADSchedule.execute(steps=4, shift=12.0).result[0]
+    assert torch.allclose(node_out, sigmas_4)
+
+
+def test_sample_dmad_renoise_step_math_and_terminal():
+    """Verify that intermediate steps re-noise and the terminal step keeps pure clean endpoint."""
+    target_x0 = torch.ones(1, 4, 8, 8) * 3.14
+
+    def mock_model(x, sigma_input, **kwargs):
+        # Always predicts target_x0 as clean state
+        return target_x0.clone()
+
+    sigmas = torch.tensor([1.0, 0.8, 0.0], dtype=torch.float32)
+    init_noise = torch.randn(1, 4, 8, 8)
+
+    # Fixed noise draw for predictable assertions
+    fixed_noise = torch.ones_like(target_x0) * 2.0
+
+    def mock_noise_sampler(s, sn):
+        return fixed_noise.clone()
+
+    result = sample_dmad_renoise(
+        mock_model,
+        init_noise,
+        sigmas,
+        noise_sampler=mock_noise_sampler,
+        s_noise=1.0,
+    )
+
+    # In step 0 (sigma 1.0 -> 0.8): x = 0.2 * target_x0 + 0.8 * fixed_noise
+    # In step 1 (sigma 0.8 -> 0.0): sigma_next == 0, so x = target_x0
+    assert torch.allclose(result, target_x0)
+
+
+def test_sample_dmad_renoise_nested_tensor():
+    """Verify sample_dmad_renoise natively handles NestedTensor (MiniMax H3 video + audio)."""
+    t_vid = torch.randn(1, 24, 2, 8, 8)
+    t_aud = torch.randn(1, 32, 2, 10)
+    nt_in = NestedTensor([t_vid, t_aud])
+
+    def mock_model(x, sigma_input, **kwargs):
+        return x
+
+    sigmas = torch.tensor([1.0, 0.9, 0.0], dtype=torch.float32)
+    out = sample_dmad_renoise(
+        mock_model,
+        nt_in,
+        sigmas,
+        extra_args={"seed": 42},
+    )
+
+    assert isinstance(out, NestedTensor)
+    parts = out.unbind()
+    assert len(parts) == 2
+    assert parts[0].shape == t_vid.shape
+    assert parts[1].shape == t_aud.shape
+    assert torch.isfinite(parts[0]).all()
+    assert torch.isfinite(parts[1]).all()
+
+
+def test_sample_dmad_renoise_determinism():
+    """Verify that seed in extra_args provides reproducible re-noise draws."""
+    init_x = torch.randn(1, 4, 4, 4)
+
+    def mock_model(x, sigma, **kwargs):
+        return x * 0.5
+
+    sigmas = torch.tensor([1.0, 0.9, 0.5, 0.0], dtype=torch.float32)
+
+    res1 = sample_dmad_renoise(mock_model, init_x.clone(), sigmas, extra_args={"seed": 123})
+    res2 = sample_dmad_renoise(mock_model, init_x.clone(), sigmas, extra_args={"seed": 123})
+    res3 = sample_dmad_renoise(mock_model, init_x.clone(), sigmas, extra_args={"seed": 456})
+
+    assert torch.allclose(res1, res2)
+    assert not torch.allclose(res1, res3)
+
+
+def test_dmad_sampler_node_and_registration():
+    """Verify UC_SamplerDMADReNoise schema/output and custom sampler wrapping."""
+    schema = UC_SamplerDMADReNoise.define_schema()
+    assert schema.node_id == "UC_SamplerDMADReNoise"
+
+    out = UC_SamplerDMADReNoise.execute(s_noise=1.0).result[0]
+    import comfy.samplers
+    assert isinstance(out, comfy.samplers.KSAMPLER)
+    assert out.sampler_function is sample_dmad_renoise
+    assert out.extra_options.get("s_noise") == 1.0
+
+    # Scheduler registration
+    register_scheduler_handlers()
+    assert "dmad" in comfy.samplers.SCHEDULER_HANDLERS
+    assert "dmad" in comfy.samplers.SCHEDULER_NAMES
+
+

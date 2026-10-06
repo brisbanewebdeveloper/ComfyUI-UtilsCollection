@@ -1,11 +1,13 @@
 """Node definitions for sampling workflows."""
 
 import torch
+import comfy.samplers
 from comfy_api.latest import io
 from ..helpers.sampling_helpers import (
     H3_CHUNK_SECONDS_OPTIONS,
     H3_OVERLAP_SECONDS_OPTIONS,
     parse_h3_seconds_option,
+    sample_dmad_renoise,
     split_h3_video_components_into_segments,
     start_sampling_loop,
 )
@@ -480,3 +482,45 @@ class UC_H3RefVideoSegments(io.ComfyNode):
             video_list,
             transcript_list,
         )
+
+
+class UC_SamplerDMADReNoise(io.ComfyNode):
+    """Few-step re-noise sampler for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3)."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_SamplerDMADReNoise",
+            display_name="DMAD Re-Noise Sampler",
+            category="sampling/custom_sampling/samplers",
+            description="Few-step re-noise sampler for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
+            inputs=[
+                io.Float.Input(
+                    "s_noise",
+                    default=1.0,
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    round=False,
+                    tooltip="Noise multiplier for intermediate re-noise draws. 1.0 matches the DMAD paper training protocol.",
+                ),
+            ],
+            outputs=[
+                io.Sampler.Output("sampler", display_name="Sampler"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, s_noise: float = 1.0) -> io.NodeOutput:
+        sampler = comfy.samplers.KSAMPLER(sample_dmad_renoise, extra_options={"s_noise": s_noise})
+        return io.NodeOutput(sampler)
+
+    get_sampler = execute
+
+
+SAMPLING_NODES = [
+    UC_H3LoopSampler,
+    UC_H3RefVideoSegments,
+    UC_SamplerDMADReNoise,
+]
+
