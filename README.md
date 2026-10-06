@@ -10,10 +10,16 @@ The list below uses the canonical node IDs. Deprecated compatibility aliases rem
 
 Whisper transcription requires `tiktoken` (included in `requirements.txt`). Without it, the collection still loads and non-Whisper nodes remain available; attempting transcription gives an installation error. Install it in ComfyUI's Python environment and restart ComfyUI to enable Whisper.
 
-- `UC_WhisperLoader` loads tiny, base (default), small, medium, large-v2, or large-v3 safetensors from the registered `whisper` model directories. If missing, executing the loader downloads only the selected model from `silveroxides/ComfyUI-UtilsCollection-Models/audio/whisper` into `models/whisper`. Existing configured directories retain priority; invalid checkpoints raise an error rather than being replaced.
-- `UC_WhisperTranscribe` takes the loaded model and ComfyUI `AUDIO`. Choose transcription (default) or translation to English, with automatic spoken-language detection or a language code. Stereo/multichannel audio is downmixed to mono and resampled to 16 kHz. Full recordings are processed in timestamp-aware windows.
-- Outputs are aligned ComfyUI lists: transcript text, a JSON array of `{start, end, text}` segments, and a spoken-language code per recording. Times are seconds from the start of each recording, not each processing window. With an explicit language, the language output reports that selection. Translation text is English, not the selected source language.
-- Native inference uses ComfyUI model management and attention, UEL safetensors loading, and `tiktoken`; it does not import `openai-whisper` or the local reference checkout. Segment timestamps are approximate. Word alignment, diarization, SRT/VTT formatting, and advanced decoding widgets are not included. A language unavailable in a checkpoint is rejected explicitly.
+- `UC_WhisperLoader`
+- `UC_WhisperTranscribe`
+
+`UC_WhisperLoader` loads tiny, base (default), small, medium, large-v2, or large-v3 safetensors from the registered `whisper` model directories. If missing, executing the loader downloads only the selected model from `silveroxides/ComfyUI-UtilsCollection-Models/audio/whisper` into `models/whisper`. Existing configured directories retain priority; invalid checkpoints raise an error rather than being replaced.
+
+`UC_WhisperTranscribe` takes the loaded model and ComfyUI `AUDIO`. Choose transcription (default) or translation to English, with automatic spoken-language detection or a language code. Stereo/multichannel audio is downmixed to mono and resampled to 16 kHz. Full recordings are processed in timestamp-aware windows.
+
+Outputs are aligned ComfyUI lists: transcript text, a JSON array of `{start, end, text}` segments, and a spoken-language code per recording. Times are seconds from the start of each recording, not each processing window. With an explicit language, the language output reports that selection. Translation text is English, not the selected source language.
+
+Native inference uses ComfyUI model management and attention, UEL safetensors loading, and `tiktoken`; it does not import `openai-whisper` or the local reference checkout. Segment timestamps are approximate. Word alignment, diarization, SRT/VTT formatting, and advanced decoding widgets are not included. A language unavailable in a checkpoint is rejected explicitly.
 
 ### Text encoding and conditioning
 
@@ -23,11 +29,20 @@ Whisper transcription requires `tiktoken` (included in `requirements.txt`). With
 - `UC_TextEncodeSystemEditAdvanced`
 - `UC_TextEncodeGemmaSystemEditAdvanced`
 - `UC_AdvancedVisualConditioningEncode`
-- `UC_AdvancedVisualConditioningEncodeTokenFusion`
 - `UC_AdvancedMiniMaxH3ImageToVideo`
-- `UC_AdvMiniMaxH3ImageToVideoTokenFusion`
+- `UC_AdvancedMiniMaxH3RefMediaImageToVideo`
 - `UC_AdvMiniMaxH3ImageToVideoTemporalFusion`
-- `UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion`
+- `UC_MiniMaxH3ReferenceMedia`
+- `UC_VisualFusionImages`
+- `UC_MiniMaxH3ClipContinuationEncoder`
+- `UC_MiniMaxH3ClipContinuationSave`
+- `UC_MiniMaxH3ClipContinuationLoad`
+- `UC_MiniMaxH3ClipContinuationUnpack`
+- `UC_MiniMaxH3ClipContinuationTrim`
+- `UC_MiniMaxH3ClipContinuationAccumulate`
+- `UC_H3RefVideoSegments`
+- `UC_MiniMaxH3BasePromptBuilder`
+- `UC_MiniMaxH3DynamicPromptBuilder`
 - `UC_MiniMaxH3VLMGuide`
 - `UC_MiniMaxH3MediaConfig`
 - `UC_MiniMaxH3RefExtract`
@@ -36,16 +51,14 @@ Whisper transcription requires `tiktoken` (included in `requirements.txt`). With
 - `UC_MiniMaxH3RefSave`
 - `UC_MiniMaxH3RefApply`
 - `UC_AdvancedVisConEncoder`
-- `UC_AdvancedVisConEncoderTokenFusion`
 - `UC_VisualConsensusConfiguration`
 - `UC_AdvancedConsensusConfiguration`
+- `UC_VLMInputEmbeds`
 - `UC_Krea2TokenAttentionWeight`
-- `UC_Krea2TokenAttentionWeightTokenFusion`
 - `UC_AttentionBiasTextEncode`
 - `UC_TextConsensusBlendConfig`
 - `UC_VisualFusionConfig`
 - `UC_ConditioningConsensusBlend`
-- `UC_VLMInputEmbeds`
 - `UC_Krea2LayerProbe`
 - `UC_Krea2LayerAblator`
 - `UC_MiniMaxH3ClipProjectionPatcher`
@@ -185,6 +198,7 @@ the base-resolution conditioning fusion.
 - `UC_MediaPipeFaceCompositeOptions`
 - `UC_MediaPipeFaceComposite`
 - `UC_ListToImageBatch`
+- `UC_ImageBatchToList`
 - `UC_StitchImageGrid`
 - `UC_ImageMatchProperties`
 - `UC_ImageColorRestore`
@@ -196,8 +210,11 @@ the base-resolution conditioning fusion.
 - `UC_LaMaInpaint`
 - `UC_BatchedOpenPose`
 - `UC_DWPoseEstimator`
+- `UC_OverlayPoseKeypoints`
 - `UC_AnimalPoseEstimator`
 - `UC_DensePoseEstimator`
+- `UC_LoadVideoPath`
+- `UC_LoadVideoDirectory`
 
 `UC_BatchedOpenPose` batches video frames for body inference and person crops for hand/face inference. `UC_DWPoseEstimator` batches YOLOX frames and RTMPose person crops, including partial batches without padding. Both return `IMAGE` and `POSE_KEYPOINT`, use ComfyUI's selected device/model management, and expose a batch size to control VRAM use. These are independent eager implementations loaded through UEL; `comfyui_controlnet_aux`, Ultralytics, ONNX Runtime, MMPose, and TorchScript are not runtime dependencies. Speed and prediction parity need real-model validation.
 
@@ -246,6 +263,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_AdjustedResolutionParameters`
 - `UC_ResolutionSelectorExtended`
 - `UC_VideoResolutionSelector`
+- `UC_VideoResolutionAndLengthPicker`
 - `UC_ImageScaleAndResolutionPicker`
 - `UC_SwitchInverseNode`
 - `UC_SoftSwitchInverseNode`
@@ -296,7 +314,9 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_LoadImageDirectory`
 - `UC_LoadImageWithAlpha`
 - `UC_SampleVideoFramesAsImages`
-- `UC_MiniMaxH3RefVid` — **H3 Reference Video Components** prepares 24 fps reference frames, H3-ready audio, width, height, and frame count. Its final `video` output preserves the source resolution and framing, adjusting only timing and audio for nodes that accept VIDEO. `start_at_timestamp` skips the beginning of both video and audio: `0` skips nothing; positive seconds use H3 frame-count rounding. Duration is measured after that offset (`0` uses the remaining clip), with the usual H3 end padding. The live preview displays zero-based start frame, inclusive end frame, and output frame count; with automatic duration, end/count become available after video analysis. End frames can extend beyond the source because the final frame is repeated for padding. Only the separate `frames` output is matched to the nearest standard aspect ratio from Video Resolution Selector and center-cropped to its selected resolution. Audio is resampled to 32 kHz and padded only at the end to an 800-sample boundary, avoiding Core's H3 audio input-cropping issue; missing audio is filled with silence.
+- `UC_MiniMaxH3RefVid`
+
+**H3 Reference Video Components** prepares 24 fps reference frames, H3-ready audio, width, height, and frame count. Its final `video` output preserves the source resolution and framing, adjusting only timing and audio for nodes that accept VIDEO. `start_at_timestamp` skips the beginning of both video and audio: `0` skips nothing; positive seconds use H3 frame-count rounding. Duration is measured after that offset (`0` uses the remaining clip), with the usual H3 end padding. The live preview displays zero-based start frame, inclusive end frame, and output frame count; with automatic duration, end/count become available after video analysis. End frames can extend beyond the source because the final frame is repeated for padding. Only the separate `frames` output is matched to the nearest standard aspect ratio from Video Resolution Selector and center-cropped to its selected resolution. Audio is resampled to 32 kHz and padded only at the end to an 800-sample boundary, avoiding Core's H3 audio input-cropping issue; missing audio is filled with silence.
 - `UC_ImagesToVideoTimeline`
 - `UC_VideoTimelineText`
 - `UC_LoraLoaderCLIPOnly`
@@ -407,6 +427,9 @@ run may receive less acceleration than its selected sparsity suggests.
 ### Scheduler presets
 
 - `Ideogram4SchedulerPreset`
+- `UC_H3LoopSampler`
+- `UC_SamplerDMADReNoise`
+- `UC_DMADSchedule`
 - `UC_SigmaRescale`
 - `UC_DiscardPenultimateSigma`
 - `UC_SigmoidOffsetScheduler`

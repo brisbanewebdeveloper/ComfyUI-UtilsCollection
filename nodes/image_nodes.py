@@ -2472,7 +2472,7 @@ class UC_StitchImageGrid(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Image.Output("image", display_name="IMAGE"),
+                io.Image.Output("image", display_name="IMAGE", tooltip="Stitched grid image."),
             ],
         )
 

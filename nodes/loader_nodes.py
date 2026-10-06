@@ -57,7 +57,7 @@ class UC_LoraLoaderModelOnly(io.ComfyNode):
             category="advanced/model",
             description="Loads a LoRA into the diffusion model with layer regex and transformer block filtering.",
             inputs=[
-                io.Model.Input("model"),
+                io.Model.Input("model", tooltip="The diffusion model the LoRA will be applied to."),
                 io.Combo.Input(
                     "lora_name",
                     options=get_filename_list("loras"),
