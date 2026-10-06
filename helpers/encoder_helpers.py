@@ -297,22 +297,7 @@ def _minimax_h3_text_entries(clip, text: str) -> list:
     return _token_entries(clip.tokenize(text), "qwen3vl_32b")
 
 
-_H3_VISUAL_ENTRIES_CACHE: dict = {}
-_H3_VISUAL_BLOCKS_CACHE: dict = {}
-
-
-def _image_cache_key(image):
-    if torch.is_tensor(image):
-        rev = getattr(image, "_version", None)
-        return (id(image), rev, image.shape, str(image.device), image.data_ptr())
-    return id(image)
-
-
 def _minimax_h3_visual_token_entries(clip, image) -> list:
-    key = (id(clip), _image_cache_key(image))
-    if key in _H3_VISUAL_ENTRIES_CACHE:
-        return _H3_VISUAL_ENTRIES_CACHE[key]
-
     full = _token_entries(
         clip.tokenize("", images=[image]), "qwen3vl_32b"
     )
@@ -326,17 +311,12 @@ def _minimax_h3_visual_token_entries(clip, image) -> list:
     visual = full[len(picture_one) :]
     if sum(is_image_token(item) for item in visual) != 1:
         raise ValueError("MiniMax H3 picture block must contain exactly one image entry.")
-    _H3_VISUAL_ENTRIES_CACHE[key] = visual
     return visual
 
 
 def _minimax_h3_visual_token_blocks(clip, images) -> list[list]:
     if not images:
         return []
-    key = (id(clip), tuple(_image_cache_key(img) for img in images))
-    if key in _H3_VISUAL_BLOCKS_CACHE:
-        return _H3_VISUAL_BLOCKS_CACHE[key]
-
     entries = _token_entries(
         clip.tokenize("", images=list(images)), "qwen3vl_32b"
     )
@@ -346,12 +326,11 @@ def _minimax_h3_visual_token_blocks(clip, images) -> list[list]:
             continue
         if index < 1 or index + 1 >= len(entries):
             raise ValueError("MiniMax H3 tokenizer returned an incomplete visual block.")
-        blocks.append(entries[index - 1 : index + 2])
+        blocks.append(entries[index - 1:index + 2])
     if len(blocks) != len(images):
         raise ValueError(
             f"MiniMax H3 tokenizer returned {len(blocks)} visual blocks for {len(images)} Pictures."
         )
-    _H3_VISUAL_BLOCKS_CACHE[key] = blocks
     return blocks
 
 
@@ -3776,25 +3755,6 @@ def execute_advanced_minimax_h3_image_to_video(
                 temporal_token_fusion=temporal_token_fusion, text_blend_config=text_blend_config,
                 cache=invocation, enable_caching=enable_caching,
             )
-    if isinstance(prompt, (list, tuple)):
-        conds = []
-        latents = []
-        for p in prompt:
-            c, l = execute_advanced_minimax_h3_image_to_video(
-                clip, vae, p, width, height, length,
-                first_frame=first_frame, last_frame=last_frame, reference_images=reference_images,
-                fusion_images=fusion_images, visual_fusion_config=visual_fusion_config,
-                multiplier=multiplier, ref_image_size=ref_image_size,
-                vlm_resolution=vlm_resolution, vlm_video_resolution=vlm_video_resolution,
-                media_config=media_config, video=video, continuation_media=continuation_media,
-                audio=audio, audio_vae=audio_vae,
-                token_fusion=token_fusion, temporal_fusion=temporal_fusion,
-                temporal_token_fusion=temporal_token_fusion, text_blend_config=text_blend_config,
-                cache=cache, enable_caching=enable_caching,
-            )
-            conds.append(c)
-            latents.append(l)
-        return conds, latents
     _, flat_references, _ = extract_and_flatten_images(reference_images)
     _, flat_fusion_images, _ = extract_and_flatten_images(fusion_images)
     fusion_socket_batches = extract_image_socket_batches(fusion_images)
