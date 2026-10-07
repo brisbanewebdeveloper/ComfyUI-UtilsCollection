@@ -140,3 +140,10 @@ test("canvas draw-loop tooltips are rendered with upward offset and no DOM eleme
   assert.ok(baseSource.includes("onPointerMove(event)"));
   assert.ok(baseSource.includes("clearHoveredTooltip()"));
 });
+
+test("collapsing dropdown menus route clicks through getWidgetOnPos and support disabled options", () => {
+  const source = readFileSync(new URL("../web/minimax_h3_prompt.js", import.meta.url), "utf8");
+  assert.ok(source.includes("this.activeMenu && this.menuBoundingBox && this.contains(this.menuBoundingBox, x, y)"));
+  assert.ok(source.includes("this.menuBoundingBox = { x: mx, y: my, w: mw, h: totalH }"));
+  assert.ok(source.includes("const disabled = Boolean(opt.disabled)"));
+});

@@ -20,6 +20,7 @@ class H3CanvasPromptEditor {
     this.hitRegions = [];
     this.hoveredRegion = null;
     this.activeMenu = null;
+    this.menuBoundingBox = null;
     this.menuHitRegions = [];
     this.hoveredMenuIndex = -1;
     this.textEditor = null;
@@ -42,6 +43,9 @@ class H3CanvasPromptEditor {
     node.getWidgetOnPos = (graphX, graphY, includeDisabled) => {
       const x = graphX - node.pos[0];
       const y = graphY - node.pos[1];
+      if (this.activeMenu && this.menuBoundingBox && this.contains(this.menuBoundingBox, x, y)) {
+        return this.widget;
+      }
       if (this.hitRegions.some(region => this.contains(region, x, y))) return this.widget;
       const found = getWidgetOnPos.call(node, graphX, graphY, includeDisabled);
       return found === this.widget ? undefined : found;
@@ -289,6 +293,7 @@ class H3CanvasPromptEditor {
   closeMenu() {
     if (this.activeMenu) {
       this.activeMenu = null;
+      this.menuBoundingBox = null;
       this.hoveredMenuIndex = -1;
       app.canvas?.setDirty(true, true);
     }
@@ -314,6 +319,8 @@ class H3CanvasPromptEditor {
       my = Math.max(yTop + 10, y - totalH - 4);
     }
 
+    this.menuBoundingBox = { x: mx, y: my, w: mw, h: totalH };
+
     ctx.save();
     ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
     ctx.shadowBlur = 12;
@@ -326,36 +333,39 @@ class H3CanvasPromptEditor {
 
     options.forEach((opt, idx) => {
       const iy = my + pad + idx * itemH;
+      const disabled = Boolean(opt.disabled);
       const active = Boolean(opt.active);
-      const isHovered = this.hoveredMenuIndex === idx;
+      const isHovered = !disabled && this.hoveredMenuIndex === idx;
 
       const fill = active ? "#1d4ed8" : isHovered ? "#222733" : "transparent";
-      const textColor = active ? "#ffffff" : isHovered ? "#93c5fd" : "#cbd5e1";
+      const textColor = disabled ? "#64748b" : active ? "#ffffff" : isHovered ? "#93c5fd" : "#cbd5e1";
 
       if (fill !== "transparent") {
         this.box(ctx, mx + 2, iy, mw - 4, itemH - 2, fill, null, 3);
       }
 
       ctx.fillStyle = textColor;
-      ctx.font = active ? "bold 11px sans-serif" : "11px sans-serif";
+      ctx.font = disabled ? "italic 11px sans-serif" : active ? "bold 11px sans-serif" : "11px sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(opt.label, mx + 8, iy + (itemH - 2) / 2, mw - 16);
 
-      this.menuHitRegions.push({
-        x: mx,
-        y: iy,
-        w: mw,
-        h: itemH,
-        action: () => {
-          this.closeMenu();
-          if (opt.action) {
-            opt.action();
-          } else if (onSelect) {
-            onSelect(opt.value ?? opt);
-          }
-        },
-      });
+      if (!disabled) {
+        this.menuHitRegions.push({
+          x: mx,
+          y: iy,
+          w: mw,
+          h: itemH,
+          action: () => {
+            this.closeMenu();
+            if (opt.action) {
+              opt.action();
+            } else if (onSelect) {
+              onSelect(opt.value ?? opt);
+            }
+          },
+        });
+      }
     });
 
     ctx.restore();
@@ -658,29 +668,12 @@ class H3CanvasPromptEditor {
               });
             });
 
-            if (!pics.length) {
+            if (!pics.length && !vids.length) {
               menuOpts.push({
-                label: "Reference <Picture 1>",
-                active: item.hasRef && item.refType === "picture" && item.refIndex === 1,
-                action: () => this.change(() => { item.hasRef = true; item.refType = "picture"; item.refIndex = 1; }),
+                label: "(No pictures or videos defined yet)",
+                disabled: true,
               });
             }
-
-            menuOpts.push({
-              label: "Custom Picture / Video #...",
-              active: false,
-              action: () => {
-                this.editSingleLine("Reference Media Tag (e.g. Picture 1 or Video 2)", `${item.refType === "video" ? "Video" : "Picture"} ${item.refIndex || 1}`, val => {
-                  if (!val) return;
-                  const m = val.match(/(picture|video)\s*(\d+)/i);
-                  if (m) {
-                    item.hasRef = true;
-                    item.refType = m[1].toLowerCase();
-                    item.refIndex = parseInt(m[2], 10) || 1;
-                  }
-                });
-              },
-            });
 
             this.openMenu(left + 102, cardY + 31, selW + 30, menuOpts);
           }, item.hasRef, "center", item.hasRef, false, "Click to choose standalone mode or reference picture/video.");
@@ -793,42 +786,33 @@ class H3CanvasPromptEditor {
           }, true, "center", false, false, "Click to select how this reference audio is used.");
 
           if (item.role === "timbre") {
-            const spkLabel = `Speaker: <Subj ${item.targetSubject || 1}> ▾`;
+            const subs = this.state.definitions.filter(d => d.kind === "subject");
+            const hasSubs = subs.length > 0;
+            const targetSub = subs.find(s => s.id === item.targetSubject) || subs[0];
+            const spkLabel = hasSubs
+              ? `Speaker: <Subj ${targetSub.id}> (S${targetSub.id}) ▾`
+              : "Speaker: (None Defined) ▾";
             const spkW = Math.max(120, Math.ceil(ctx.measureText(spkLabel).width) + 18);
             const spkX = left + 108 + selW;
 
             this.button(ctx, spkX, cardY + 7, spkW, 22, spkLabel, () => {
               const spkOpts = [];
-              const subs = this.state.definitions.filter(d => d.kind === "subject");
-              if (subs.length) {
+              if (hasSubs) {
                 subs.forEach(s => {
                   spkOpts.push({
                     label: `Speaker: <Subject ${s.id}> (S${s.id})`,
-                    active: (item.targetSubject || 1) === s.id,
+                    active: (item.targetSubject || targetSub.id) === s.id,
                     action: () => this.change(() => { item.targetSubject = s.id; }),
                   });
                 });
               } else {
-                [1, 2, 3].forEach(id => {
-                  spkOpts.push({
-                    label: `Speaker: <Subject ${id}> (S${id})`,
-                    active: (item.targetSubject || 1) === id,
-                    action: () => this.change(() => { item.targetSubject = id; }),
-                  });
+                spkOpts.push({
+                  label: "(No subjects defined yet)",
+                  disabled: true,
                 });
               }
-              spkOpts.push({
-                label: "Custom Subject ID...",
-                active: false,
-                action: () => {
-                  this.editSingleLine("Target Subject ID number for Voice Timbre", String(item.targetSubject || 1), val => {
-                    const n = parseInt(val, 10);
-                    if (n > 0) item.targetSubject = n;
-                  });
-                },
-              });
               this.openMenu(spkX, cardY + 31, spkW + 20, spkOpts);
-            }, false, "center", false, false, "Select which subject receives this voice timbre.");
+            }, false, "center", false, false, "Select which defined subject receives this voice timbre.");
           }
 
           if (item.role === "custom") {
@@ -924,17 +908,41 @@ class H3CanvasPromptEditor {
       this.text(ctx, "retention_analysis: (Format: <label>: <marker> - <descriptor>)", left, sy(cy + 10), "#93c5fd", "bold 12px sans-serif");
       cy += 24;
 
-      this.button(ctx, left, sy(cy), 170, 26, "+ Add Retention Label", event => {
-        this.editSingleLine("Tracked Label (e.g. <Subject 1> or <Video 1>)", "<Video 1>", label => {
-          if (label?.trim()) {
-            this.state.retention.push({
-              label: label.trim(),
-              marker: "attribute_transfer",
-              text: defaultRetentionText(label.trim(), "attribute_transfer"),
+      this.button(ctx, left, sy(cy), 170, 26, "+ Add Retention Label ▾", () => {
+        const existingLabels = new Set(this.state.retention.map(r => r.label));
+        const defs = this.state.definitions || [];
+        const availableOptions = [];
+
+        defs.forEach(d => {
+          let tag = "";
+          if (d.kind === "subject") tag = `<Subject ${d.id}>`;
+          else if (d.kind === "picture") tag = `<Picture ${d.id}>`;
+          else if (d.kind === "video") tag = `<Video ${d.id}>`;
+          else if (d.kind === "audio") tag = `<Audio ${d.id}>`;
+
+          if (tag && !existingLabels.has(tag)) {
+            availableOptions.push({
+              label: `Track ${tag}`,
+              action: () => this.change(() => {
+                this.state.retention.push({
+                  label: tag,
+                  marker: d.kind === "audio" ? "reference" : "attribute_transfer",
+                  text: defaultRetentionText(tag, d.kind === "audio" ? "reference" : "attribute_transfer"),
+                });
+              }),
             });
           }
-        }, event);
-      }, true, "center", false, false, "Adds a tracked reference label to define its retention or transfer rules.");
+        });
+
+        if (!availableOptions.length) {
+          availableOptions.push({
+            label: defs.length ? "(All defined entities already tracked)" : "(No entities defined yet)",
+            disabled: true,
+          });
+        }
+
+        this.openMenu(left, sy(cy) + 30, 200, availableOptions);
+      }, true, "center", false, false, "Select an existing defined entity to track retention/transfer.");
 
       this.button(ctx, left + 178, sy(cy), 120, 26, "Clear All (T2V)", () => {
         this.change(() => { this.state.retention = []; });
