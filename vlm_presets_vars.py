@@ -3592,7 +3592,7 @@ In every Timeline segment, every mentioned Subject action must include that Subj
 Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and forward progression without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -3865,7 +3865,7 @@ In every Timeline segment, every mentioned Subject action must include that Subj
 Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and forward progression without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -4211,7 +4211,7 @@ Keep [VISUAL] focused on physical action, camera movement, physical continuity, 
 Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`. Never describe, mention, or revert to the visual appearance, styling, or features of any subject originally shown in `<Video 1>` designated for replacement. Replaced subjects from `<Video 1>` exist solely as sources of motion, timing, and spatial choreography; their original visual appearances are completely nonexistent in the target video.
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -4546,7 +4546,7 @@ Keep [VISUAL] focused on physical action, camera movement, physical continuity, 
 Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`. Never describe, mention, or revert to the visual appearance, styling, or features of any subject originally shown in `<Video 1>` designated for replacement. Replaced subjects from `<Video 1>` exist solely as sources of motion, timing, and spatial choreography; their original visual appearances are completely nonexistent in the target video.
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -4827,7 +4827,7 @@ In every Timeline segment, every mentioned Subject action must include that Subj
 Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and smooth motion between key panel beats without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -5098,7 +5098,7 @@ In every Timeline segment, every mentioned Subject action must include that Subj
 Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and smooth motion between key panel beats without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -5456,7 +5456,7 @@ Keep [VISUAL] focused on physical action, camera movement, physical continuity, 
 Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`. Never describe, mention, or revert to the visual appearance, styling, or features of any subject originally shown in `<Video 1>` designated for replacement. Replaced subjects from `<Video 1>` exist solely as sources of motion, timing, and spatial choreography; their original visual appearances are completely nonexistent in the target video.
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -5775,7 +5775,7 @@ Reintroduce concrete characteristics when needed to keep identity, appearance, s
 
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -5882,7 +5882,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types from the allowed list. Write one short final-target paragraph without duplicating the Timeline.
 7. Select one valid relationship marker for every separately tracked label. Keep retention_analysis limited to reference fidelity, transfer, copy, and continuity relationships.
 8. Plan adaptive contiguous timestamp ranges from 00.00s through the exact requested endpoint. Place boundaries only at meaningful chronological, foreground, scene-state, or reference-role changes.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write every [VISUAL] with current composition, Subject appearance and position, environment, props, lighting, action, reaction, state change, camera motion, continuity, and applicable reference points.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue. Apply reference-audio wording, voiceover, group-speaker, <scenetrans>, and <cutoff> rules only where they apply.
 12. Keep synchronized [SPEECH], [SOUNDS], and [MUSIC] in the applicable timestamp blocks. Preserve one foreground event per block and control competing channel load.
@@ -6113,7 +6113,7 @@ Reintroduce concrete characteristics when needed to keep identity, appearance, s
 
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -6220,7 +6220,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types from the allowed list. Write one short final-target paragraph without duplicating the Timeline.
 7. Select one valid relationship marker for every separately tracked label. Keep retention_analysis limited to reference fidelity, transfer, copy, and continuity relationships.
 8. Plan adaptive contiguous timestamp ranges from 00.00s through the exact requested endpoint. Place boundaries only at meaningful chronological, foreground, scene-state, or reference-role changes.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write every [VISUAL] with current composition, Subject appearance and position, environment, props, lighting, action, reaction, state change, camera motion, continuity, and applicable reference points.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue. Apply reference-audio wording, voiceover, group-speaker, <scenetrans>, and <cutoff> rules only where they apply.
 12. Keep synchronized [SPEECH], [SOUNDS], and [MUSIC] in the applicable timestamp blocks. Preserve one foreground event per block and control competing channel load.
@@ -6591,7 +6591,7 @@ Reintroduce concrete characteristics when needed to keep identity, appearance, s
 
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -6698,7 +6698,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types from the allowed list. Write one short final-target paragraph without duplicating the Timeline.
 7. Select one valid relationship marker for every separately tracked label. Keep retention_analysis limited to reference fidelity, transfer, copy, and continuity relationships.
 8. Plan adaptive contiguous timestamp ranges from 00.00s through the exact requested endpoint. Place boundaries only at meaningful chronological, foreground, scene-state, or reference-role changes.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write every [VISUAL] with current composition, Subject appearance and position, environment, props, lighting, action, reaction, state change, camera motion, continuity, and applicable reference points.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue. Apply reference-audio wording, voiceover, group-speaker, <scenetrans>, and <cutoff> rules only where they apply.
 12. Keep synchronized [SPEECH], [SOUNDS], and [MUSIC] in the applicable timestamp blocks. Preserve one foreground event per block and control competing channel load.
@@ -7005,7 +7005,7 @@ Reintroduce concrete characteristics when needed to keep identity, appearance, s
 
 #### Shots and Camera
 
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 
@@ -7113,7 +7113,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types from the allowed list. Write one short final-target paragraph without duplicating the Timeline.
 7. Select one valid relationship marker for every separately tracked label. Keep retention_analysis limited to reference fidelity, transfer, copy, and continuity relationships.
 8. Plan adaptive contiguous timestamp ranges from 00.00s through the exact requested endpoint. Place boundaries only at meaningful chronological, foreground, scene-state, or reference-role changes.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write every [VISUAL] with current composition, Subject appearance and position, environment, props, lighting, action, reaction, state change, camera motion, continuity, and applicable reference points.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue. Apply reference-audio wording, voiceover, group-speaker, `<scenetrans>`, and `<cutoff>` rules only where they apply.
 12. Keep synchronized [SPEECH], [SOUNDS], and [MUSIC] in the applicable timestamp blocks. Preserve one foreground event per block and control competing channel load.
@@ -7323,7 +7323,7 @@ Use a Picture label naturally when its concrete frame or planning role affects t
 Reintroduce concrete characteristics when needed to keep identity, appearance, spatial relationships, action, and motion unambiguous. Do not substitute repeated labels for description. Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and applicable reference use without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 
 #### Shots and Camera
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 Describe camera movement as a natural action inside [VISUAL]. State motion type and add speed only when it materially affects the shot.
 
@@ -7399,7 +7399,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types. Describe only the completed target video and never emit sample-media bookkeeping.
 7. Select one valid relationship marker for every final Subject and applicable Audio label. Keep retention_analysis free of sample identifiers, source identity, choreography, and timing.
 8. When explicit starts exist, copy every start literally, output exactly that segment count, and end the final range at the exact duration. Otherwise plan adaptive contiguous ranges.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write the final Subject continuously through every applicable block. Include current composition, final appearance and position, environment, lighting, action, state, camera, continuity, and synchronized sound.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue. Apply reference-audio wording, voiceover, group-speaker, <scenetrans>, and <cutoff> rules only where applicable.
 12. Keep synchronized [SPEECH], [SOUNDS], and [MUSIC] in applicable blocks. Preserve one foreground event per block and control competing channel load.
@@ -7614,7 +7614,7 @@ Use a Picture label naturally when its concrete frame or planning role affects t
 Reintroduce concrete characteristics when needed to keep identity, appearance, spatial relationships, action, and motion unambiguous. Do not substitute repeated labels for description. Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and applicable reference use without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 
 #### Shots and Camera
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 Describe camera movement as a natural action inside [VISUAL]. State motion type and add speed only when it materially affects the shot.
 Use these allowed camera motions:
@@ -7688,7 +7688,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types. Describe only the completed target and keep replacement bookkeeping out of summary.
 7. Select one valid relationship marker for every separately tracked label. State Picture-to-Video attribute transfer only when it actually applies.
 8. Plan adaptive contiguous ranges from 00.00s through the exact endpoint. When the regular request explicitly supplies segment starts, preserve that exact count and every start.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Never write <Video N> inside a timestamp block.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Never write <Video N> inside a timestamp block.
 10. Write final Subjects continuously with current composition, appearance, position, environment, lighting, action, state, camera, continuity, and synchronized sound.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue and apply reference-audio, voiceover, group-speaker, <scenetrans>, and <cutoff> rules where applicable.
 12. Apply the supplied-<Audio 1> override exactly when the regular request activates it. Otherwise synchronize applicable [SPEECH], [SOUNDS], and [MUSIC].
@@ -8017,7 +8017,7 @@ Use a Picture label naturally when its concrete frame or planning role affects t
 Reintroduce concrete characteristics when needed to keep identity, appearance, spatial relationships, action, and motion unambiguous. Do not substitute repeated labels for description. Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and applicable reference use without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 
 #### Shots and Camera
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 Describe camera movement as a natural action inside [VISUAL]. State motion type and add speed only when it materially affects the shot.
 Use these allowed camera motions:
@@ -8089,7 +8089,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select only applicable summary task types. Describe only the completed target and keep replacement analysis out of summary.
 7. Select one valid marker for every tracked label. State attribute transfer only when replacement or another true transfer applies.
 8. Plan adaptive contiguous ranges from 00.00s through the exact duration unless explicit target starts govern the variant request.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write current composition, final Subject appearance and position, environment, lighting, action, state, camera, continuity, sound, and reference effect points.
 11. Assign stable speakers in actual vocal-event order. Preserve exact user dialogue and apply reference-audio, voiceover, group-speaker, <scenetrans>, and <cutoff> rules.
 12. Synchronize applicable [SPEECH], [SOUNDS], and [MUSIC]. Preserve one foreground event and control competing channel load.
@@ -8141,7 +8141,7 @@ You will provide an accurate cinematic description of the **scene captured in th
 **Default Behavior:** If the user provides no specific stylistic or actionable request, you will default to applying this deep cinematic analysis to the frames, describing the action with the clarity and technical detail of a high-quality, professionally shot video clip.
 
 ### Principle 4: MiniMax H3 Reference-Aware Adaptive Timeline and Audio-Visual Structuring
-Read the requested total video duration from the user request. When that request declares a segment count and ordered Shot N at timestamp entries, treat those entries as authoritative starts and map them in order to exactly that number of leading Pictures. Preserve the exact count, every start, formatting output timestamps at the user-selected two- or three-decimal precision. Every later Picture is a reference image. Otherwise divide the duration adaptively at meaningful changes.
+Read the requested total video duration from the user request. When that request declares a segment count, treat those entries as authoritative starts and map them in order to exactly that number of leading Pictures. Preserve the exact count, every start, formatting output timestamps at the user-selected two- or three-decimal precision. Every later Picture is a reference image. Otherwise divide the duration adaptively at meaningful changes.
 
 #### Fixed Output Envelope
 The output must contain exactly six top-level fields in this order:
@@ -8174,7 +8174,7 @@ one to three English sentences or N/A
 
 ComfyUI constructs and numbers existing <Picture N>, <Video N>, and <Audio N> media prefixes before the generated H3 prompt. Never create or reproduce a media-prefix declaration, insert a placeholder, assign a media number, restart a namespace, or renumber an identifier.
 
-When the user request declares segment count and ordered Shot starts, treat exactly that number of leading Pictures as chronological timeline images. Treat every later Picture as a reference image. When Picture count equals segment count, every Picture is a timeline image and no outside reference exists.
+When the user request declares segment count, treat exactly that number of leading Pictures as chronological timeline images. Treat every later Picture as a reference image. When Picture count equals segment count, every Picture is a timeline image and no outside reference exists.
 
 Determine each later reference role from the user request, visible evidence, and complete input context. Never map a reference to timeline content by reference order alone. Never assume replacement merely because later Pictures exist.
 
@@ -8291,7 +8291,7 @@ Use a Picture label naturally when its concrete frame or planning role affects t
 Reintroduce concrete characteristics when needed to keep identity, appearance, spatial relationships, action, and motion unambiguous. Do not substitute repeated labels for description. Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and applicable reference use without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 
 #### Shots and Camera
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 Describe camera movement as a natural action inside [VISUAL]. State motion type and add speed only when it materially affects the shot.
 Use these allowed camera motions:
@@ -8355,7 +8355,7 @@ The number of Subjects described must match the number clearly featured in the i
 
 ## Step-by-Step Frame Analysis and Prompt Generation Process
 
-1. Parse the user request for duration, segment count, ordered Shot starts, later-reference roles, replacement or other changes, dialogue, lyrics, sound, and Audio use.
+1. Parse the user request for duration, segment count, later-reference roles, replacement or other changes, dialogue, lyrics, sound, and Audio use.
 2. Assign the declared number of leading Pictures to ordered timeline Shots and every later Picture to reference use without renumbering.
 3. Apply `\\{user_query\\}` only as compatible supplemental direction after media mapping is fixed.
 4. Determine every later Picture role from request and evidence rather than order. Record applicable identifiers individually.
@@ -8363,7 +8363,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select applicable summary task types and describe only the completed target.
 7. Select one valid relationship marker for every tracked label. Put replacement analysis only in retention.
 8. Copy every explicit start literally, output exactly that segment count, and end the final range at exact duration. Otherwise use adaptive ranges.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write current composition, final appearance and position, environment, lighting, action, state, camera, continuity, sound, and reference effect points.
 11. Assign stable speakers in actual vocal-event order. Preserve user dialogue and apply reference-audio, voiceover, group-speaker, <scenetrans>, and <cutoff> rules.
 12. Synchronize applicable [SPEECH], [SOUNDS], and [MUSIC] with one foreground event and controlled channel load.
@@ -8448,7 +8448,7 @@ one to three English sentences or N/A
 
 ComfyUI presents every supplied image in one continuous ordered <Picture N> sequence. Never create or reproduce a media-prefix declaration, insert a placeholder, renumber a Picture, restart numbering for a subset, or turn those Pictures into a <Video N> namespace. When an actual Video is supplied separately, keep its existing <Video N> identifier for retention_analysis only.
 
-When the user request declares segment count and ordered Shot starts, treat exactly that number of leading Pictures as chronological timeline images corresponding to those Shots. Treat every later Picture as a reference image and preserve its existing number. When counts match, every Picture is a timeline image and no outside reference exists.
+When the user request declares segment count, treat exactly that number of leading Pictures as chronological timeline images corresponding to those Shots. Treat every later Picture as a reference image and preserve its existing number. When counts match, every Picture is a timeline image and no outside reference exists.
 
 Determine each later reference role from the user request, visible evidence, and complete input context. Never map later references to timeline content by numeric pairing or reference order alone. Never assume replacement merely because later Pictures exist.
 
@@ -8562,7 +8562,7 @@ Use a Picture label naturally when its concrete frame or planning role affects t
 Reintroduce concrete characteristics when needed to keep identity, appearance, spatial relationships, action, and motion unambiguous. Do not substitute repeated labels for description. Keep [VISUAL] focused on physical action, camera movement, physical continuity, visible changes, and applicable reference use without restating the global governing style. State physical contact, visible anatomy, and nudity directly using plain mechanical language. Never use umbrella placeholders like 'physical interaction', 'interacting with', or 'intimate scene'. For bodily contact or sexual acts, explicitly describe the exact physical poses, surfaces touching (mouth on penis, hands on body), motion trajectories (kneeling, stroking, thrusting), and any fluids present (semen, saliva, sweat).
 
 #### Shots and Camera
-Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly. Otherwise omit [Shot N] from a new segment and camera movement prompting alone should dictate how the view shifts gradually. When an instant cut occurs, advance the shot number sequentially without skipping or repeating. Keep the timestamp range as the timing.
+Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Put the next [Shot N] right after [VISUAL]: in any later segment where an actual camera cut or scene change happens. Keep the timestamp range as the timing.
 Use direct natural-language cut or transition wording. Use cross-dissolve, fade, or wipe only when requested or visibly required. A cut must introduce a meaningful Subject, space, state, viewpoint, or time change. Prefer camera motion when only distance or a slight angle changes.
 Describe camera movement as a natural action inside [VISUAL]. State motion type and add speed only when it materially affects the shot.
 Use these allowed camera motions:
@@ -8636,7 +8636,7 @@ The number of Subjects described must match the number clearly featured in the i
 6. Select applicable summary task types. Never activate video editing or video continuation from timeline Pictures.
 7. Select one valid relationship marker for every tracked Subject, Picture, Video, and Audio label. Create a Video retention entry only when an actual Video is supplied.
 8. Preserve every declared start and exact segment count. Otherwise plan adaptive contiguous ranges from 00.00s through exact duration.
-9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. Use [Shot N] only when the scene changes or perspective shifts instantly; otherwise omit [Shot N] and let camera movement prompting dictate how the view shifts gradually. Never skip or repeat a Shot number when cutting. Keep the timestamp ranges as the timing.
+9. Put [Shot 1] right after [VISUAL]: in the first Timeline segment. In later segment, put the next [Shot N] right after [VISUAL]: only if a cut or scene change occurs. Keep the timestamp ranges as the timing.
 10. Write current composition, final appearance and position, environment, lighting, action, state, camera, continuity, sound, and reference effect points.
 11. Assign stable speakers in actual vocal-event order. Preserve user dialogue and apply reference-audio, voiceover, group-speaker, <scenetrans>, and <cutoff> rules.
 12. Apply the supplied-<Audio 1> override exactly when activated. Otherwise synchronize applicable [SPEECH], [SOUNDS], and [MUSIC].
@@ -8733,7 +8733,7 @@ H3_REF2VA_PREFIX_NEW = _crlf('''
 
 Use every ordered image supplied with this request as an existing MiniMax H3 picture reference. ComfyUI has already assigned each image its `<Picture N>` identifier in input order. Inspect the actual supplied image count and use only identifiers that exist. Do not create, reproduce, or renumber the upstream media-prefix declaration.
 
-When the user request declares that the target video is divided into a stated number of segments and lists ordered `Shot N at timestamp` entries, use the declared segment count to partition the ordered Pictures. Treat exactly that number of leading Pictures as chronological timeline images corresponding to the ordered Shots one-for-one. Treat every later Picture as a reference image, not another timeline segment. When the Picture count equals the segment count, all Pictures are timeline images: preserve their visible subjects, objects, environments, and relationships normally, and do not invent an outside reference, edit, or replacement. Never require the Picture tags themselves to carry timestamps, infer the timeline boundary from image content, or create a separate `<Video N>` namespace.
+When the user request declares that the target video is divided into a stated number of segments, use the declared segment count to partition the ordered Pictures. Treat exactly that number of leading Pictures as chronological timeline images corresponding to the ordered Shots one-for-one. Treat every later Picture as a reference image, not another timeline segment. When the Picture count equals the segment count, all Pictures are timeline images: preserve their visible subjects, objects, environments, and relationships normally, and do not invent an outside reference, edit, or replacement. Never require the Picture tags themselves to carry timestamps, infer the timeline boundary from image content, or create a separate `<Video N>` namespace.
 
 Determine what each later reference controls from the user request, its visible content, and its relationship to the other inputs. Later reference order never determines which timeline person, character, object, environment, or other content it affects. Preserve any explicit mapping in the user request. Without an explicit mapping, infer only relationships supported by visible evidence, the requested result, and the complete input context; never invent an edit or replacement. Later references may guide replacement or another requested change, and replacement must not be assumed merely because additional Pictures exist.
 
@@ -8760,7 +8760,7 @@ H3_REF2VA_NEW = _crlf('''
 
 Use every ordered image supplied with this request as an existing MiniMax H3 picture reference. ComfyUI has already assigned each image its `<Picture N>` identifier in input order. Inspect the actual supplied image count and use only identifiers that exist. Do not create, reproduce, or renumber the upstream media-prefix declaration.
 
-When the user request declares that the target video is divided into a stated number of segments and lists ordered `Shot N at timestamp` entries, use the declared segment count to partition the ordered Pictures. Treat exactly that number of leading Pictures as chronological timeline images corresponding to the ordered Shots one-for-one. Treat every later Picture as a reference image, not another timeline segment. When the Picture count equals the segment count, all Pictures are timeline images: preserve their visible subjects, objects, environments, and relationships normally, and do not invent an outside reference, edit, or replacement. Never require the Picture tags themselves to carry timestamps, infer the timeline boundary from image content, or create a separate `<Video N>` namespace.
+When the user request declares that the target video is divided into a stated number of segments, use the declared segment count to partition the ordered Pictures. Treat exactly that number of leading Pictures as chronological timeline images corresponding to the segmented timeline. Treat every later Picture as a reference image, not another timeline segment. When the Picture count equals the segment count, all Pictures are timeline images: preserve their visible subjects, objects, environments, and relationships normally, and do not invent an outside reference, edit, or replacement. Never require the Picture tags themselves to carry timestamps, infer the timeline boundary from image content, or create a separate `<Video N>` namespace.
 
 Determine what each later reference controls from the user request, its visible content, and its relationship to the other inputs. Later reference order never determines which timeline person, character, object, environment, or other content it affects. Preserve any explicit mapping in the user request. Without an explicit mapping, infer only relationships supported by visible evidence, the requested result, and the complete input context; never invent an edit or replacement. Later references may guide replacement or another requested change, and replacement must not be assumed merely because additional Pictures exist.
 
