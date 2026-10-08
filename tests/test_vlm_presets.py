@@ -1461,28 +1461,28 @@ def test_minimax_h3_full_reference_protected_prefixes_are_unchanged():
     )
     protected = {
         "video_timeline_minimax_h3_ref2va_general": (
-            6560,
-            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
+            14363,
+            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction": (
-            6560,
-            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
+            14363,
+            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction": (
-            6761,
-            "9039adcb77d686d435d77b671d45bf674e07c2d24654d778b64f11afecf1895c",
+            14564,
+            "b35e786d9f7deeddf44c799a417a2d0a79c40148402312fbdd850ff17459cfbd",
         ),
         "video_timeline_minimax_h3_reference_system_instruction_new": (
-            6560,
-            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
+            14363,
+            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction_new": (
-            6560,
-            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
+            14363,
+            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction_new": (
-            6800,
-            "dbfe936458dc29e30c98fda1ce1e03f64abc398e8b6192704698b77296b324d7",
+            14603,
+            "28517b8716e832f82fd2861a1ffe518ae19951b2011afeb17d44c3ae28cb37f6",
         ),
     }
 
