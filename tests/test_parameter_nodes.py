@@ -173,7 +173,9 @@ def test_video_resolution_and_length_picker():
     schema = parameter_nodes.UC_VideoResolutionAndLengthPicker.define_schema()
     inputs = {value.id: value for value in schema.inputs}
     assert "video" in inputs and "image" in inputs and "use_video_duration" in inputs
-    assert len(schema.outputs) == 5
+    assert len(schema.outputs) == 6
+    assert schema.outputs[4].display_name == "Duration (s)"
+    assert schema.outputs[5].id == "audio"
 
     # Standalone execution
     output = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
@@ -182,9 +184,10 @@ def test_video_resolution_and_length_picker():
         multiple=16,
         duration_seconds=5.16666,
     )
-    image_out, width, height, length, duration = output.result
+    image_out, width, height, length, duration, audio = output.result
     assert (width, height, length) == (1360, 768, 124)
     assert image_out.shape == (1, 768, 1360, 3)
+    assert audio is None
     assert output.ui == {"resolution": ("1360×768 · 124 frames · 5.17 s",)}
 
     # Execution with input frames and duration
@@ -196,7 +199,86 @@ def test_video_resolution_and_length_picker():
         megapixels=0.01,
         multiple=16,
     )
-    frames_out, w, h, l, d = out_video.result
+    frames_out, w, h, l, d, audio = out_video.result
     assert (w, h) == (144, 80)
     assert l == 56
     assert frames_out.shape == (56, 80, 144, 3)
+    assert audio is None
+
+
+def test_video_resolution_and_length_picker_resampling_low_and_high_fps():
+    import types
+
+    # 1. Low fps: 12 fps with 24 frames (2.0s duration) -> resample to 48 frames at 24 fps
+    frames_12fps = torch.arange(24, dtype=torch.float32).view(24, 1, 1, 1).repeat(1, 64, 64, 3)
+    comp_12fps = types.SimpleNamespace(images=frames_12fps, frame_rate=12.0, audio=None)
+    vid_12fps = types.SimpleNamespace(get_components=lambda: comp_12fps, get_duration=lambda: 2.0)
+
+    out_12 = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
+        video=vid_12fps,
+        use_video_duration=True,
+        match_video_length=False,
+        aspect_ratio=AspectRatio.SQUARE,
+        megapixels=0.01,
+        multiple=16,
+    )
+    frames_out_12, _, _, _, duration_12, _ = out_12.result
+    assert frames_out_12.shape[0] == 48
+    assert duration_12 == 2.0
+    # Clones neighboring frames: frame 0 and 1 are clone of source 0, etc.
+    assert frames_out_12[0, 0, 0, 0].item() == 0.0
+    assert frames_out_12[1, 0, 0, 0].item() in (0.0, 1.0)
+
+    # 2. High fps: 60 fps with 120 frames (2.0s duration) -> resample to 48 frames at 24 fps
+    frames_60fps = torch.arange(120, dtype=torch.float32).view(120, 1, 1, 1).repeat(1, 64, 64, 3)
+    comp_60fps = types.SimpleNamespace(images=frames_60fps, frame_rate=60.0, audio=None)
+    vid_60fps = types.SimpleNamespace(get_components=lambda: comp_60fps, get_duration=lambda: 2.0)
+
+    out_60 = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
+        video=vid_60fps,
+        use_video_duration=True,
+        match_video_length=False,
+        aspect_ratio=AspectRatio.SQUARE,
+        megapixels=0.01,
+        multiple=16,
+    )
+    frames_out_60, _, _, _, duration_60, _ = out_60.result
+    assert frames_out_60.shape[0] == 48
+    assert duration_60 == 2.0
+
+
+def test_video_resolution_and_length_picker_outputs_h3_audio_untrimmed():
+    import types
+
+    # Audio with 44100 Hz mono waveform of 88200 samples (2.0 seconds)
+    raw_waveform = torch.sin(torch.linspace(0, 100, 88200)).view(1, 1, 88200)
+    raw_audio = {"waveform": raw_waveform, "sample_rate": 44100}
+    comp = types.SimpleNamespace(
+        images=torch.zeros(24, 64, 64, 3),
+        frame_rate=24.0,
+        audio=raw_audio,
+    )
+    vid = types.SimpleNamespace(get_components=lambda: comp, get_duration=lambda: 1.0)
+
+    output = parameter_nodes.UC_VideoResolutionAndLengthPicker.execute(
+        video=vid,
+        use_video_duration=True,
+        duration_seconds=1.0,
+        aspect_ratio=AspectRatio.SQUARE,
+        megapixels=0.01,
+        multiple=16,
+    )
+    _, _, _, _, _, audio_out = output.result
+
+    assert audio_out is not None
+    assert isinstance(audio_out, dict)
+    assert audio_out["sample_rate"] == 32000
+    waveform_out = audio_out["waveform"]
+    assert torch.is_tensor(waveform_out)
+    # Valid for MiniMax H3: stereo (shape [1, 2, N])
+    assert waveform_out.ndim == 3
+    assert waveform_out.shape[1] == 2
+    # Multiple of 800 samples for H3 audio VAE hop length
+    assert waveform_out.shape[-1] % 800 == 0
+    # Not trimmed to duration (duration was 1.0s, but 2.0s of audio is preserved ~64000 samples)
+    assert waveform_out.shape[-1] >= 64000
