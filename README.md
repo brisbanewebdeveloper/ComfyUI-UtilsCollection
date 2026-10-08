@@ -297,10 +297,12 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_VLMSysInstrPresets`
 - `UC_VLMSysInstrPresetsExperimental`
 - `UC_VLMSysInstrLegacyPresets`
+- `UC_VLMSysInstrMotionPresets`
 - `UC_VLMSysQueryAddPresets`
 - `UC_VLMSysQueryRawPresets`
 - `UC_VLMSysInstrAdvPresets`
 - `UC_VLMSysInstrAdvPresetsExperimental`
+- `UC_VLMSysInstrAdvMotionPresets`
 - `UC_MiniMaxH3VLMSysInstrPresets`
 - `UC_MiniMaxH3VLMSysInstrPresetsExperimental`
 - `UC_MiniMaxH3VLMSysInstrAdvPresets`

@@ -13,7 +13,12 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_vlm_preset_test import vlm_experimental_presets, vlm_legacy_presets, vlm_presets
+from utils_collection_vlm_preset_test import (
+    vlm_experimental_presets,
+    vlm_legacy_presets,
+    vlm_motion_presets,
+    vlm_presets,
+)
 from utils_collection_vlm_preset_test.nodes import vlm_nodes
 
 
@@ -200,8 +205,10 @@ def test_vlm_preset_widget_labels_are_unique_and_descriptive():
     expected = {
         vlm_nodes.UC_VLMSysInstrPresets: "vlm_system_instruction_preset",
         vlm_nodes.UC_VLMSysInstrLegacyPresets: "vlm_system_instruction_legacy_preset",
+        vlm_nodes.UC_VLMSysInstrMotionPresets: "vlm_system_instruction_motion_preset",
         vlm_nodes.UC_VLMSysQueryAddPresets: "vlm_system_query_add_preset",
         vlm_nodes.UC_VLMSysInstrAdvPresets: "vlm_system_instruction_advanced_preset",
+        vlm_nodes.UC_VLMSysInstrAdvMotionPresets: "vlm_system_instruction_advanced_motion_preset",
     }
 
     actual = {
@@ -214,6 +221,20 @@ def test_vlm_preset_widget_labels_are_unique_and_descriptive():
     for node, label in expected.items():
         frontend_input = node.INPUT_TYPES()["required"]["preset"]
         assert frontend_input[1]["display_name"] == label
+
+
+def test_vlm_motion_presets_node_exposes_motion_presets():
+    declared = vlm_motion_presets.motion_system_instructions_vlm
+    exposed = vlm_nodes.UC_VLMSysInstrMotionPresets.get_presets()
+    assert list(exposed) == list(declared)
+    assert len(exposed) == 19
+    for name, value in declared.items():
+        assert vlm_nodes.UC_VLMSysInstrMotionPresets.execute(name).args == (value,)
+    adv_schema = vlm_nodes.UC_VLMSysInstrAdvMotionPresets.define_schema()
+    assert adv_schema.node_id == "UC_VLMSysInstrAdvMotionPresets"
+    first = sorted(declared)[0]
+    result = vlm_nodes.UC_VLMSysInstrAdvMotionPresets.execute(first, jailbreak=False, system_query="", user_query="")
+    assert result.args == (declared[first],)
 
 
 def test_qwen_system_instruction_variants_preserve_original_presets():
@@ -1461,28 +1482,28 @@ def test_minimax_h3_full_reference_protected_prefixes_are_unchanged():
     )
     protected = {
         "video_timeline_minimax_h3_ref2va_general": (
-            14363,
-            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction": (
-            14363,
-            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction": (
-            14564,
-            "b35e786d9f7deeddf44c799a417a2d0a79c40148402312fbdd850ff17459cfbd",
+            6761,
+            "9039adcb77d686d435d77b671d45bf674e07c2d24654d778b64f11afecf1895c",
         ),
         "video_timeline_minimax_h3_reference_system_instruction_new": (
-            14363,
-            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_reference_alt_system_instruction_new": (
-            14363,
-            "a9316491f1133b82e08ed84a14dc172695c3f441634f8ce2d1290fcf75e2c517",
+            6560,
+            "34838a0a0cc0f5e520652f8a2df26d264e11d188364e2b9b06c7fbf5fc0747a0",
         ),
         "video_timeline_minimax_h3_mixed_system_instruction_new": (
-            14603,
-            "28517b8716e832f82fd2861a1ffe518ae19951b2011afeb17d44c3ae28cb37f6",
+            6800,
+            "dbfe936458dc29e30c98fda1ce1e03f64abc398e8b6192704698b77296b324d7",
         ),
     }
 
