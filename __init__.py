@@ -144,6 +144,7 @@ class SamplingUtils(ComfyExtension):
             UC_HighResolutionTileAccumulator,
             UC_ListToImageBatch,
             UC_ImageBatchToList,
+            UC_ImageBatchToBatchList,
             UC_StitchImageGrid,
             UC_FromList,
             UC_SwitchInverseNode,

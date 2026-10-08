@@ -34,6 +34,7 @@ from ..helpers.image_helpers import (
     VIDEO_TIMELINE_TEXT_STRUCTURE,
     downscale_nohalo_lohalo,
     stitch_image_grid,
+    split_image_batch_into_batches,
     images_to_video_timeline,
     mask_to_bounding_box,
     match_image_properties,
@@ -2422,6 +2423,28 @@ class UC_ImageBatchToList(io.ComfyNode):
     @classmethod
     def execute(cls, images):
         return ([images[i].unsqueeze(0) for i in range(images.shape[0])], )
+
+
+class UC_ImageBatchToBatchList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_ImageBatchToBatchList",
+            display_name="Image Batch to Batch List",
+            category="utils",
+            description="Splits an image batch into an ordered list of smaller image batches of a specified batch size.",
+            inputs=[
+                io.Image.Input("images", tooltip="Input image batch to split into smaller batches."),
+                io.Int.Input("batch_size", default=8, min=1, max=4096, step=1, tooltip="Maximum number of images per batch in the output list."),
+            ],
+            outputs=[
+                io.Image.Output(display_name="images", is_output_list=True, tooltip="Ordered list of smaller image batches."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, images, batch_size: int = 8):
+        return (split_image_batch_into_batches(images, batch_size), )
 
 
 class UC_StitchImageGrid(io.ComfyNode):

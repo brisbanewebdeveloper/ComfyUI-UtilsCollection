@@ -3057,3 +3057,16 @@ def stitch_image_grid(
         )[0]
 
     return grid
+
+
+def split_image_batch_into_batches(images: torch.Tensor, batch_size: int) -> list[torch.Tensor]:
+    """Split an image batch tensor into an ordered list of smaller image batch tensors."""
+    if images is None or not torch.is_tensor(images):
+        return []
+    if images.ndim == 3:
+        images = images.unsqueeze(0)
+    if images.ndim != 4 or images.shape[0] == 0:
+        return []
+    size = max(1, int(batch_size))
+    total = images.shape[0]
+    return [images[i : i + size] for i in range(0, total, size)]

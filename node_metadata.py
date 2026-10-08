@@ -11,6 +11,7 @@ DESCRIPTIONS = {
     "UC_LoadImageDirectory": "Loads images from a directory for batch or iterative workflows.",
     "UC_LoadImageWithAlpha": "Loads an image like Core Load Image and also returns an RGBA IMAGE with its alpha preserved.",
     "UC_ListToImageBatch": "Combines a list of compatible images into one image batch.",
+    "UC_ImageBatchToBatchList": "Splits an image batch into an ordered list of smaller image batches of a specified batch size.",
     "UC_StitchImageGrid": "Stitches a batch or list of images into a grid with configurable rows, columns, and spacing.",
     "UC_ImageMatchProperties": "Adjusts an image to match the size and properties of a reference image.",
     "UC_OpticalFlowComposite": "Composites images using motion estimated with optical flow.",

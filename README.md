@@ -199,6 +199,7 @@ the base-resolution conditioning fusion.
 - `UC_MediaPipeFaceComposite`
 - `UC_ListToImageBatch`
 - `UC_ImageBatchToList`
+- `UC_ImageBatchToBatchList`
 - `UC_StitchImageGrid`
 - `UC_ImageMatchProperties`
 - `UC_ImageColorRestore`
