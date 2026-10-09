@@ -155,7 +155,7 @@ def _tps_warp_image(image, controls, values):
     values[:, 1] *= 2.0 / height
     difference = controls[:, None] - controls[None]
     distance_squared = (difference * difference).sum(dim=-1)
-    kernel = distance_squared * torch.log(distance_squared + 1e-6)
+    kernel = 0.5 * distance_squared * torch.log(distance_squared + 1e-6)
     kernel.diagonal().add_(1e-4)
     affine = torch.cat(
         (torch.ones((controls.shape[0], 1), device=device), controls), dim=1
@@ -167,9 +167,11 @@ def _tps_warp_image(image, controls, values):
         ),
         dim=0,
     )
-    coefficients = torch.linalg.solve(
-        system, torch.cat((values, torch.zeros((3, 2), device=device)), dim=0)
-    )
+    rhs = torch.cat((values, torch.zeros((3, 2), device=device)), dim=0)
+    try:
+        coefficients = torch.linalg.solve(system, rhs)
+    except Exception:
+        coefficients = torch.linalg.lstsq(system, rhs).solution
 
     grid_rows = []
     x_coordinates = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) * (
@@ -184,7 +186,7 @@ def _tps_warp_image(image, controls, values):
         points = torch.stack((xx, yy), dim=-1)
         difference = points.unsqueeze(-2) - controls
         distance_squared = (difference * difference).sum(dim=-1)
-        basis = distance_squared * torch.log(distance_squared + 1e-6)
+        basis = 0.5 * distance_squared * torch.log(distance_squared + 1e-6)
         point_affine = torch.cat(
             (torch.ones((*points.shape[:-1], 1), device=device), points), dim=-1
         )
@@ -196,6 +198,7 @@ def _tps_warp_image(image, controls, values):
         displacement *= _smoothstep(torch.minimum(edge_x, edge_y) / 2.0).unsqueeze(-1)
         grid_rows.append(points + displacement)
     grid = torch.cat(grid_rows, dim=0).unsqueeze(0)
+    grid = torch.nan_to_num(grid, nan=0.0, posinf=2.0, neginf=-2.0).clamp(-5.0, 5.0)
     warped = F.grid_sample(
         image.movedim(-1, 0).unsqueeze(0),
         grid,
@@ -207,30 +210,35 @@ def _tps_warp_image(image, controls, values):
 
 
 def _warp_target(
-    target, source_oval_points, target_oval_points, strength, decay_radius
+    target, source_points, target_points, strength, decay_radius, oval_count=None
 ):
-    if strength <= 0:
+    if abs(strength) <= 1e-4:
         return target
     height, width = target.shape[:2]
-    source_points = np.asarray(source_oval_points, dtype=np.float32)
-    target_points = np.asarray(target_oval_points, dtype=np.float32)
-    center = source_points.mean(axis=0)
+    source_points = np.asarray(source_points, dtype=np.float32)
+    target_points = np.asarray(target_points, dtype=np.float32)
+    dest_points = target_points + (source_points - target_points) * float(strength)
     controls = []
     values = []
     seen = set()
-    for source_point, target_point in zip(source_points, target_points):
+    for dest_point, target_point in zip(dest_points, target_points):
         _add_control(
             controls,
             values,
             seen,
-            source_point,
-            (target_point - source_point) * float(strength),
+            dest_point,
+            target_point - dest_point,
         )
-    for source_point in source_points:
-        direction = source_point - center
+    if oval_count is None or oval_count <= 0 or oval_count > len(dest_points):
+        dest_oval = dest_points
+    else:
+        dest_oval = dest_points[:oval_count]
+    center = dest_oval.mean(axis=0)
+    for dest_point in dest_oval:
+        direction = dest_point - center
         length = np.linalg.norm(direction)
         if length > 0:
-            fixed = source_point + direction * (float(decay_radius) / length)
+            fixed = dest_point + direction * (float(decay_radius) / length)
             fixed[0] = np.clip(fixed[0], 0, width - 1)
             fixed[1] = np.clip(fixed[1], 0, height - 1)
             _add_control(controls, values, seen, fixed, np.zeros(2, dtype=np.float32))
@@ -277,15 +285,14 @@ def _warp_target(
 
 
 def _warp_source(
-    source, source_oval_points, target_oval_points, strength, decay_radius
+    source, source_points, target_points, strength, decay_radius, oval_count=None
 ):
-    if strength <= 0:
+    if abs(strength) <= 1e-4:
         return source
     height, width = source.shape[:2]
-    source_points = np.asarray(source_oval_points, dtype=np.float32)
-    target_points = np.asarray(target_oval_points, dtype=np.float32)
+    source_points = np.asarray(source_points, dtype=np.float32)
+    target_points = np.asarray(target_points, dtype=np.float32)
     dest_points = source_points + (target_points - source_points) * float(strength)
-    center = dest_points.mean(axis=0)
     controls = []
     values = []
     seen = set()
@@ -297,7 +304,12 @@ def _warp_source(
             dest_point,
             source_point - dest_point,
         )
-    for dest_point in dest_points:
+    if oval_count is None or oval_count <= 0 or oval_count > len(dest_points):
+        dest_oval = dest_points
+    else:
+        dest_oval = dest_points[:oval_count]
+    center = dest_oval.mean(axis=0)
+    for dest_point in dest_oval:
         direction = dest_point - center
         length = np.linalg.norm(direction)
         if length > 0:

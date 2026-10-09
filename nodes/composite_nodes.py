@@ -1851,18 +1851,18 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
                 io.Float.Input(
                     "source_warp_strength",
                     default=1.0,
-                    min=0.0,
-                    max=2.0,
+                    min=-10.0,
+                    max=10.0,
                     step=0.01,
-                    tooltip="Strength of thin-plate-spline warping applied to the donor face towards the target facial shape (default 1.0 = donor adapts to target head geometry).",
+                    tooltip="Strength of thin-plate-spline warping applied to the donor face towards the target facial shape (default 1.0 = donor adapts to target head geometry, negative values reverse the adaptation).",
                 ),
                 io.Float.Input(
                     "target_warp_strength",
                     default=0.0,
-                    min=0.0,
-                    max=2.0,
+                    min=-10.0,
+                    max=10.0,
                     step=0.01,
-                    tooltip="Strength of thin-plate-spline warping applied to the target recipient face towards the donor face shape (default 0.0 = recipient head/neck undistorted).",
+                    tooltip="Strength of thin-plate-spline warping applied to the target recipient face towards the donor face shape (default 0.0 = recipient head/neck undistorted, negative values reverse the adaptation).",
                 ),
                 io.Int.Input(
                     "warp_decay_radius", default=64, min=1, max=MAX_RESOLUTION, step=1
@@ -1974,11 +1974,41 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         )
         ring = _ordered_ring(face_detection_model.connection_sets["face_oval"])
 
+        feature_indices = list(ring)
+        if hasattr(face_detection_model, "connection_sets") and isinstance(
+            face_detection_model.connection_sets, dict
+        ):
+            for part in (
+                "nose",
+                "lips",
+                "left_eye",
+                "right_eye",
+                "left_eyebrow",
+                "right_eyebrow",
+                "irises",
+            ):
+                connections = face_detection_model.connection_sets.get(part)
+                if connections:
+                    for a, b in connections:
+                        if a not in feature_indices:
+                            feature_indices.append(a)
+                        if b not in feature_indices:
+                            feature_indices.append(b)
+
+        max_idx = min(
+            len(source_face["landmarks_xy"]), len(target_face["landmarks_xy"])
+        )
+        feature_indices = [idx for idx in feature_indices if idx < max_idx]
+        oval_count = len([idx for idx in ring if idx < max_idx])
+
         source = source.to(target)
-        source_points = source_face["landmarks_xy"][ring]
-        target_points = target_face["landmarks_xy"][ring]
+        source_oval_points = source_face["landmarks_xy"][ring]
         source_mask = _polygon_mask(
-            source.shape[1], source.shape[2], source_points, target.device, target.dtype
+            source.shape[1],
+            source.shape[2],
+            source_oval_points,
+            target.device,
+            target.dtype,
         )
         foreground = background_removal_model.encode_image(source)
         if foreground.shape[-2:] != source.shape[1:3]:
@@ -1999,8 +2029,12 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         source_foreground = foreground[sy1:sy2, sx1:sx2]
         target_crop = target[0, ty1:ty2, tx1:tx2]
 
-        local_source_points = source_points - np.array([sx1, sy1], dtype=np.float32)
-        local_target_points = target_points - np.array([tx1, ty1], dtype=np.float32)
+        local_source_points = source_face["landmarks_xy"][feature_indices] - np.array(
+            [sx1, sy1], dtype=np.float32
+        )
+        local_target_points = target_face["landmarks_xy"][feature_indices] - np.array(
+            [tx1, ty1], dtype=np.float32
+        )
         scale, rotation, translation = _similarity_transform(
             local_source_points, local_target_points
         )
@@ -2017,7 +2051,7 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         placed_source_points = scale * (local_source_points @ rotation.T) + translation
 
         source_warp_strength = float(options.get("source_warp_strength", 1.0))
-        if source_warp_strength > 0:
+        if abs(source_warp_strength) > 1e-4:
             combined_source = torch.cat(
                 (
                     placed_source,
@@ -2032,6 +2066,7 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
                 local_target_points,
                 source_warp_strength,
                 options["warp_decay_radius"],
+                oval_count=oval_count,
             )
             placed_source = warped_combined[..., :3]
             placed_oval = warped_combined[..., 3]
@@ -2041,13 +2076,14 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
             ) * source_warp_strength
 
         target_warp_strength = float(options.get("target_warp_strength", 0.0))
-        if target_warp_strength > 0:
+        if abs(target_warp_strength) > 1e-4:
             warped_target = _warp_target(
                 target_crop,
                 placed_source_points,
                 local_target_points,
                 target_warp_strength,
                 options["warp_decay_radius"],
+                oval_count=oval_count,
             )
         else:
             warped_target = target_crop
