@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 import os
+from typing import Any
 
 import av
 import torch
 import torch.nn.functional as F
+import torchaudio
 
 
 VIDEO_EXTENSIONS = {
@@ -293,3 +295,76 @@ def audio_overlap_similarity(
         return None
     correlation = F.cosine_similarity(first.reshape(1, -1), second.reshape(1, -1)).item()
     return max(0.0, min(1.0, (correlation + 1.0) * 0.5))
+
+
+def resample_video_frames_to_24fps(frames: torch.Tensor, source_fps: float) -> tuple[torch.Tensor, float]:
+    """Resample video frames to 24 fps preserving real-time duration and playback speed.
+
+    If source_fps < 24 fps, fills in with clones of neighboring frames.
+    If source_fps > 24 fps, uniformly strips frames.
+    """
+    if frames is None or not torch.is_tensor(frames) or frames.ndim != 4 or frames.shape[0] == 0:
+        return frames, source_fps
+    source_rate = float(source_fps)
+    if not math.isfinite(source_rate) or source_rate <= 0:
+        return frames, 24.0
+    if abs(source_rate - 24.0) <= 0.01:
+        return frames, 24.0
+
+    orig_count = frames.shape[0]
+    target_count = max(1, round(orig_count * 24.0 / source_rate))
+    indices = [min(orig_count - 1, round(i * source_rate / 24.0)) for i in range(target_count)]
+    resampled = frames[indices]
+    return resampled, 24.0
+
+
+def prepare_video_audio_for_h3(audio: Any) -> dict[str, Any] | None:
+    """Format extracted video audio into a valid MiniMax H3 audio structure (32kHz stereo, multiple of 800 samples).
+
+    Does not trim the end of the audio.
+    """
+    if audio is None:
+        return None
+
+    waveform = None
+    sample_rate = 44100
+
+    if isinstance(audio, dict):
+        waveform = audio.get("waveform")
+        sample_rate = audio.get("sample_rate", 44100)
+    elif hasattr(audio, "waveform"):
+        waveform = getattr(audio, "waveform")
+        sample_rate = getattr(audio, "sample_rate", 44100)
+
+    if waveform is None or not torch.is_tensor(waveform) or waveform.numel() == 0:
+        return None
+
+    waveform = waveform.to(dtype=torch.float32)
+
+    # Ensure shape is [batch, channels, samples] with batch=1
+    if waveform.ndim == 1:
+        waveform = waveform.unsqueeze(0).unsqueeze(0)
+    elif waveform.ndim == 2:
+        waveform = waveform.unsqueeze(0)
+    elif waveform.ndim > 3:
+        waveform = waveform.reshape(1, waveform.shape[-2], waveform.shape[-1])
+
+    # Ensure stereo (2 channels)
+    if waveform.shape[1] == 1:
+        waveform = waveform.repeat(1, 2, 1)
+    elif waveform.shape[1] > 2:
+        waveform = waveform[:, :2, :]
+
+    # Resample to 32000 Hz if needed
+    sample_rate = int(sample_rate) if sample_rate and math.isfinite(sample_rate) else 32000
+    if sample_rate != 32000 and waveform.numel() > 0:
+        waveform = torchaudio.functional.resample(waveform, sample_rate, 32000)
+        sample_rate = 32000
+
+    # Ensure sample length is a multiple of 800 without trimming the end
+    remainder = waveform.shape[-1] % 800
+    if remainder != 0:
+        pad = 800 - remainder
+        waveform = F.pad(waveform, (0, pad))
+
+    return {"waveform": waveform, "sample_rate": 32000}

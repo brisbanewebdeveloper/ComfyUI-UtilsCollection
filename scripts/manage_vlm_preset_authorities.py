@@ -35,6 +35,12 @@ CONFIG = (
         ("minimax_h3_system_instructions_vlm_experimental",),
         (),
     ),
+    (
+        "vlm_motion_presets.py",
+        "vlm_motion_presets_vars.py",
+        ("motion_system_instructions_vlm",),
+        (),
+    ),
 )
 
 

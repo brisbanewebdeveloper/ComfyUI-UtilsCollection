@@ -8,6 +8,7 @@ import nodes
 
 from ..helpers.helper_functions import round_to_nearest, AspectRatio, ASPECT_RATIOS, resize_nchw
 from ..helpers.parameter_helpers import h3_video_length_from_seconds, select_video_resolution
+from ..helpers.video_helpers import resample_video_frames_to_24fps, prepare_video_audio_for_h3
 
 
 class UC_AdjustedResolutionParameters(io.ComfyNode):
@@ -364,6 +365,7 @@ class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
                 io.Int.Output(display_name="Height"),
                 io.Int.Output(display_name="Length"),
                 io.Float.Output(display_name="Duration (s)", tooltip="The effective duration in seconds, either from the video, image batch, or duration_seconds."),
+                io.Audio.Output("audio", display_name="Audio", tooltip="Optional audio extracted from the video input, prepared for MiniMax H3 (32kHz stereo)."),
             ],
         )
 
@@ -385,28 +387,49 @@ class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
         total = megapixels * 1024 * 1024
         _ = resolution_steps
 
-        # 1. Resolve source frames and source fps
+        # 1. Resolve source frames, source fps, and raw audio from video or image
         source_frames = image
         source_fps = 24.0
-        if source_frames is None and video is not None:
+        raw_audio = None
+        has_video_input = video is not None
+
+        if video is not None:
             if hasattr(video, "get_components"):
                 components = video.get_components()
-                source_frames = getattr(components, "images", None)
+                if source_frames is None:
+                    source_frames = getattr(components, "images", None)
                 fps_val = getattr(components, "frame_rate", None)
                 if fps_val is not None:
                     source_fps = float(fps_val)
-            elif torch.is_tensor(video):
-                source_frames = video
+                raw_audio = getattr(components, "audio", None)
             elif hasattr(video, "get_stream_source"):
                 try:
                     from ..helpers.image_helpers import cached_video_components
                     components = cached_video_components(video)
-                    source_frames = getattr(components, "images", None)
+                    if source_frames is None:
+                        source_frames = getattr(components, "images", None)
                     fps_val = getattr(components, "frame_rate", None)
                     if fps_val is not None:
                         source_fps = float(fps_val)
+                    raw_audio = getattr(components, "audio", None)
                 except Exception:
                     pass
+            elif torch.is_tensor(video) and source_frames is None:
+                source_frames = video
+
+            if raw_audio is None:
+                if hasattr(video, "audio"):
+                    raw_audio = getattr(video, "audio")
+                elif hasattr(video, "get_audio"):
+                    try:
+                        raw_audio = video.get_audio()
+                    except Exception:
+                        pass
+
+        # Resample video input to 24 fps if not already 24 fps (preserving duration/speed)
+        if has_video_input and source_frames is not None and torch.is_tensor(source_frames) and source_frames.ndim == 4 and source_frames.shape[0] > 0:
+            if abs(source_fps - 24.0) > 0.01 and source_fps > 0:
+                source_frames, source_fps = resample_video_frames_to_24fps(source_frames, source_fps)
 
         # 2. Resolve duration
         effective_duration = duration_seconds
@@ -416,9 +439,7 @@ class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
                     effective_duration = float(video.get_duration())
                 except Exception:
                     effective_duration = duration_seconds
-            elif video is not None and torch.is_tensor(video) and video.ndim == 4 and video.shape[0] > 0:
-                effective_duration = video.shape[0] / 24.0
-            elif source_frames is not None and torch.is_tensor(source_frames) and source_frames.ndim == 4 and source_frames.shape[0] > 1:
+            elif source_frames is not None and torch.is_tensor(source_frames) and source_frames.ndim == 4 and source_frames.shape[0] > 0:
                 effective_duration = source_frames.shape[0] / 24.0
 
         length = h3_video_length_from_seconds(effective_duration)
@@ -426,16 +447,16 @@ class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
         # 3. Match video length if multiple frames are connected
         if match_video_length and source_frames is not None and torch.is_tensor(source_frames) and source_frames.shape[0] > 1:
             frame_count = source_frames.shape[0]
-            if abs(source_fps - 24.0) > 0.01:
-                indices = [min(frame_count - 1, round(i * source_fps / 24.0)) for i in range(length)]
-                source_frames = source_frames[indices]
-            elif frame_count > length:
+            if frame_count > length:
                 source_frames = source_frames[:length]
             elif frame_count < length:
                 pad_count = length - frame_count
                 source_frames = torch.cat([source_frames, source_frames[-1:].repeat(pad_count, 1, 1, 1)], dim=0)
 
-        # 4. Calculate target dimensions and scale frames if present
+        # 4. Prepare audio for MiniMax H3 (32kHz stereo, hop aligned, untrimmed)
+        prepared_audio = prepare_video_audio_for_h3(raw_audio)
+
+        # 5. Calculate target dimensions and scale frames if present
         if source_frames is not None and torch.is_tensor(source_frames):
             samples = source_frames.movedim(-1, 1)  # B, C, H, W
             img_h, img_w = samples.shape[2], samples.shape[3]
@@ -479,5 +500,6 @@ class UC_VideoResolutionAndLengthPicker(io.ComfyNode):
             adjusted_height,
             length,
             effective_duration,
+            prepared_audio,
             ui={"resolution": (f"{adjusted_width}×{adjusted_height} · {length} frames · {effective_duration:.2f} s",)},
         )

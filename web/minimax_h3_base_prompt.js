@@ -197,7 +197,11 @@ class H3BaseCanvasPromptEditor {
   }
 
   hit(x, y, w, h, action, tooltip = null) {
-    this.hitRegions.push({ x, y, w, h, action, tooltip });
+    const top = Math.max(y, this.viewportY || 0);
+    const bottom = Math.min(y + h, (this.viewportY || 0) + (this.viewportHeight || 9999));
+    if (bottom > top) {
+      this.hitRegions.push({ x, y: top, w, h: bottom - top, action, tooltip });
+    }
   }
 
   onPointerMove(event) {

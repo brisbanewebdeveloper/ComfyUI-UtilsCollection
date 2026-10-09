@@ -7,6 +7,7 @@ from ..vlm_presets import (
 )
 from ..vlm_legacy_presets import legacy_system_instructions_vlm
 from ..vlm_experimental_presets import system_instructions_vlm_experimental
+from ..vlm_motion_presets import motion_system_instructions_vlm
 
 
 class UC_VLMSysInstrPresets(io.ComfyNode):
@@ -99,6 +100,34 @@ class UC_VLMSysInstrLegacyPresets(UC_VLMSysInstrPresets):
         )
 
 
+class UC_VLMSysInstrMotionPresets(UC_VLMSysInstrPresets):
+    @classmethod
+    def get_presets(cls):
+        return motion_system_instructions_vlm
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        options = sorted(presets)
+        default = options[0] if options else ""
+        return io.Schema(
+            node_id="UC_VLMSysInstrMotionPresets",
+            display_name="VLM System Instruction Motion Presets",
+            category="advanced/text",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    display_name="vlm_system_instruction_motion_preset",
+                    options=options,
+                    default=default,
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_instruction"),
+            ],
+        )
+
+
 class UC_VLMSysQueryAddPresets(io.ComfyNode):
     @classmethod
     def get_presets(cls):
@@ -129,7 +158,7 @@ class UC_VLMSysQueryAddPresets(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.String.Output(display_name="system_query_additional"),
+                io.String.Output(display_name="system_instruction"),
             ],
         )
 
@@ -257,6 +286,37 @@ class UC_VLMSysInstrAdvPresetsExperimental(UC_VLMSysInstrAdvPresets):
                 io.Combo.Input(
                     "preset",
                     display_name="vlm_system_instruction_advanced_preset_experimental",
+                    options=options,
+                    default=default,
+                ),
+                io.Boolean.Input("jailbreak", default=False),
+                io.String.Input("system_query", multiline=True, default=""),
+                io.String.Input("user_query", multiline=True, default=""),
+            ],
+            outputs=[
+                io.String.Output(display_name="system_instruction"),
+            ],
+        )
+
+
+class UC_VLMSysInstrAdvMotionPresets(UC_VLMSysInstrAdvPresets):
+    @classmethod
+    def get_presets(cls):
+        return motion_system_instructions_vlm
+
+    @classmethod
+    def define_schema(cls):
+        presets = cls.get_presets()
+        options = sorted(presets)
+        default = options[0] if options else ""
+        return io.Schema(
+            node_id="UC_VLMSysInstrAdvMotionPresets",
+            display_name="VLM System Instruction Advanced Motion Presets",
+            category="advanced/text",
+            inputs=[
+                io.Combo.Input(
+                    "preset",
+                    display_name="vlm_system_instruction_advanced_motion_preset",
                     options=options,
                     default=default,
                 ),

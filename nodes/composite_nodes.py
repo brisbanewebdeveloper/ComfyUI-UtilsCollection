@@ -41,6 +41,7 @@ from ..helpers.composite_helpers import (
     crop_staged_layers_by_indices,
 )
 from ..helpers.background_replace_helpers import (
+    _detect_largest_face_adaptive,
     _expanded_box,
     _largest_face,
     _ordered_ring,
@@ -48,6 +49,7 @@ from ..helpers.background_replace_helpers import (
     _similarity_transform,
     _transform_source,
     _warp_target,
+    _warp_source,
 )
 from ..helpers.staged_compositor_helpers import (
     RetainedStageCache,
@@ -1847,7 +1849,20 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
                 ),
                 io.Int.Input("feather_radius", default=8, min=-512, max=512, step=1),
                 io.Float.Input(
-                    "target_warp_strength", default=1.0, min=0.0, max=2.0, step=0.01
+                    "source_warp_strength",
+                    default=1.0,
+                    min=-10.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="Strength of thin-plate-spline warping applied to the donor face towards the target facial shape (default 1.0 = donor adapts to target head geometry, negative values reverse the adaptation).",
+                ),
+                io.Float.Input(
+                    "target_warp_strength",
+                    default=0.0,
+                    min=-10.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="Strength of thin-plate-spline warping applied to the target recipient face towards the donor face shape (default 0.0 = recipient head/neck undistorted, negative values reverse the adaptation).",
                 ),
                 io.Int.Input(
                     "warp_decay_radius", default=64, min=1, max=MAX_RESOLUTION, step=1
@@ -1865,15 +1880,17 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
         bbox_expansion,
         mask_expansion,
         feather_radius,
-        target_warp_strength,
-        warp_decay_radius,
-        score_thresh,
+        source_warp_strength=1.0,
+        target_warp_strength=0.0,
+        warp_decay_radius=64,
+        score_thresh=0.25,
     ):
         return io.NodeOutput(
             {
                 "bbox_expansion": int(bbox_expansion),
                 "mask_expansion": int(mask_expansion),
                 "feather_radius": int(feather_radius),
+                "source_warp_strength": float(source_warp_strength),
                 "target_warp_strength": float(target_warp_strength),
                 "warp_decay_radius": int(warp_decay_radius),
                 "score_thresh": float(score_thresh),
@@ -1886,7 +1903,8 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         "bbox_expansion": 64,
         "mask_expansion": 0,
         "feather_radius": 8,
-        "target_warp_strength": 1.0,
+        "source_warp_strength": 1.0,
+        "target_warp_strength": 0.0,
         "warp_decay_radius": 64,
         "score_thresh": 0.25,
     }
@@ -1948,25 +1966,49 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         target_uint8 = (
             target.mul(255.0).add(0.5).clamp(0, 255).to(torch.uint8).cpu().numpy()[0]
         )
-        source_face = _largest_face(
-            face_detection_model.detect_batch(
-                [source_uint8], num_faces=1, score_thresh=score_thresh, variant="full"
-            )[0],
-            "source",
+        source_face = _detect_largest_face_adaptive(
+            face_detection_model, source_uint8, score_thresh, "source"
         )
-        target_face = _largest_face(
-            face_detection_model.detect_batch(
-                [target_uint8], num_faces=1, score_thresh=score_thresh, variant="full"
-            )[0],
-            "target",
+        target_face = _detect_largest_face_adaptive(
+            face_detection_model, target_uint8, score_thresh, "target"
         )
         ring = _ordered_ring(face_detection_model.connection_sets["face_oval"])
 
+        feature_indices = list(ring)
+        if hasattr(face_detection_model, "connection_sets") and isinstance(
+            face_detection_model.connection_sets, dict
+        ):
+            for part in (
+                "nose",
+                "lips",
+                "left_eye",
+                "right_eye",
+                "left_eyebrow",
+                "right_eyebrow",
+                "irises",
+            ):
+                connections = face_detection_model.connection_sets.get(part)
+                if connections:
+                    for a, b in connections:
+                        if a not in feature_indices:
+                            feature_indices.append(a)
+                        if b not in feature_indices:
+                            feature_indices.append(b)
+
+        max_idx = min(
+            len(source_face["landmarks_xy"]), len(target_face["landmarks_xy"])
+        )
+        feature_indices = [idx for idx in feature_indices if idx < max_idx]
+        oval_count = len([idx for idx in ring if idx < max_idx])
+
         source = source.to(target)
-        source_points = source_face["landmarks_xy"][ring]
-        target_points = target_face["landmarks_xy"][ring]
+        source_oval_points = source_face["landmarks_xy"][ring]
         source_mask = _polygon_mask(
-            source.shape[1], source.shape[2], source_points, target.device, target.dtype
+            source.shape[1],
+            source.shape[2],
+            source_oval_points,
+            target.device,
+            target.dtype,
         )
         foreground = background_removal_model.encode_image(source)
         if foreground.shape[-2:] != source.shape[1:3]:
@@ -1987,8 +2029,12 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         source_foreground = foreground[sy1:sy2, sx1:sx2]
         target_crop = target[0, ty1:ty2, tx1:tx2]
 
-        local_source_points = source_points - np.array([sx1, sy1], dtype=np.float32)
-        local_target_points = target_points - np.array([tx1, ty1], dtype=np.float32)
+        local_source_points = source_face["landmarks_xy"][feature_indices] - np.array(
+            [sx1, sy1], dtype=np.float32
+        )
+        local_target_points = target_face["landmarks_xy"][feature_indices] - np.array(
+            [tx1, ty1], dtype=np.float32
+        )
         scale, rotation, translation = _similarity_transform(
             local_source_points, local_target_points
         )
@@ -2003,13 +2049,44 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
             translation,
         )
         placed_source_points = scale * (local_source_points @ rotation.T) + translation
-        warped_target = _warp_target(
-            target_crop,
-            placed_source_points,
-            local_target_points,
-            options["target_warp_strength"],
-            options["warp_decay_radius"],
-        )
+
+        source_warp_strength = float(options.get("source_warp_strength", 1.0))
+        if abs(source_warp_strength) > 1e-4:
+            combined_source = torch.cat(
+                (
+                    placed_source,
+                    placed_oval.unsqueeze(-1),
+                    placed_foreground.unsqueeze(-1),
+                ),
+                dim=-1,
+            )
+            warped_combined = _warp_source(
+                combined_source,
+                placed_source_points,
+                local_target_points,
+                source_warp_strength,
+                options["warp_decay_radius"],
+                oval_count=oval_count,
+            )
+            placed_source = warped_combined[..., :3]
+            placed_oval = warped_combined[..., 3]
+            placed_foreground = warped_combined[..., 4]
+            placed_source_points = placed_source_points + (
+                local_target_points - placed_source_points
+            ) * source_warp_strength
+
+        target_warp_strength = float(options.get("target_warp_strength", 0.0))
+        if abs(target_warp_strength) > 1e-4:
+            warped_target = _warp_target(
+                target_crop,
+                placed_source_points,
+                local_target_points,
+                target_warp_strength,
+                options["warp_decay_radius"],
+                oval_count=oval_count,
+            )
+        else:
+            warped_target = target_crop
 
         opaque = _expand_mask(placed_oval, options["mask_expansion"]).clamp(0.0, 1.0)
         inverted_foreground = 1.0 - placed_foreground

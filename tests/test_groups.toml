@@ -113,6 +113,7 @@ python_tests = [
   "tests/test_image_resampling.py",
   "tests/test_video_frame_sampler.py",
   "tests/test_pose_estimators.py",
+  "tests/test_stitch_image_grid.py",
 ]
 frontend_tests = []
 
@@ -183,6 +184,7 @@ paths = [
   "helpers/model_helpers.py",
 ]
 python_tests = [
+  "tests/test_loader_nodes.py",
   "tests/test_node_metadata.py",
   "tests/test_node_module_structure.py",
   "tests/test_sam3_tiling.py",

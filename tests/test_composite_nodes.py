@@ -2182,6 +2182,259 @@ def test_face_composite_rejects_batches_and_missing_faces():
         )
 
 
+def test_face_composite_dynamically_lowers_threshold_when_no_face_initially_found():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+
+    thresholds_called = []
+    base_model = _FaceModel()
+
+    class _DynamicThresholdModel:
+        connection_sets = base_model.connection_sets
+
+        def detect_batch(self, images, num_faces, score_thresh, variant):
+            thresholds_called.append(float(score_thresh))
+            # Only detect face when threshold is lowered <= 0.15
+            if float(score_thresh) <= 0.15:
+                return base_model.detect_batch(images, num_faces, score_thresh, variant)
+            return [[]]
+
+    model = _DynamicThresholdModel()
+    output = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "score_thresh": 0.25,
+            "bbox_expansion": 2,
+            "feather_radius": 0,
+            "target_warp_strength": 0.0,
+            "source_warp_strength": 0.0,
+        },
+    )
+    assert output.result[0] is not None
+    assert len(thresholds_called) > 1
+    assert any(t <= 0.15 for t in thresholds_called)
+
+    # Also verify with a high user-set threshold (e.g. 0.8) that it steps down proportionally
+    thresholds_80 = []
+    class _HighThresholdModel:
+        connection_sets = base_model.connection_sets
+        def detect_batch(self, images, num_faces, score_thresh, variant):
+            thresholds_80.append(float(score_thresh))
+            if float(score_thresh) <= 0.5:
+                return base_model.detect_batch(images, num_faces, score_thresh, variant)
+            return [[]]
+
+    out_80 = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        _HighThresholdModel(),
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "score_thresh": 0.80,
+            "bbox_expansion": 2,
+            "feather_radius": 0,
+            "target_warp_strength": 0.0,
+            "source_warp_strength": 0.0,
+        },
+    )
+    assert out_80.result[0] is not None
+    assert thresholds_80[0] == 0.80
+    assert thresholds_80[1] < 0.80
+    # Step difference between first two calls is approximately 15% of 0.80 (~0.12)
+    step_diff = round(thresholds_80[0] - thresholds_80[1], 4)
+    assert 0.10 <= step_diff <= 0.15
+
+
+def test_face_composite_options_schema_and_defaults():
+    schema = composite_nodes.UC_MediaPipeFaceCompositeOptions.define_schema()
+    inputs = {item.id: item for item in schema.inputs}
+    assert "source_warp_strength" in inputs
+    assert inputs["source_warp_strength"].default == 1.0
+    assert "target_warp_strength" in inputs
+    assert inputs["target_warp_strength"].default == 0.0
+
+    output = composite_nodes.UC_MediaPipeFaceCompositeOptions.execute(
+        bbox_expansion=64,
+        mask_expansion=0,
+        feather_radius=8,
+        source_warp_strength=0.75,
+        target_warp_strength=0.25,
+        warp_decay_radius=64,
+        score_thresh=0.25,
+    )
+    opts = output.result[0]
+    assert opts["source_warp_strength"] == 0.75
+    assert opts["target_warp_strength"] == 0.25
+
+
+def test_face_composite_donor_first_warping_and_convergence():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+    face_model = _FaceModel()
+
+    # 1. Donor-first adaptation: source_warp_strength=1.0, target_warp_strength=0.0
+    out_donor = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 1.0,
+            "target_warp_strength": 0.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_donor, crop_donor = out_donor.result
+    assert img_donor[0, 6:22, 8:24, 0].sum() > 0
+
+    # 2. Bidirectional convergence: source_warp_strength=0.5, target_warp_strength=0.5
+    out_conv = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 0.5,
+            "target_warp_strength": 0.5,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_conv, crop_conv = out_conv.result
+    assert img_conv[0, 6:22, 8:24, 0].sum() > 0
+
+    # 3. Legacy mode: source_warp_strength=0.0, target_warp_strength=1.0
+    out_legacy = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 0.0,
+            "target_warp_strength": 1.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_legacy, crop_legacy = out_legacy.result
+    assert img_legacy[0, 6:22, 8:24, 0].sum() > 0
+
+
+def test_face_composite_handles_negative_and_extreme_warp_strengths():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+    face_model = _FaceModel()
+
+    # Negative donor warp strength computes without bypass or failure
+    out_neg = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": -1.0,
+            "target_warp_strength": 0.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_neg, crop_neg = out_neg.result
+    assert img_neg[0, 6:22, 8:24, 0].sum() > 0
+
+    # Large warp strength (> 2.0) executes without hanging
+    out_extreme = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 2.5,
+            "target_warp_strength": -0.5,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_extreme, crop_extreme = out_extreme.result
+    assert img_extreme[0, 6:22, 8:24, 0].sum() > 0
+
+
+class _FaceModelWithInterior:
+    def __init__(self):
+        self.connection_sets = {
+            "face_oval": frozenset({(0, 1), (1, 2), (2, 3), (3, 0)}),
+            "nose": frozenset({(4, 5)}),
+            "lips": frozenset({(6, 7)}),
+        }
+        self.calls = []
+
+    def detect_batch(self, images, num_faces, score_thresh, variant):
+        self.calls.append((images[0].shape, num_faces, score_thresh, variant))
+        width = images[0].shape[1]
+        if width == 20:
+            landmarks = np.array(
+                [[4, 8], [8, 4], [12, 8], [8, 12], [8, 8], [8, 9], [8, 10], [8, 11]],
+                dtype=np.float32,
+            )
+            box = np.array([4, 4, 12, 12], dtype=np.float32)
+        else:
+            landmarks = np.array(
+                [
+                    [10, 14],
+                    [16, 8],
+                    [22, 14],
+                    [16, 20],
+                    [16, 14],
+                    [16, 15],
+                    [16, 17],
+                    [16, 18],
+                ],
+                dtype=np.float32,
+            )
+            box = np.array([10, 8, 22, 20], dtype=np.float32)
+        return [[{"bbox_xyxy": box, "landmarks_xy": landmarks}]]
+
+
+def test_face_composite_uses_interior_landmarks_when_available():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+    face_model = _FaceModelWithInterior()
+
+    out = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 1.0,
+            "target_warp_strength": 0.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img, crop = out.result
+    assert img[0, 6:22, 8:24, 0].sum() > 0
+
+
 def test_staged_face_layers_are_stable_ordered_and_intersect_alpha():
     image = torch.ones(1, 20, 20, 4)
     image[..., 3] = 0

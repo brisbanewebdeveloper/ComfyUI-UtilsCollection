@@ -13,7 +13,12 @@ package = types.ModuleType(PACKAGE_NAME)
 package.__path__ = [str(CUSTOM_NODE_ROOT)]
 sys.modules.setdefault(PACKAGE_NAME, package)
 
-from utils_collection_vlm_preset_test import vlm_experimental_presets, vlm_legacy_presets, vlm_presets
+from utils_collection_vlm_preset_test import (
+    vlm_experimental_presets,
+    vlm_legacy_presets,
+    vlm_motion_presets,
+    vlm_presets,
+)
 from utils_collection_vlm_preset_test.nodes import vlm_nodes
 
 
@@ -200,8 +205,10 @@ def test_vlm_preset_widget_labels_are_unique_and_descriptive():
     expected = {
         vlm_nodes.UC_VLMSysInstrPresets: "vlm_system_instruction_preset",
         vlm_nodes.UC_VLMSysInstrLegacyPresets: "vlm_system_instruction_legacy_preset",
+        vlm_nodes.UC_VLMSysInstrMotionPresets: "vlm_system_instruction_motion_preset",
         vlm_nodes.UC_VLMSysQueryAddPresets: "vlm_system_query_add_preset",
         vlm_nodes.UC_VLMSysInstrAdvPresets: "vlm_system_instruction_advanced_preset",
+        vlm_nodes.UC_VLMSysInstrAdvMotionPresets: "vlm_system_instruction_advanced_motion_preset",
     }
 
     actual = {
@@ -214,6 +221,20 @@ def test_vlm_preset_widget_labels_are_unique_and_descriptive():
     for node, label in expected.items():
         frontend_input = node.INPUT_TYPES()["required"]["preset"]
         assert frontend_input[1]["display_name"] == label
+
+
+def test_vlm_motion_presets_node_exposes_motion_presets():
+    declared = vlm_motion_presets.motion_system_instructions_vlm
+    exposed = vlm_nodes.UC_VLMSysInstrMotionPresets.get_presets()
+    assert list(exposed) == list(declared)
+    assert len(exposed) == 19
+    for name, value in declared.items():
+        assert vlm_nodes.UC_VLMSysInstrMotionPresets.execute(name).args == (value,)
+    adv_schema = vlm_nodes.UC_VLMSysInstrAdvMotionPresets.define_schema()
+    assert adv_schema.node_id == "UC_VLMSysInstrAdvMotionPresets"
+    first = sorted(declared)[0]
+    result = vlm_nodes.UC_VLMSysInstrAdvMotionPresets.execute(first, jailbreak=False, system_query="", user_query="")
+    assert result.args == (declared[first],)
 
 
 def test_qwen_system_instruction_variants_preserve_original_presets():

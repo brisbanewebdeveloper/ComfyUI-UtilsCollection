@@ -1938,9 +1938,7 @@ WHISPER_LANGUAGES = {
     "yue": "cantonese",
 }
 
-# Checkpoint vocabulary retains the unsupported Sundanese slot before Cantonese.
 WHISPER_LANGUAGE_TOKENS = tuple(f"<|{code}|>" for code in WHISPER_LANGUAGES)
-WHISPER_LANGUAGE_TOKENS = (*WHISPER_LANGUAGE_TOKENS[:98], "<|su|>", *WHISPER_LANGUAGE_TOKENS[98:])
 
 # language code lookup by name, with a few language aliases
 WHISPER_TO_LANGUAGE_CODE = {
