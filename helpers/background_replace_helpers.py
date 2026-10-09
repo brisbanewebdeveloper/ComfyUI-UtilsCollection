@@ -58,6 +58,32 @@ def _largest_face(faces, name):
     )
 
 
+def _detect_largest_face_adaptive(
+    face_model, image_uint8, initial_thresh, name, decay_pct: float = 0.15, min_thresh: float = 0.01
+):
+    """Detect the largest face, iteratively lowering the threshold by a percentage of the set threshold until a face is found."""
+    start_thresh = min(max(float(initial_thresh), min_thresh), 1.0)
+    step = max(0.005, start_thresh * float(decay_pct))
+
+    curr = start_thresh
+    while curr >= min_thresh:
+        try:
+            detected = face_model.detect_batch(
+                [image_uint8], num_faces=1, score_thresh=round(curr, 4), variant="full"
+            )[0]
+            if detected:
+                return _largest_face(detected, name)
+        except Exception:
+            pass
+        if curr <= min_thresh:
+            break
+        curr = max(min_thresh, curr - step)
+
+    raise ValueError(
+        f"No face was detected in the {name} image even after dynamically lowering detection threshold."
+    )
+
+
 def _similarity_transform(source_points, target_points):
     source_points = np.asarray(source_points, dtype=np.float32)
     target_points = np.asarray(target_points, dtype=np.float32)

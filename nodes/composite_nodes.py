@@ -41,6 +41,7 @@ from ..helpers.composite_helpers import (
     crop_staged_layers_by_indices,
 )
 from ..helpers.background_replace_helpers import (
+    _detect_largest_face_adaptive,
     _expanded_box,
     _largest_face,
     _ordered_ring,
@@ -1965,17 +1966,11 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         target_uint8 = (
             target.mul(255.0).add(0.5).clamp(0, 255).to(torch.uint8).cpu().numpy()[0]
         )
-        source_face = _largest_face(
-            face_detection_model.detect_batch(
-                [source_uint8], num_faces=1, score_thresh=score_thresh, variant="full"
-            )[0],
-            "source",
+        source_face = _detect_largest_face_adaptive(
+            face_detection_model, source_uint8, score_thresh, "source"
         )
-        target_face = _largest_face(
-            face_detection_model.detect_batch(
-                [target_uint8], num_faces=1, score_thresh=score_thresh, variant="full"
-            )[0],
-            "target",
+        target_face = _detect_largest_face_adaptive(
+            face_detection_model, target_uint8, score_thresh, "target"
         )
         ring = _ordered_ring(face_detection_model.connection_sets["face_oval"])
 

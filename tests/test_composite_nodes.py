@@ -2182,6 +2182,73 @@ def test_face_composite_rejects_batches_and_missing_faces():
         )
 
 
+def test_face_composite_dynamically_lowers_threshold_when_no_face_initially_found():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+
+    thresholds_called = []
+    base_model = _FaceModel()
+
+    class _DynamicThresholdModel:
+        connection_sets = base_model.connection_sets
+
+        def detect_batch(self, images, num_faces, score_thresh, variant):
+            thresholds_called.append(float(score_thresh))
+            # Only detect face when threshold is lowered <= 0.15
+            if float(score_thresh) <= 0.15:
+                return base_model.detect_batch(images, num_faces, score_thresh, variant)
+            return [[]]
+
+    model = _DynamicThresholdModel()
+    output = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "score_thresh": 0.25,
+            "bbox_expansion": 2,
+            "feather_radius": 0,
+            "target_warp_strength": 0.0,
+            "source_warp_strength": 0.0,
+        },
+    )
+    assert output.result[0] is not None
+    assert len(thresholds_called) > 1
+    assert any(t <= 0.15 for t in thresholds_called)
+
+    # Also verify with a high user-set threshold (e.g. 0.8) that it steps down proportionally
+    thresholds_80 = []
+    class _HighThresholdModel:
+        connection_sets = base_model.connection_sets
+        def detect_batch(self, images, num_faces, score_thresh, variant):
+            thresholds_80.append(float(score_thresh))
+            if float(score_thresh) <= 0.5:
+                return base_model.detect_batch(images, num_faces, score_thresh, variant)
+            return [[]]
+
+    out_80 = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        _HighThresholdModel(),
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "score_thresh": 0.80,
+            "bbox_expansion": 2,
+            "feather_radius": 0,
+            "target_warp_strength": 0.0,
+            "source_warp_strength": 0.0,
+        },
+    )
+    assert out_80.result[0] is not None
+    assert thresholds_80[0] == 0.80
+    assert thresholds_80[1] < 0.80
+    # Step difference between first two calls is approximately 15% of 0.80 (~0.12)
+    step_diff = round(thresholds_80[0] - thresholds_80[1], 4)
+    assert 0.10 <= step_diff <= 0.15
+
+
 def test_face_composite_options_schema_and_defaults():
     schema = composite_nodes.UC_MediaPipeFaceCompositeOptions.define_schema()
     inputs = {item.id: item for item in schema.inputs}
