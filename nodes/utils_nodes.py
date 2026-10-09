@@ -1921,8 +1921,9 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `bbox_expansion`: expands source and target face boxes. Default `64`.\n"
                 "- `mask_expansion`: expands or contracts the source face mask. Default `0`.\n"
                 "- `feather_radius`: signed face-mask feather control. Default `8`.\n"
-                "- `target_warp_strength`: target deformation strength from `0.0` through `2.0`. Default `1.0`.\n"
-                "- `warp_decay_radius`: target-warp falloff radius. Default `64`.\n"
+                "- `source_warp_strength`: donor face adaptation strength from `0.0` through `2.0`. Default `1.0`.\n"
+                "- `target_warp_strength`: recipient deformation strength from `0.0` through `2.0`. Default `0.0`.\n"
+                "- `warp_decay_radius`: warp falloff radius. Default `64`.\n"
                 "- `score_thresh`: detector score threshold. Default `0.25`.\n\n"
                 "The source face mask is intersected with the source background-removal mask. Outputs are the composited target IMAGE and the extracted Face Crop."
             ),

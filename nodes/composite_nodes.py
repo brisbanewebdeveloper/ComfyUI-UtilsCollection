@@ -48,6 +48,7 @@ from ..helpers.background_replace_helpers import (
     _similarity_transform,
     _transform_source,
     _warp_target,
+    _warp_source,
 )
 from ..helpers.staged_compositor_helpers import (
     RetainedStageCache,
@@ -1847,7 +1848,20 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
                 ),
                 io.Int.Input("feather_radius", default=8, min=-512, max=512, step=1),
                 io.Float.Input(
-                    "target_warp_strength", default=1.0, min=0.0, max=2.0, step=0.01
+                    "source_warp_strength",
+                    default=1.0,
+                    min=0.0,
+                    max=2.0,
+                    step=0.01,
+                    tooltip="Strength of thin-plate-spline warping applied to the donor face towards the target facial shape (default 1.0 = donor adapts to target head geometry).",
+                ),
+                io.Float.Input(
+                    "target_warp_strength",
+                    default=0.0,
+                    min=0.0,
+                    max=2.0,
+                    step=0.01,
+                    tooltip="Strength of thin-plate-spline warping applied to the target recipient face towards the donor face shape (default 0.0 = recipient head/neck undistorted).",
                 ),
                 io.Int.Input(
                     "warp_decay_radius", default=64, min=1, max=MAX_RESOLUTION, step=1
@@ -1865,15 +1879,17 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
         bbox_expansion,
         mask_expansion,
         feather_radius,
-        target_warp_strength,
-        warp_decay_radius,
-        score_thresh,
+        source_warp_strength=1.0,
+        target_warp_strength=0.0,
+        warp_decay_radius=64,
+        score_thresh=0.25,
     ):
         return io.NodeOutput(
             {
                 "bbox_expansion": int(bbox_expansion),
                 "mask_expansion": int(mask_expansion),
                 "feather_radius": int(feather_radius),
+                "source_warp_strength": float(source_warp_strength),
                 "target_warp_strength": float(target_warp_strength),
                 "warp_decay_radius": int(warp_decay_radius),
                 "score_thresh": float(score_thresh),
@@ -1886,7 +1902,8 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         "bbox_expansion": 64,
         "mask_expansion": 0,
         "feather_radius": 8,
-        "target_warp_strength": 1.0,
+        "source_warp_strength": 1.0,
+        "target_warp_strength": 0.0,
         "warp_decay_radius": 64,
         "score_thresh": 0.25,
     }
@@ -2003,13 +2020,42 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
             translation,
         )
         placed_source_points = scale * (local_source_points @ rotation.T) + translation
-        warped_target = _warp_target(
-            target_crop,
-            placed_source_points,
-            local_target_points,
-            options["target_warp_strength"],
-            options["warp_decay_radius"],
-        )
+
+        source_warp_strength = float(options.get("source_warp_strength", 1.0))
+        if source_warp_strength > 0:
+            combined_source = torch.cat(
+                (
+                    placed_source,
+                    placed_oval.unsqueeze(-1),
+                    placed_foreground.unsqueeze(-1),
+                ),
+                dim=-1,
+            )
+            warped_combined = _warp_source(
+                combined_source,
+                placed_source_points,
+                local_target_points,
+                source_warp_strength,
+                options["warp_decay_radius"],
+            )
+            placed_source = warped_combined[..., :3]
+            placed_oval = warped_combined[..., 3]
+            placed_foreground = warped_combined[..., 4]
+            placed_source_points = placed_source_points + (
+                local_target_points - placed_source_points
+            ) * source_warp_strength
+
+        target_warp_strength = float(options.get("target_warp_strength", 0.0))
+        if target_warp_strength > 0:
+            warped_target = _warp_target(
+                target_crop,
+                placed_source_points,
+                local_target_points,
+                target_warp_strength,
+                options["warp_decay_radius"],
+            )
+        else:
+            warped_target = target_crop
 
         opaque = _expand_mask(placed_oval, options["mask_expansion"]).clamp(0.0, 1.0)
         inverted_foreground = 1.0 - placed_foreground

@@ -118,12 +118,73 @@ def _add_control(controls, values, seen, point, value):
         values.append(value)
 
 
+def _tps_warp_image(image, controls, values):
+    device = image.device
+    height, width = image.shape[:2]
+    controls = torch.as_tensor(np.asarray(controls), device=device, dtype=torch.float32)
+    values = torch.as_tensor(np.asarray(values), device=device, dtype=torch.float32)
+    controls[:, 0] = (controls[:, 0] + 0.5) * (2.0 / width) - 1.0
+    controls[:, 1] = (controls[:, 1] + 0.5) * (2.0 / height) - 1.0
+    values[:, 0] *= 2.0 / width
+    values[:, 1] *= 2.0 / height
+    difference = controls[:, None] - controls[None]
+    distance_squared = (difference * difference).sum(dim=-1)
+    kernel = distance_squared * torch.log(distance_squared + 1e-6)
+    kernel.diagonal().add_(1e-4)
+    affine = torch.cat(
+        (torch.ones((controls.shape[0], 1), device=device), controls), dim=1
+    )
+    system = torch.cat(
+        (
+            torch.cat((kernel, affine), dim=1),
+            torch.cat((affine.T, torch.zeros((3, 3), device=device)), dim=1),
+        ),
+        dim=0,
+    )
+    coefficients = torch.linalg.solve(
+        system, torch.cat((values, torch.zeros((3, 2), device=device)), dim=0)
+    )
+
+    grid_rows = []
+    x_coordinates = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) * (
+        2.0 / width
+    ) - 1.0
+    for start in range(0, height, 64):
+        end = min(start + 64, height)
+        y_coordinates = (
+            torch.arange(start, end, device=device, dtype=torch.float32) + 0.5
+        ) * (2.0 / height) - 1.0
+        yy, xx = torch.meshgrid(y_coordinates, x_coordinates, indexing="ij")
+        points = torch.stack((xx, yy), dim=-1)
+        difference = points.unsqueeze(-2) - controls
+        distance_squared = (difference * difference).sum(dim=-1)
+        basis = distance_squared * torch.log(distance_squared + 1e-6)
+        point_affine = torch.cat(
+            (torch.ones((*points.shape[:-1], 1), device=device), points), dim=-1
+        )
+        displacement = basis @ coefficients[:-3] + point_affine @ coefficients[-3:]
+        pixel_x = torch.arange(width, device=device, dtype=torch.float32)
+        pixel_y = torch.arange(start, end, device=device, dtype=torch.float32)
+        edge_x = torch.minimum(pixel_x, width - 1 - pixel_x).unsqueeze(0)
+        edge_y = torch.minimum(pixel_y, height - 1 - pixel_y).unsqueeze(1)
+        displacement *= _smoothstep(torch.minimum(edge_x, edge_y) / 2.0).unsqueeze(-1)
+        grid_rows.append(points + displacement)
+    grid = torch.cat(grid_rows, dim=0).unsqueeze(0)
+    warped = F.grid_sample(
+        image.movedim(-1, 0).unsqueeze(0),
+        grid,
+        mode="bilinear",
+        padding_mode="border",
+        align_corners=False,
+    )
+    return warped.squeeze(0).movedim(0, -1)
+
+
 def _warp_target(
     target, source_oval_points, target_oval_points, strength, decay_radius
 ):
     if strength <= 0:
         return target
-    device = target.device
     height, width = target.shape[:2]
     source_points = np.asarray(source_oval_points, dtype=np.float32)
     target_points = np.asarray(target_oval_points, dtype=np.float32)
@@ -186,61 +247,75 @@ def _warp_target(
             np.array(point, dtype=np.float32),
             np.zeros(2, dtype=np.float32),
         )
+    return _tps_warp_image(target, controls, values)
 
-    controls = torch.as_tensor(np.asarray(controls), device=device, dtype=torch.float32)
-    values = torch.as_tensor(np.asarray(values), device=device, dtype=torch.float32)
-    controls[:, 0] = (controls[:, 0] + 0.5) * (2.0 / width) - 1.0
-    controls[:, 1] = (controls[:, 1] + 0.5) * (2.0 / height) - 1.0
-    values[:, 0] *= 2.0 / width
-    values[:, 1] *= 2.0 / height
-    difference = controls[:, None] - controls[None]
-    distance_squared = (difference * difference).sum(dim=-1)
-    kernel = distance_squared * torch.log(distance_squared + 1e-6)
-    kernel.diagonal().add_(1e-4)
-    affine = torch.cat(
-        (torch.ones((controls.shape[0], 1), device=device), controls), dim=1
-    )
-    system = torch.cat(
-        (
-            torch.cat((kernel, affine), dim=1),
-            torch.cat((affine.T, torch.zeros((3, 3), device=device)), dim=1),
-        ),
-        dim=0,
-    )
-    coefficients = torch.linalg.solve(
-        system, torch.cat((values, torch.zeros((3, 2), device=device)), dim=0)
-    )
 
-    grid_rows = []
-    x_coordinates = (torch.arange(width, device=device, dtype=torch.float32) + 0.5) * (
-        2.0 / width
-    ) - 1.0
-    for start in range(0, height, 64):
-        end = min(start + 64, height)
-        y_coordinates = (
-            torch.arange(start, end, device=device, dtype=torch.float32) + 0.5
-        ) * (2.0 / height) - 1.0
-        yy, xx = torch.meshgrid(y_coordinates, x_coordinates, indexing="ij")
-        points = torch.stack((xx, yy), dim=-1)
-        difference = points.unsqueeze(-2) - controls
-        distance_squared = (difference * difference).sum(dim=-1)
-        basis = distance_squared * torch.log(distance_squared + 1e-6)
-        point_affine = torch.cat(
-            (torch.ones((*points.shape[:-1], 1), device=device), points), dim=-1
+def _warp_source(
+    source, source_oval_points, target_oval_points, strength, decay_radius
+):
+    if strength <= 0:
+        return source
+    height, width = source.shape[:2]
+    source_points = np.asarray(source_oval_points, dtype=np.float32)
+    target_points = np.asarray(target_oval_points, dtype=np.float32)
+    dest_points = source_points + (target_points - source_points) * float(strength)
+    center = dest_points.mean(axis=0)
+    controls = []
+    values = []
+    seen = set()
+    for dest_point, source_point in zip(dest_points, source_points):
+        _add_control(
+            controls,
+            values,
+            seen,
+            dest_point,
+            source_point - dest_point,
         )
-        displacement = basis @ coefficients[:-3] + point_affine @ coefficients[-3:]
-        pixel_x = torch.arange(width, device=device, dtype=torch.float32)
-        pixel_y = torch.arange(start, end, device=device, dtype=torch.float32)
-        edge_x = torch.minimum(pixel_x, width - 1 - pixel_x).unsqueeze(0)
-        edge_y = torch.minimum(pixel_y, height - 1 - pixel_y).unsqueeze(1)
-        displacement *= _smoothstep(torch.minimum(edge_x, edge_y) / 2.0).unsqueeze(-1)
-        grid_rows.append(points + displacement)
-    grid = torch.cat(grid_rows, dim=0).unsqueeze(0)
-    warped = F.grid_sample(
-        target.movedim(-1, 0).unsqueeze(0),
-        grid,
-        mode="bilinear",
-        padding_mode="border",
-        align_corners=False,
-    )
-    return warped.squeeze(0).movedim(0, -1)
+    for dest_point in dest_points:
+        direction = dest_point - center
+        length = np.linalg.norm(direction)
+        if length > 0:
+            fixed = dest_point + direction * (float(decay_radius) / length)
+            fixed[0] = np.clip(fixed[0], 0, width - 1)
+            fixed[1] = np.clip(fixed[1], 0, height - 1)
+            _add_control(controls, values, seen, fixed, np.zeros(2, dtype=np.float32))
+    border_step = max(8, min(32, int(decay_radius) // 2))
+    for x in range(0, width, border_step):
+        _add_control(
+            controls,
+            values,
+            seen,
+            np.array([x, 0], dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+        _add_control(
+            controls,
+            values,
+            seen,
+            np.array([x, height - 1], dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+    for y in range(0, height, border_step):
+        _add_control(
+            controls,
+            values,
+            seen,
+            np.array([0, y], dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+        _add_control(
+            controls,
+            values,
+            seen,
+            np.array([width - 1, y], dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+    for point in ((width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+        _add_control(
+            controls,
+            values,
+            seen,
+            np.array(point, dtype=np.float32),
+            np.zeros(2, dtype=np.float32),
+        )
+    return _tps_warp_image(source, controls, values)

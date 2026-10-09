@@ -2182,6 +2182,89 @@ def test_face_composite_rejects_batches_and_missing_faces():
         )
 
 
+def test_face_composite_options_schema_and_defaults():
+    schema = composite_nodes.UC_MediaPipeFaceCompositeOptions.define_schema()
+    inputs = {item.id: item for item in schema.inputs}
+    assert "source_warp_strength" in inputs
+    assert inputs["source_warp_strength"].default == 1.0
+    assert "target_warp_strength" in inputs
+    assert inputs["target_warp_strength"].default == 0.0
+
+    output = composite_nodes.UC_MediaPipeFaceCompositeOptions.execute(
+        bbox_expansion=64,
+        mask_expansion=0,
+        feather_radius=8,
+        source_warp_strength=0.75,
+        target_warp_strength=0.25,
+        warp_decay_radius=64,
+        score_thresh=0.25,
+    )
+    opts = output.result[0]
+    assert opts["source_warp_strength"] == 0.75
+    assert opts["target_warp_strength"] == 0.25
+
+
+def test_face_composite_donor_first_warping_and_convergence():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+    face_model = _FaceModel()
+
+    # 1. Donor-first adaptation: source_warp_strength=1.0, target_warp_strength=0.0
+    out_donor = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 1.0,
+            "target_warp_strength": 0.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_donor, crop_donor = out_donor.result
+    assert img_donor[0, 6:22, 8:24, 0].sum() > 0
+
+    # 2. Bidirectional convergence: source_warp_strength=0.5, target_warp_strength=0.5
+    out_conv = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 0.5,
+            "target_warp_strength": 0.5,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_conv, crop_conv = out_conv.result
+    assert img_conv[0, 6:22, 8:24, 0].sum() > 0
+
+    # 3. Legacy mode: source_warp_strength=0.0, target_warp_strength=1.0
+    out_legacy = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": 0,
+            "feather_radius": 0,
+            "source_warp_strength": 0.0,
+            "target_warp_strength": 1.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img_legacy, crop_legacy = out_legacy.result
+    assert img_legacy[0, 6:22, 8:24, 0].sum() > 0
+
+
 def test_staged_face_layers_are_stable_ordered_and_intersect_alpha():
     image = torch.ones(1, 20, 20, 4)
     image[..., 3] = 0
