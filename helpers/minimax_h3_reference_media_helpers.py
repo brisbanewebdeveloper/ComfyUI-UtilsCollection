@@ -128,13 +128,17 @@ def _encode_minimax_h3_audio_reference(audio, audio_vae, cache=None) -> dict | N
         raise ValueError("MiniMax H3 audio must contain a waveform tensor.")
     waveform = audio["waveform"]
     sample_rate = audio.get("sample_rate")
+    if waveform.ndim == 2:
+        waveform = waveform.unsqueeze(0)
     if waveform.ndim != 3 or waveform.shape[-1] < 1 or not torch.isfinite(waveform).all() or not isinstance(sample_rate, (int, float)) or sample_rate <= 0:
         raise ValueError("MiniMax H3 audio requires a finite [batch, channels, samples] waveform and positive sample rate.")
     target_rate = getattr(audio_vae, "audio_sample_rate", 32000)
     if sample_rate != target_rate:
-        waveform = torchaudio.functional.resample(waveform, sample_rate, target_rate)
+        waveform = torchaudio.functional.resample(waveform.float(), int(sample_rate), int(target_rate))
     if waveform.shape[1] == 1:
         waveform = waveform.repeat(1, 2, 1)
+    elif waveform.shape[1] > 2:
+        waveform = waveform[:, :2, :]
     hop_length = getattr(getattr(audio_vae, "first_stage_model", audio_vae), "hop_length", getattr(audio_vae, "downscale_ratio", None))
     if isinstance(hop_length, (int, float)) and hop_length > 1:
         hop = int(hop_length)

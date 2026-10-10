@@ -466,10 +466,24 @@ class UC_MiniMaxH3ReferenceMedia(io.ComfyNode):
         reference_audios: io.Autogrow.Type = None,
         **kwargs,
     ) -> io.NodeOutput:
+        vids = dict(reference_videos) if isinstance(reference_videos, dict) else {}
+        vid_auds = dict(reference_video_audios) if isinstance(reference_video_audios, dict) else {}
+        auds = dict(reference_audios) if isinstance(reference_audios, dict) else {}
+
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            if k.startswith("reference_video_audio_"):
+                vid_auds[k] = v
+            elif k.startswith("reference_video_"):
+                vids[k] = v
+            elif k.startswith("reference_audio_"):
+                auds[k] = v
+
         return io.NodeOutput({
-            "reference_videos": reference_videos,
-            "reference_video_audios": reference_video_audios,
-            "reference_audios": reference_audios,
+            "reference_videos": vids,
+            "reference_video_audios": vid_auds,
+            "reference_audios": auds,
         })
 
 
@@ -4463,6 +4477,13 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
         reference_images=None,
         **kwargs,
     ) -> io.NodeOutput:
+        ref_imgs = dict(reference_images) if isinstance(reference_images, dict) else {}
+        for k, v in kwargs.items():
+            if k.startswith("reference_image_") and v is not None:
+                ref_imgs[k] = v
+        if not ref_imgs and not isinstance(reference_images, dict):
+            ref_imgs = reference_images
+
         conditioning, latent = execute_advanced_minimax_h3_reference_media_image_to_video(
             clip=clip,
             vae=vae,
@@ -4480,7 +4501,7 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
             vlm_video_resolution=vlm_video_resolution,
             enable_caching=enable_caching,
             media_config=media_config,
-            reference_images=reference_images,
+            reference_images=ref_imgs,
             **kwargs,
         )
         return io.NodeOutput(conditioning, latent)
@@ -4573,6 +4594,13 @@ class UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion(UC_AdvancedMiniMaxH3RefM
         fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
         if fusion_method not in ("conds_fusion", "token_fusion"):
             raise ValueError(f"Unsupported MiniMax H3 temporal fusion method: {fusion_method}")
+        ref_imgs = dict(reference_images) if isinstance(reference_images, dict) else {}
+        for k, v in kwargs.items():
+            if k.startswith("reference_image_") and v is not None:
+                ref_imgs[k] = v
+        if not ref_imgs and not isinstance(reference_images, dict):
+            ref_imgs = reference_images
+
         conditioning, latent = execute_advanced_minimax_h3_reference_media_image_to_video(
             clip=clip,
             vae=vae,
@@ -4590,7 +4618,7 @@ class UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion(UC_AdvancedMiniMaxH3RefM
             vlm_video_resolution=vlm_video_resolution,
             enable_caching=enable_caching,
             media_config=media_config,
-            reference_images=reference_images,
+            reference_images=ref_imgs,
             visual_fusion_config=visual_fusion_config,
             temporal_fusion=True,
             temporal_token_fusion=fusion_method == "token_fusion",
