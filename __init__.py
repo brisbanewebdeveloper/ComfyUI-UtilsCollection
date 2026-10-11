@@ -196,6 +196,7 @@ class SamplingUtils(ComfyExtension):
             UC_LoraLoaderCLIPOnly,
             UC_LoraLoaderModelOnly,
             UC_LoraStackLoaderModelOnly,
+            UC_LoraStack,
             UC_SAM31CheckpointLoader,
             UC_SAM3Detect,
             UC_LoadImageWithAlpha,

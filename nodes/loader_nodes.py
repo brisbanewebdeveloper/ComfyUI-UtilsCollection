@@ -204,3 +204,38 @@ class UC_LoraStackLoaderModelOnly(io.ComfyNode):
         )
         return io.NodeOutput(new_model)
 
+
+class UC_LoraStack(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_LoraStack",
+            display_name="LoRA Stack",
+            category="advanced/model",
+            description="Specifies a stack of LoRAs using a recursive DynamicCombo template matching the DynamicGroup format.",
+            search_aliases=[
+                "lora",
+                "lora stack",
+                "stack",
+                "dynamic group",
+                "lora template",
+            ],
+            inputs=[
+                build_lora_stack_dynamic_combo(
+                    depth=1, max_depth=15, strength_key="strength"
+                ),
+            ],
+            outputs=[
+                io.Custom("COMFY_DYNAMICGROUP_V3").Output(
+                    "loras",
+                    display_name="loras",
+                    tooltip="The LoRA stack specification matching the DynamicGroup format expected by LoadLoraModel and LoadLoraTextEncoder.",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, add_lora=None, **kwargs) -> io.NodeOutput:
+        entries = extract_lora_stack_entries(add_lora, **kwargs)
+        return io.NodeOutput(entries)
+

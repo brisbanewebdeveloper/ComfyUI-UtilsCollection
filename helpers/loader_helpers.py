@@ -243,21 +243,21 @@ def load_sam31_clip_patcher(
 
 
 def build_lora_stack_dynamic_combo(
-    depth: int = 1, max_depth: int = 15
+    depth: int = 1, max_depth: int = 15, strength_key: str = "strength_model"
 ) -> io.DynamicCombo.Input:
     sub_inputs: list[io.Input] = [
         io.Combo.Input(
             "lora_name",
             options=folder_paths.get_filename_list("loras"),
-            tooltip="Choose a LoRA to apply to the diffusion model.",
+            tooltip="The name of the LoRA file to apply.",
         ),
         io.Float.Input(
-            "strength_model",
+            strength_key,
             default=1.0,
             min=-100.0,
             max=100.0,
             step=0.01,
-            tooltip="How strongly to modify the diffusion model. This value can be negative.",
+            tooltip="How strongly to apply this LoRA. 0 = off, negative inverts the effect.",
         ),
         io.Boolean.Input(
             "enabled",
@@ -267,7 +267,9 @@ def build_lora_stack_dynamic_combo(
     ]
     if depth < max_depth:
         sub_inputs.append(
-            build_lora_stack_dynamic_combo(depth + 1, max_depth=max_depth)
+            build_lora_stack_dynamic_combo(
+                depth + 1, max_depth=max_depth, strength_key=strength_key
+            )
         )
 
     input_id = "add_lora" if depth == 1 else f"add_lora_{depth}"
@@ -278,7 +280,7 @@ def build_lora_stack_dynamic_combo(
             io.DynamicCombo.Option("True", inputs=sub_inputs),
         ],
         display_name="add_lora",
-        tooltip="Enable to configure and apply a LoRA to the diffusion model.",
+        tooltip="Enable to configure and add a LoRA to the stack.",
     )
 
 
@@ -304,20 +306,21 @@ def extract_lora_stack_entries(
             break
 
         lora_name = curr.get("lora_name")
-        strength_model = curr.get("strength_model", 1.0)
+        strength_val = curr.get("strength", curr.get("strength_model", 1.0))
         enabled = curr.get("enabled", True)
         if isinstance(enabled, str):
             enabled = enabled.strip().lower() in ("true", "1", "yes")
 
         if lora_name:
             try:
-                strength_float = float(strength_model)
+                strength_float = float(strength_val)
             except (ValueError, TypeError):
                 strength_float = 1.0
 
             entries.append(
                 {
                     "lora_name": str(lora_name),
+                    "strength": strength_float,
                     "strength_model": strength_float,
                     "enabled": bool(enabled),
                 }
@@ -345,17 +348,20 @@ def extract_lora_stack_entries(
         if single_active and "lora_name" in kwargs:
             lora_name = kwargs["lora_name"]
             if lora_name:
-                strength_model = kwargs.get("strength_model", 1.0)
+                strength_val = kwargs.get(
+                    "strength", kwargs.get("strength_model", 1.0)
+                )
                 enabled = kwargs.get("enabled", True)
                 if isinstance(enabled, str):
                     enabled = enabled.strip().lower() in ("true", "1", "yes")
                 try:
-                    strength_float = float(strength_model)
+                    strength_float = float(strength_val)
                 except (ValueError, TypeError):
                     strength_float = 1.0
                 entries.append(
                     {
                         "lora_name": str(lora_name),
+                        "strength": strength_float,
                         "strength_model": strength_float,
                         "enabled": bool(enabled),
                     }
@@ -374,7 +380,7 @@ def apply_lora_stack_to_model(
 
     for entry in lora_entries:
         lora_name = entry.get("lora_name")
-        strength = entry.get("strength_model", 1.0)
+        strength = entry.get("strength_model", entry.get("strength", 1.0))
         enabled = entry.get("enabled", True)
 
         if not lora_name or not enabled or strength == 0:

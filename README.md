@@ -326,6 +326,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_LoraLoaderCLIPOnly`
 - `UC_LoraLoaderModelOnly`
 - `UC_LoraStackLoaderModelOnly`
+- `UC_LoraStack`
 - `UC_LoadLaMaModel`
 - `UC_TextGenerate`
 - `UC_TextGenerateQwen35SystemPrompt`

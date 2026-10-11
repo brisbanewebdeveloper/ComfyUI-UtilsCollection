@@ -12,6 +12,7 @@ from ..helpers.loader_helpers import (
 )
 from ..nodes.loader_nodes import (
     UC_LoraLoaderModelOnly,
+    UC_LoraStack,
     UC_LoraStackLoaderModelOnly,
 )
 
@@ -241,11 +242,10 @@ def test_extract_lora_stack_entries():
     }
     entries = extract_lora_stack_entries(single)
     assert len(entries) == 1
-    assert entries[0] == {
-        "lora_name": "style_alpha.safetensors",
-        "strength_model": 0.85,
-        "enabled": True,
-    }
+    assert entries[0]["lora_name"] == "style_alpha.safetensors"
+    assert entries[0]["strength_model"] == 0.85
+    assert entries[0]["strength"] == 0.85
+    assert entries[0]["enabled"] is True
 
     # 3. Multi-level nested LoRAs with disabled item
     nested = {
@@ -420,3 +420,92 @@ def test_uc_lora_stack_with_comfy_v3_pipeline(monkeypatch):
 
     out = UC_LoraStackLoaderModelOnly.execute(**nested_inputs)
     assert out.args[0] == "base_diffusion_model+/mock/comic_style.safetensors(0.8)+/mock/detail_enhancer.safetensors(0.4)"
+
+
+def test_uc_lora_stack_schema():
+    schema = UC_LoraStack.define_schema()
+    assert schema.node_id == "UC_LoraStack"
+    assert schema.display_name == "LoRA Stack"
+    assert schema.category == "advanced/model"
+
+    # Only add_lora input (no Model socket)
+    input_names = [inp.id for inp in schema.inputs]
+    assert input_names == ["add_lora"]
+
+    # Output matches COMFY_DYNAMICGROUP_V3
+    assert len(schema.outputs) == 1
+    assert schema.outputs[0].id == "loras"
+    assert schema.outputs[0].get_io_type() == "COMFY_DYNAMICGROUP_V3"
+
+    # Verify template uses 'strength' matching _lora_template()
+    combo = schema.inputs[0]
+    true_opt = next(o for o in combo.options if o.key == "True")
+    field_ids = [inp.id for inp in true_opt.inputs]
+    assert "lora_name" in field_ids
+    assert "strength" in field_ids
+    assert "enabled" in field_ids
+    assert "add_lora_2" in field_ids
+
+
+def test_uc_lora_stack_execution():
+    from comfy_extras.nodes_lora_stack import LoadLoraModel
+
+    # 1. Disabled returns empty list
+    out_empty = UC_LoraStack.execute(add_lora="False")
+    assert out_empty.args[0] == []
+
+    # 2. Active stack
+    stack_data = {
+        "add_lora": "True",
+        "lora_name": "first.safetensors",
+        "strength": 0.8,
+        "enabled": True,
+        "add_lora_2": {
+            "add_lora_2": "True",
+            "lora_name": "second.safetensors",
+            "strength": -0.5,
+            "enabled": False,
+            "add_lora_3": {
+                "add_lora_3": "False",
+            },
+        },
+    }
+    out = UC_LoraStack.execute(add_lora=stack_data)
+    loras = out.args[0]
+    assert len(loras) == 2
+    assert loras[0] == {
+        "lora_name": "first.safetensors",
+        "strength": 0.8,
+        "strength_model": 0.8,
+        "enabled": True,
+    }
+    assert loras[1] == {
+        "lora_name": "second.safetensors",
+        "strength": -0.5,
+        "strength_model": -0.5,
+        "enabled": False,
+    }
+
+    # 3. Verify the output list directly feeds into LoadLoraModel.execute
+    applied_calls = []
+
+    def mock_load_file(name):
+        return ("mock_lora", {"meta": "data"})
+
+    def mock_apply(model, clip, lora, strength_model, strength_clip, lora_metadata=None):
+        applied_calls.append((lora, strength_model))
+        return (f"{model}+patched({strength_model})", None)
+
+    import comfy_extras.nodes_lora_stack as nls
+    orig_load = nls._load_lora_file
+    orig_apply = nls.comfy.sd.load_lora_for_models
+    try:
+        nls._load_lora_file = mock_load_file
+        nls.comfy.sd.load_lora_for_models = mock_apply
+
+        res = LoadLoraModel.execute("base_model", loras)
+        assert res.result == ("base_model+patched(0.8)",)
+        assert len(applied_calls) == 1  # second was disabled so not applied
+    finally:
+        nls._load_lora_file = orig_load
+        nls.comfy.sd.load_lora_for_models = orig_apply
