@@ -3,9 +3,16 @@ from folder_paths import get_filename_list, get_folder_paths, get_full_path_or_r
 from comfy.sd import load_lora_for_models
 from comfy.utils import load_torch_file
 from comfy_api.latest import io
-from ..helpers.loader_helpers import load_filtered_lora_for_model, load_sam31_checkpoint
+from ..helpers.loader_helpers import (
+    apply_lora_stack_to_model,
+    build_lora_stack_dynamic_combo,
+    extract_lora_stack_entries,
+    load_filtered_lora_for_model,
+    load_sam31_checkpoint,
+)
 
 _LORA_LOADER_CACHE = None
+_LORA_STACK_CACHE = {}
 
 
 class UC_LoraLoaderCLIPOnly(io.ComfyNode):
@@ -153,4 +160,47 @@ class UC_SAM31CheckpointLoader(io.ComfyNode):
             embedding_directory=get_folder_paths("embeddings"),
         )
         return io.NodeOutput(model, clip, vae)
+
+
+class UC_LoraStackLoaderModelOnly(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_LoraStackLoaderModelOnly",
+            display_name="Load LoRA Stack (Model Only)",
+            category="advanced/model",
+            description="Applies a stack of LoRAs to a diffusion model using a recursive DynamicCombo template.",
+            search_aliases=[
+                "lora",
+                "lora stack",
+                "load lora stack",
+                "lora loader",
+                "stack loader",
+            ],
+            inputs=[
+                io.Model.Input(
+                    "model",
+                    tooltip="The diffusion model the LoRA stack will be applied to.",
+                ),
+                build_lora_stack_dynamic_combo(depth=1, max_depth=15),
+            ],
+            outputs=[
+                io.Model.Output(
+                    "model",
+                    display_name="model",
+                    tooltip="The diffusion model with all enabled LoRAs applied.",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, add_lora=None, **kwargs) -> io.NodeOutput:
+        global _LORA_STACK_CACHE
+        entries = extract_lora_stack_entries(add_lora, **kwargs)
+        new_model, _LORA_STACK_CACHE = apply_lora_stack_to_model(
+            model=model,
+            lora_entries=entries,
+            cache=_LORA_STACK_CACHE,
+        )
+        return io.NodeOutput(new_model)
 

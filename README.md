@@ -31,6 +31,7 @@ Native inference uses ComfyUI model management and attention, UEL safetensors lo
 - `UC_AdvancedVisualConditioningEncode`
 - `UC_AdvancedMiniMaxH3ImageToVideo`
 - `UC_AdvancedMiniMaxH3RefMediaImageToVideo`
+- `UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion`
 - `UC_AdvMiniMaxH3ImageToVideoTemporalFusion`
 - `UC_MiniMaxH3ReferenceMedia`
 - `UC_VisualFusionImages`
@@ -324,6 +325,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_VideoTimelineText`
 - `UC_LoraLoaderCLIPOnly`
 - `UC_LoraLoaderModelOnly`
+- `UC_LoraStackLoaderModelOnly`
 - `UC_LoadLaMaModel`
 - `UC_TextGenerate`
 - `UC_TextGenerateQwen35SystemPrompt`
@@ -333,6 +335,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_FromList`
 - `UC_GetJsonValue`
 - `UC_MiniMaxH3Cache`
+- `UC_MiniMaxH3DiffusionCache`
 - `UC_MiniMaxH3SlaAttentionConfig`
 - `UC_MiniMaxH3Spectrum`
 - `UC_MiniMaxH3PDDAcc`
