@@ -403,3 +403,47 @@ def apply_lora_stack_to_model(
         )
 
     return model, cache
+
+
+def enable_dynamic_group_link_support() -> bool:
+    """Enables ComfyUI Core _DynamicGroup inputs (e.g. 'loras' in LoadLoraModel) to accept link sockets.
+
+    In ComfyUI Core, _DynamicGroup only checks for in-node widget keys like 'loras.0.lora_name'
+    and fails validation with DynamicInputError ('0 rows; expected between 1 and 20') when
+    connected to another node via a socket link. This patch detects when the dynamic group
+    input is connected to an upstream link and preserves it as a valid link input.
+    """
+    try:
+        from comfy_api.latest._io import (
+            DYNAMIC_INPUT_LOOKUP,
+            _DynamicGroup,
+            finalize_prefix,
+            register_dynamic_input_func,
+        )
+        from execution import is_link
+
+        orig_func = DYNAMIC_INPUT_LOOKUP.get(_DynamicGroup.io_type)
+        if orig_func is None or getattr(orig_func, "_supports_links", False):
+            return True
+
+        def _expand_dynamic_group_with_links(
+            out_dict, live_inputs, value, input_type, curr_prefix
+        ):
+            finalized_prefix = finalize_prefix(curr_prefix)
+            val = live_inputs.get(finalized_prefix)
+            if is_link(val):
+                out_dict[input_type][finalized_prefix] = value
+                return
+            return orig_func(out_dict, live_inputs, value, input_type, curr_prefix)
+
+        _expand_dynamic_group_with_links._supports_links = True
+        register_dynamic_input_func(
+            _DynamicGroup.io_type, _expand_dynamic_group_with_links
+        )
+        return True
+    except Exception:
+        return False
+
+
+enable_dynamic_group_link_support()
+

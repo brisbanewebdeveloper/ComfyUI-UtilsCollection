@@ -509,3 +509,59 @@ def test_uc_lora_stack_execution():
     finally:
         nls._load_lora_file = orig_load
         nls.comfy.sd.load_lora_for_models = orig_apply
+
+
+def test_load_lora_model_link_validation_and_execution(monkeypatch):
+    import asyncio
+    import execution
+    import folder_paths
+    import nodes
+    from comfy_extras.nodes_lora_stack import LoadLoraModel
+    from ..helpers.loader_helpers import enable_dynamic_group_link_support
+
+    enable_dynamic_group_link_support()
+    monkeypatch.setattr(folder_paths, "get_filename_list", lambda _: ["test_lora.safetensors"])
+
+    class DummyLoader:
+        @classmethod
+        def INPUT_TYPES(s): return {"required": {}}
+        RETURN_TYPES = ("MODEL",)
+        FUNCTION = "exec"
+
+    class DummyOutput:
+        @classmethod
+        def INPUT_TYPES(s): return {"required": {"model": ("MODEL",)}}
+        RETURN_TYPES = ()
+        OUTPUT_NODE = True
+        FUNCTION = "exec"
+
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "DummyLoader", DummyLoader)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "DummyOutput", DummyOutput)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "LoadLoraModel", LoadLoraModel)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "UC_LoraStack", UC_LoraStack)
+
+    prompt = {
+        "1": {
+            "class_type": "UC_LoraStack",
+            "inputs": {
+                "add_lora": "True",
+                "add_lora.lora_name": "test_lora.safetensors",
+                "add_lora.strength": 0.8,
+                "add_lora.enabled": True,
+            },
+        },
+        "2": {"class_type": "DummyLoader", "inputs": {}},
+        "3": {
+            "class_type": "LoadLoraModel",
+            "inputs": {"model": ["2", 0], "loras": ["1", 0]},
+        },
+        "4": {"class_type": "DummyOutput", "inputs": {"model": ["3", 0]}},
+    }
+
+    # Verify that validate_prompt passes without DynamicGroup '0 rows' error
+    valid, errors, outputs, node_errors = asyncio.run(
+        execution.validate_prompt("test_prompt", prompt, None)
+    )
+    assert valid is True
+    assert errors is None
+    assert node_errors == {}
