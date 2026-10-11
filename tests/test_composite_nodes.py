@@ -2435,6 +2435,93 @@ def test_face_composite_uses_interior_landmarks_when_available():
     assert img[0, 6:22, 8:24, 0].sum() > 0
 
 
+def test_apply_face_mask_options_nose_distance_protection():
+    height, width = 100, 100
+    angles = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+    oval_x = 50.0 + 40.0 * np.cos(angles)
+    oval_y = 50.0 + 40.0 * np.sin(angles)
+    oval_pts = np.stack([oval_x, oval_y], axis=-1)
+
+    # Face looking left: nose at x=15, y=50 near the left oval boundary (x=10)
+    nose_pt = np.array([[15.0, 50.0]])
+    all_pts = np.concatenate([oval_pts, nose_pt], axis=0)
+
+    mask = background_replace_helpers._polygon_mask(
+        height, width, oval_pts, "cpu", torch.float32
+    )
+    foreground = torch.ones(height, width)
+
+    feature_indices = list(range(len(all_pts)))
+    nose_indices = {24}
+
+    # 1. Zero expansion & feather returns original mask * solid foreground
+    zero_alpha = background_replace_helpers._apply_face_mask_options(
+        placed_oval=mask,
+        placed_foreground=foreground,
+        mask_expansion=0,
+        feather_radius=0,
+        placed_points=all_pts,
+        feature_indices=feature_indices,
+        nose_indices=nose_indices,
+        oval_count=24,
+    )
+    assert torch.allclose(zero_alpha, mask)
+
+    # 2. When nose_indices is empty, fallback to uniform shrink
+    uniform_alpha = background_replace_helpers._apply_face_mask_options(
+        placed_oval=mask,
+        placed_foreground=foreground,
+        mask_expansion=-10,
+        feather_radius=0,
+        placed_points=all_pts,
+        feature_indices=feature_indices,
+        nose_indices=set(),
+        oval_count=24,
+    )
+    # At x=16, y=50, uniform shrink erodes it to 0
+    assert uniform_alpha[50, 16] == 0.0
+
+    # 3. Adaptive shrink with nose protection preserves the nose profile
+    adaptive_alpha = background_replace_helpers._apply_face_mask_options(
+        placed_oval=mask,
+        placed_foreground=foreground,
+        mask_expansion=-10,
+        feather_radius=4,
+        placed_points=all_pts,
+        feature_indices=feature_indices,
+        nose_indices=nose_indices,
+        oval_count=24,
+    )
+    # Near the nose (x=16, y=50), the nose is protected and preserved
+    assert adaptive_alpha[50, 16] > 0.8
+    # On the far ear side (x=85, y=50), the mask is shrunk away
+    assert adaptive_alpha[50, 85] == 0.0
+
+
+def test_face_composite_with_nose_preserves_profile_under_mask_contraction():
+    source = torch.zeros(1, 20, 20, 3)
+    source[..., 0] = 1.0
+    target = torch.zeros(1, 30, 30, 3)
+    face_model = _FaceModelWithInterior()
+
+    out = composite_nodes.UC_MediaPipeFaceComposite.execute(
+        face_model,
+        _BackgroundModel(),
+        source,
+        target,
+        {
+            "bbox_expansion": 2,
+            "mask_expansion": -2,
+            "feather_radius": 2,
+            "source_warp_strength": 1.0,
+            "target_warp_strength": 0.0,
+            "warp_decay_radius": 4,
+        },
+    )
+    img, crop = out.result
+    assert img[0, 6:22, 8:24, 0].sum() > 0
+
+
 def test_staged_face_layers_are_stable_ordered_and_intersect_alpha():
     image = torch.ones(1, 20, 20, 4)
     image[..., 3] = 0
