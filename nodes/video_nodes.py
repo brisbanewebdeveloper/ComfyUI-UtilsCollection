@@ -1,8 +1,15 @@
 import hashlib
 import os
+from typing import Any
 
-from comfy_api.latest import InputImpl, io
-from ..helpers.video_helpers import is_video_file, list_video_files, normalize_video_path
+import torch
+from comfy_api.latest import InputImpl, io, ui
+from ..helpers.video_helpers import (
+    is_video_file,
+    list_video_files,
+    normalize_video_path,
+    save_keyframe_optimized_video,
+)
 
 
 class UC_LoadVideoPath(io.ComfyNode):
@@ -127,3 +134,108 @@ class UC_LoadVideoDirectory(io.ComfyNode):
         if not list_video_files(normalized_path)[int(start_index):int(start_index) + int(load_count)]:
             return f"No videos found in requested range: {directory_path}"
         return True
+
+
+class UC_SaveVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_SaveVideo",
+            display_name="Save Video (Keyframe Optimized)",
+            category="advanced/video",
+            search_aliases=["save video", "export video", "video combine", "nvenc video"],
+            description="Saves video with proper codec keyframes (IDR) placed at scene cuts, matching Avidemux NVENC / x264 GOP settings.",
+            inputs=[
+                io.Image.Input("images", tooltip="Input image sequence to encode into video."),
+                io.Float.Input("fps", default=24.0, min=0.01, max=240.0, step=0.01, tooltip="Frame rate of the output video."),
+                io.Combo.Input(
+                    "codec",
+                    options=["auto", "h264_nvenc", "hevc_nvenc", "libx264", "libx265"],
+                    default="auto",
+                    tooltip="Video encoder. Auto selects hardware NVENC if available on NVIDIA GPUs, falling back to libx264.",
+                ),
+                io.Int.Input(
+                    "gop_size",
+                    default=100,
+                    min=1,
+                    max=1000,
+                    step=1,
+                    tooltip="Maximum distance between keyframes (GOP size). Default 100 matches Avidemux.",
+                ),
+                io.Int.Input(
+                    "b_frames",
+                    default=0,
+                    min=0,
+                    max=16,
+                    step=1,
+                    tooltip="Maximum consecutive B-frames. Default 0 matches Avidemux.",
+                ),
+                io.Float.Input(
+                    "bitrate_mbps",
+                    default=10.0,
+                    min=0.1,
+                    max=200.0,
+                    step=0.5,
+                    tooltip="Video bitrate in Mbps for NVENC. Default 10 Mbps matches Avidemux.",
+                ),
+                io.Float.Input(
+                    "crf",
+                    default=19.0,
+                    min=0.0,
+                    max=51.0,
+                    step=1.0,
+                    tooltip="Constant Rate Factor for software encoders (libx264/libx265). Lower is higher quality.",
+                ),
+                io.Audio.Input(
+                    "audio",
+                    optional=True,
+                    tooltip="Optional audio track to mux into the video.",
+                ),
+                io.String.Input(
+                    "filename_prefix",
+                    default="video/ComfyUI",
+                    tooltip="Prefix path in output folder.",
+                ),
+            ],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
+            is_output_node=True,
+            outputs=[
+                io.Image.Output("images", display_name="IMAGES"),
+                io.String.Output("filepath", display_name="Filepath"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        images: torch.Tensor,
+        fps: float = 24.0,
+        codec: str = "auto",
+        gop_size: int = 100,
+        b_frames: int = 0,
+        bitrate_mbps: float = 10.0,
+        crf: float = 19.0,
+        audio: Any = None,
+        filename_prefix: str = "video/ComfyUI",
+    ) -> io.NodeOutput:
+        prompt = cls.hidden.prompt if cls.hidden is not None else None
+        extra_pnginfo = cls.hidden.extra_pnginfo if cls.hidden is not None else None
+        output_path, file, subfolder = save_keyframe_optimized_video(
+            images=images,
+            fps=fps,
+            codec=codec,
+            gop_size=gop_size,
+            b_frames=b_frames,
+            bitrate_mbps=bitrate_mbps,
+            crf=crf,
+            audio=audio,
+            filename_prefix=filename_prefix,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+        )
+        return io.NodeOutput(
+            images,
+            output_path,
+            ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]),
+        )
+

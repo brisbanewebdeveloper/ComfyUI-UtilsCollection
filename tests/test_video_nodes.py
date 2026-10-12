@@ -93,3 +93,42 @@ def test_video_extension_does_not_make_invalid_content_readable(tmp_path):
     with pytest.raises(ValueError, match="does not contain readable video"):
         video_nodes.UC_LoadVideoPath.execute(str(source))
     assert video_nodes.list_video_files(str(tmp_path)) == []
+
+
+def test_save_video_schema_and_execution(tmp_path, monkeypatch):
+    import torch
+    import folder_paths
+
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    schema = video_nodes.UC_SaveVideo.define_schema()
+    assert schema.node_id == "UC_SaveVideo"
+    assert schema.is_output_node is True
+
+    # 40 frames: frame 0-19 dark, frame 20-39 bright (cut at frame 20)
+    images = torch.cat(
+        [torch.full((20, 64, 64, 3), 0.1), torch.full((20, 64, 64, 3), 0.9)],
+        dim=0,
+    )
+    result = video_nodes.UC_SaveVideo.execute(
+        images=images,
+        fps=24.0,
+        codec="libx264",
+        gop_size=100,
+        b_frames=0,
+        filename_prefix="test_save",
+    )
+    output_images, output_path = result.args
+    assert output_images.shape == images.shape
+    assert pathlib.Path(output_path).is_file()
+
+    # Verify keyframes placed at frame 0 and frame 20
+    with av.open(output_path) as container:
+        stream = container.streams.video[0]
+        key_frames = [
+            round(float(packet.pts * packet.time_base * 24.0))
+            for packet in container.demux(stream)
+            if packet.is_keyframe
+        ]
+    assert 0 in key_frames
+    assert 20 in key_frames

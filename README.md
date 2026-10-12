@@ -217,6 +217,7 @@ the base-resolution conditioning fusion.
 - `UC_DensePoseEstimator`
 - `UC_LoadVideoPath`
 - `UC_LoadVideoDirectory`
+- `UC_SaveVideo`
 
 `UC_BatchedOpenPose` batches video frames for body inference and person crops for hand/face inference. `UC_DWPoseEstimator` batches YOLOX frames and RTMPose person crops, including partial batches without padding. Both return `IMAGE` and `POSE_KEYPOINT`, use ComfyUI's selected device/model management, and expose a batch size to control VRAM use. These are independent eager implementations loaded through UEL; `comfyui_controlnet_aux`, Ultralytics, ONNX Runtime, MMPose, and TorchScript are not runtime dependencies. Speed and prediction parity need real-model validation.
 
