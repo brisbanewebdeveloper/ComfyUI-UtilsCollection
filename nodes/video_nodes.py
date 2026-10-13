@@ -145,15 +145,17 @@ class UC_SaveVideo(io.ComfyNode):
             display_name="Save Video (Keyframe Optimized)",
             category="advanced/video",
             search_aliases=["save video", "export video", "video combine", "nvenc video"],
-            description="Saves video with proper codec keyframes (IDR) placed at scene cuts, matching Avidemux NVENC / x264 GOP settings.",
+            description="Saves video with clean seekable keyframes at scene cuts so players and video editors scrub and edit smoothly without black frames or visual glitching.",
             inputs=[
-                io.Image.Input("images", tooltip="Input image sequence to encode into video."),
-                io.Float.Input("fps", default=24.0, min=0.01, max=240.0, step=0.01, tooltip="Frame rate of the output video."),
+                io.Video.Input("video", optional=True, tooltip="Connect a video to save. Either video or images must be connected."),
+                io.Image.Input("images", optional=True, tooltip="Connect image frames to save. Either images or video must be connected."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional sound track to include. If empty and video is connected, keeps the video's existing sound."),
+                io.Float.Input("fps", default=24.0, min=0.01, max=240.0, step=0.01, tooltip="Playback speed in frames per second. Matches input video speed automatically when video is connected."),
                 io.Combo.Input(
                     "codec",
                     options=["auto", "h264_nvenc", "hevc_nvenc", "libx264", "libx265"],
                     default="auto",
-                    tooltip="Video encoder. Auto selects hardware NVENC if available on NVIDIA GPUs, falling back to libx264.",
+                    tooltip="Compression format. 'auto' uses NVIDIA GPU acceleration when available for fast export, or high-quality CPU encoding otherwise.",
                 ),
                 io.Int.Input(
                     "gop_size",
@@ -161,7 +163,7 @@ class UC_SaveVideo(io.ComfyNode):
                     min=1,
                     max=1000,
                     step=1,
-                    tooltip="Maximum distance between keyframes (GOP size). Default 100 matches Avidemux.",
+                    tooltip="Maximum spacing between keyframes. Lower values make seeking and scrubbing smoother in video players and editors.",
                 ),
                 io.Int.Input(
                     "b_frames",
@@ -169,7 +171,7 @@ class UC_SaveVideo(io.ComfyNode):
                     min=0,
                     max=16,
                     step=1,
-                    tooltip="Maximum consecutive B-frames. Default 0 matches Avidemux.",
+                    tooltip="Predictive frames between keyframes. 0 provides the best editing responsiveness.",
                 ),
                 io.Float.Input(
                     "bitrate_mbps",
@@ -177,7 +179,7 @@ class UC_SaveVideo(io.ComfyNode):
                     min=0.1,
                     max=200.0,
                     step=0.5,
-                    tooltip="Video bitrate in Mbps for NVENC. Default 10 Mbps matches Avidemux.",
+                    tooltip="Target video quality and size for GPU export (in megabits per second). Higher values preserve finer visual detail.",
                 ),
                 io.Float.Input(
                     "crf",
@@ -185,33 +187,29 @@ class UC_SaveVideo(io.ComfyNode):
                     min=0.0,
                     max=51.0,
                     step=1.0,
-                    tooltip="Constant Rate Factor for software encoders (libx264/libx265). Lower is higher quality.",
-                ),
-                io.Audio.Input(
-                    "audio",
-                    optional=True,
-                    tooltip="Optional audio track to mux into the video.",
+                    tooltip="Visual quality level for CPU export. Lower numbers mean higher quality (19 is visually near-lossless).",
                 ),
                 io.String.Input(
                     "filename_prefix",
                     default="video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default",
-                    tooltip="Prefix path in output folder. Supports date tokens like %date:yyyy-MM-dd%.",
+                    tooltip="Output folder and filename. Supports date stamps like %date:yyyy-MM-dd% to organize files automatically by day.",
                 ),
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             is_output_node=True,
             outputs=[
-                io.Image.Output("images", display_name="IMAGES"),
-                io.String.Output("filepath", display_name="Filepath"),
-                io.Video.Output("video", display_name="VIDEO", tooltip="Native ComfyUI VIDEO object of the saved video."),
-                io.Audio.Output("audio", display_name="AUDIO", tooltip="The audio track (or None if no audio)."),
+                io.Image.Output("images", display_name="IMAGES", tooltip="The raw video frames."),
+                io.String.Output("filepath", display_name="Filepath", tooltip="Full file path to the saved video on your computer."),
+                io.Video.Output("video", display_name="VIDEO", tooltip="The saved video ready to connect to downstream video nodes."),
+                io.Audio.Output("audio", display_name="AUDIO", tooltip="The sound track included in the video."),
             ],
         )
 
     @classmethod
     def execute(
         cls,
-        images: torch.Tensor,
+        images: torch.Tensor = None,
+        video: Any = None,
         fps: float = 24.0,
         codec: str = "auto",
         gop_size: int = 100,
@@ -221,27 +219,41 @@ class UC_SaveVideo(io.ComfyNode):
         audio: Any = None,
         filename_prefix: str = "video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default",
     ) -> io.NodeOutput:
+        actual_images = images
+        actual_audio = audio
+        actual_fps = fps
+
+        if actual_images is None:
+            if video is None:
+                raise ValueError("UC_SaveVideo requires either 'images' or 'video' to be connected.")
+            comps = video.get_components()
+            actual_images = comps.images
+            if actual_audio is None:
+                actual_audio = comps.audio
+            if fps == 24.0 and getattr(comps, "frame_rate", None):
+                actual_fps = float(comps.frame_rate)
+
         prompt = cls.hidden.prompt if cls.hidden is not None else None
         extra_pnginfo = cls.hidden.extra_pnginfo if cls.hidden is not None else None
         output_path, file, subfolder = save_keyframe_optimized_video(
-            images=images,
-            fps=fps,
+            images=actual_images,
+            fps=actual_fps,
             codec=codec,
             gop_size=gop_size,
             b_frames=b_frames,
             bitrate_mbps=bitrate_mbps,
             crf=crf,
-            audio=audio,
+            audio=actual_audio,
             filename_prefix=filename_prefix,
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,
         )
         video_obj = InputImpl.VideoFromFile(output_path)
         return io.NodeOutput(
-            images,
+            actual_images,
             output_path,
             video_obj,
-            audio,
+            actual_audio,
             ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]),
         )
 
@@ -254,17 +266,17 @@ class UC_ConcatenateVideoList(io.ComfyNode):
             display_name="Concatenate Video (List)",
             category="video",
             is_input_list=True,
-            description="Concatenates an arbitrary list of videos from a list execution into a single continuous video.",
+            description="Stitches multiple video clips together back-to-back into one continuous video. Connect a list of videos from a queue or multi-clip workflow.",
             inputs=[
-                io.Video.Input("videos", tooltip="List of videos to concatenate in sequence."),
+                io.Video.Input("videos", tooltip="Connect video clips to stitch together in order. Accepts a list of videos output across a queue run or list generation."),
                 io.Audio.Input(
                     "complete_audio",
                     optional=True,
-                    tooltip="Optional complete soundtrack to replace audio in the concatenated video. If disconnected, automatically joins audio tracks from the input videos.",
+                    tooltip="Optional replacement audio for the whole joined video. If disconnected, automatically stitches the audio from each video clip together so nothing is lost.",
                 ),
             ],
             outputs=[
-                io.Video.Output("video", display_name="VIDEO", tooltip="The concatenated video."),
+                io.Video.Output("video", display_name="VIDEO", tooltip="The combined continuous video, ready for playback or saving."),
             ],
         )
 
@@ -288,15 +300,25 @@ class UC_ConcatenateVideoList(io.ComfyNode):
 
         audio_track = complete_audio[0] if (complete_audio and isinstance(complete_audio, list)) else complete_audio
         if audio_track is None:
-            collected_audios = []
+            has_any_audio = False
             for v in valid_videos:
                 try:
+                    if v.get_components().audio is not None:
+                        has_any_audio = True
+                        break
+                except Exception:
+                    pass
+            if has_any_audio:
+                collected_audios = []
+                for v in valid_videos:
                     comp = v.get_components()
                     if comp.audio is not None:
                         collected_audios.append(comp.audio)
-                except Exception:
-                    pass
-            if collected_audios:
+                    else:
+                        fps = float(getattr(comp, "frame_rate", 24.0) or 24.0)
+                        duration = len(comp.images) / fps
+                        silence = {"waveform": torch.zeros(1, 2, round(duration * 44100)), "sample_rate": 44100}
+                        collected_audios.append(silence)
                 audio_track = concatenate_audio_list(collected_audios)
 
         cat_video = InputImpl.VideoFromList(valid_videos, audio_track, Types.VideoCodec.AUTO)

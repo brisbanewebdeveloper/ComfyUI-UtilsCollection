@@ -182,7 +182,14 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
     cat_result = video_nodes.UC_ConcatenateVideoList.execute([video_obj, video_obj_audio])
     cat_video = cat_result.args[0]
     assert cat_video is not None
-    cat_comp = cat_video.get_components()
-    # 40 frames + 40 frames = 80 frames
-    assert cat_comp.images.shape[0] == 80
-    assert cat_comp.audio is not None
+
+    # Test saving the concatenated video with keyframe optimization through UC_SaveVideo
+    save_cat = video_nodes.UC_SaveVideo.execute(
+        video=cat_video,
+        codec="libx264",
+        filename_prefix="test_save_cat",
+    )
+    cat_frames, cat_path, cat_obj, cat_audio = save_cat.args
+    assert cat_frames.shape[0] == 80
+    assert pathlib.Path(cat_path).is_file()
+    assert cat_audio is not None

@@ -533,13 +533,13 @@ class UC_MiniMaxH3GuidedContinuationWindow(io.ComfyNode):
             display_name="MiniMax H3 Guided Continuation Window",
             category="utils/sampling",
             description=(
-                "Allocates a fresh AV target whose leading overlap is generated as hidden "
-                "motion context under a MiniMax H3 Latent Tail Guide."
+                "Prepares a blank canvas for the next clip with a hidden overlapping seam "
+                "so motion and sound continue smoothly from the previous clip."
             ),
             inputs=[
                 io.Latent.Input(
                     "previous_av_latent",
-                    tooltip="The completed cumulative H3 AV latent to continue.",
+                    tooltip="The completed latent from your previous clip.",
                 ),
                 io.Int.Input(
                     "overlap_frames",
@@ -547,7 +547,7 @@ class UC_MiniMaxH3GuidedContinuationWindow(io.ComfyNode):
                     min=5,
                     max=3600,
                     step=17,
-                    tooltip="Hidden motion-context span; must satisfy 17k + 5.",
+                    tooltip="Hidden seam duration in frames to match motion and sound (default 22 frames = ~0.9s).",
                 ),
                 io.Int.Input(
                     "extension_frames",
@@ -555,20 +555,20 @@ class UC_MiniMaxH3GuidedContinuationWindow(io.ComfyNode):
                     min=17,
                     max=3570,
                     step=17,
-                    tooltip="New visible frame count; must be a multiple of 17.",
+                    tooltip="How many new visible frames to generate (default 119 frames = ~5s).",
                 ),
             ],
             outputs=[
                 io.Latent.Output(
                     "latent",
-                    tooltip="Fresh unmasked AV target for the continuation sampler.",
+                    tooltip="Fresh canvas ready to connect to your sampler.",
                 ),
                 io.Int.Output(
                     "window_length",
-                    tooltip="Connect to MiniMax H3 Image to Video's length input.",
+                    tooltip="Total frames in this window. Connect to the length input of your prompt encoder.",
                 ),
-                io.Int.Output("overlap_video_tokens"),
-                io.Int.Output("overlap_audio_tokens"),
+                io.Int.Output("overlap_video_tokens", tooltip="Seam measurement for video. Connect to Latent Tail Guide and Append Continuation."),
+                io.Int.Output("overlap_audio_tokens", tooltip="Seam measurement for audio. Connect to Latent Tail Guide and Append Continuation."),
             ],
         )
 
@@ -602,26 +602,26 @@ class UC_MiniMaxH3LatentTailGuide(io.ComfyNode):
             display_name="MiniMax H3 Latent Tail Guide",
             category="utils/sampling",
             description=(
-                "Adds the previous generated AV latent tail as a native frame-zero H3 guide "
-                "without a VAE round trip."
+                "Guides the beginning of the new clip using the ending of the previous clip "
+                "so characters, scene, and sound flow naturally without any VAE round trip."
             ),
             inputs=[
                 io.Conditioning.Input(
                     "positive",
-                    tooltip="Positive conditioning for the complete continuation window.",
+                    tooltip="Positive prompt conditioning.",
                 ),
                 io.Latent.Input(
                     "previous_av_latent",
-                    tooltip="The completed cumulative H3 AV latent whose tail provides context.",
+                    tooltip="The completed latent from your previous clip.",
                 ),
                 io.Latent.Input(
                     "target_av_latent",
-                    tooltip="The fresh guided continuation target that will be sampled.",
+                    tooltip="The fresh canvas from Guided Continuation Window.",
                 ),
-                io.Int.Input("overlap_video_tokens", min=1, force_input=True),
-                io.Int.Input("overlap_audio_tokens", min=1, force_input=True),
+                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
             ],
-            outputs=[io.Conditioning.Output(display_name="positive")],
+            outputs=[io.Conditioning.Output(display_name="positive", tooltip="Conditioning with seamless motion guidance attached.")],
         )
 
     @classmethod
@@ -651,25 +651,26 @@ class UC_MiniMaxH3AppendContinuation(io.ComfyNode):
             display_name="MiniMax H3 Append Continuation",
             category="utils/sampling",
             description=(
-                "Trims the hidden overlap and appends new AV tokens onto the cumulative latent."
+                "Cuts away the hidden seam from the newly sampled clip and joins the new "
+                "video and audio onto your growing video latent."
             ),
             inputs=[
                 io.Latent.Input(
                     "previous_av_latent",
-                    tooltip="The completed cumulative MiniMax H3 AV latent used to prepare the window.",
+                    tooltip="The completed latent before this clip was added.",
                 ),
                 io.Latent.Input(
                     "sampled_window",
-                    tooltip="The continuation window after sampling with KSampler or KSampler Advanced.",
+                    tooltip="The output from your sampler.",
                 ),
-                io.Int.Input("overlap_video_tokens", min=1, force_input=True),
-                io.Int.Input("overlap_audio_tokens", min=1, force_input=True),
-                io.Int.Input("transition_video_tokens", default=0, min=0),
-                io.Int.Input("transition_audio_tokens", default=0, min=0),
+                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("transition_video_tokens", default=0, min=0, tooltip="Optional re-blended transition video tokens (0 discards the hidden seam completely)."),
+                io.Int.Input("transition_audio_tokens", default=0, min=0, tooltip="Optional re-blended transition audio tokens (0 discards the hidden seam completely)."),
             ],
             outputs=[
-                io.Latent.Output("latent"),
-                io.Int.Output("total_length"),
+                io.Latent.Output("latent", tooltip="The combined full-length video and audio latent."),
+                io.Int.Output("total_length", tooltip="Total frame count of the assembled video so far."),
             ],
         )
 
