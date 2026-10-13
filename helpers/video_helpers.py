@@ -6,6 +6,7 @@ Alignment operates directly on tensors without third-party hashing.
 File discovery uses ComfyUI's PyAV decoder to identify video streams.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -329,7 +330,7 @@ def prepare_video_audio_for_h3(audio: Any) -> dict[str, Any] | None:
     waveform = None
     sample_rate = 44100
 
-    if isinstance(audio, dict):
+    if isinstance(audio, Mapping):
         waveform = audio.get("waveform")
         sample_rate = audio.get("sample_rate", 44100)
     elif hasattr(audio, "waveform"):

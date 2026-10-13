@@ -1,6 +1,7 @@
 """Sampling helpers for windowed and looping generation workflows."""
 
 import copy
+from collections.abc import Mapping
 import logging
 from typing import Any, Optional, Sequence
 
@@ -190,7 +191,7 @@ def prepare_h3_source_audio(
     total_frames: int,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """Fit raw source audio to an H3 clip and encode it into its audio latent."""
-    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+    if not isinstance(audio, Mapping) or not torch.is_tensor(audio.get("waveform")):
         raise ValueError("UC_H3LoopSampler source_audio must contain a waveform tensor.")
     waveform = audio["waveform"]
     sample_rate = audio.get("sample_rate")
