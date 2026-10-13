@@ -5,6 +5,7 @@ import unicodedata
 import string
 import base64
 import zlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from functools import cached_property, lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
@@ -366,8 +367,8 @@ def trim_minimax_h3_clip_continuation(
     frames = images[int(trim_leading_frames):stop]
     if audio is None:
         return frames, None
-    waveform = audio.get("waveform") if isinstance(audio, dict) else None
-    sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+    waveform = audio.get("waveform") if isinstance(audio, Mapping) else None
+    sample_rate = audio.get("sample_rate") if isinstance(audio, Mapping) else None
     if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(sample_rate, int) or sample_rate <= 0:
         raise ValueError("MiniMax H3 Clip Continuation audio must be one mono or stereo waveform with a positive sample rate.")
     start = round(int(trim_leading_frames) * sample_rate / fps)
@@ -446,8 +447,8 @@ def accumulate_minimax_h3_clip_continuations(
     sample_rate = None
     waveforms = []
     for audio in audio_batches:
-        waveform = audio.get("waveform") if isinstance(audio, dict) else None
-        rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+        waveform = audio.get("waveform") if isinstance(audio, Mapping) else None
+        rate = audio.get("sample_rate") if isinstance(audio, Mapping) else None
         if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(rate, int) or rate <= 0:
             raise ValueError("MiniMax H3 Clip Continuation accumulated audio must be one mono or stereo waveform with a positive sample rate.")
         if sample_rate is None:
@@ -1016,8 +1017,8 @@ def _continuation_visual_features(frames: torch.Tensor) -> torch.Tensor:
 
 
 def _continuation_audio_waveform(audio: dict) -> tuple[torch.Tensor, int]:
-    waveform = audio.get("waveform") if isinstance(audio, dict) else None
-    sample_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+    waveform = audio.get("waveform") if isinstance(audio, Mapping) else None
+    sample_rate = audio.get("sample_rate") if isinstance(audio, Mapping) else None
     if (
         not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1
         or waveform.shape[1] not in {1, 2} or not isinstance(sample_rate, int) or sample_rate <= 0
@@ -1067,8 +1068,8 @@ def save_minimax_h3_clip_continuation_media(
     audio_tail = None
     audio_rate = None
     if audio is not None:
-        waveform = audio.get("waveform") if isinstance(audio, dict) else None
-        audio_rate = audio.get("sample_rate") if isinstance(audio, dict) else None
+        waveform = audio.get("waveform") if isinstance(audio, Mapping) else None
+        audio_rate = audio.get("sample_rate") if isinstance(audio, Mapping) else None
         if not torch.is_tensor(waveform) or waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or not isinstance(audio_rate, int) or audio_rate <= 0:
             raise ValueError("MiniMax H3 Clip Continuation audio must be one mono or stereo waveform with a positive sample rate.")
         if audio_rate == 32000:
@@ -1703,7 +1704,7 @@ def create_minimax_h3_video_ref(video: torch.Tensor, vae, compression: str = "en
 
 
 def create_minimax_h3_audio_ref(audio: dict, audio_vae, description: str = "") -> dict:
-    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+    if not isinstance(audio, Mapping) or not torch.is_tensor(audio.get("waveform")):
         raise ValueError("MiniMax H3 Ref audio must contain a waveform tensor.")
     waveform, sample_rate = audio["waveform"], audio.get("sample_rate")
     if waveform.ndim != 3 or waveform.shape[0] != 1 or waveform.shape[1] not in {1, 2} or waveform.shape[-1] < 1 or not torch.is_floating_point(waveform) or not torch.isfinite(waveform).all() or not isinstance(sample_rate, (int, float)) or not math.isfinite(sample_rate) or sample_rate <= 0:

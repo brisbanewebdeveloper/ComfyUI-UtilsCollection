@@ -1,5 +1,6 @@
 import sys
 import random
+from collections.abc import Mapping
 from fractions import Fraction
 from typing import Union
 import json
@@ -80,7 +81,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
             f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
             audio_entry = continuation_media.get("audio")
             a_hash = ""
-            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+            if audio_entry is not None and isinstance(audio_entry, Mapping) and torch.is_tensor(audio_entry.get("waveform")):
                 w = audio_entry["waveform"]
                 a_hash = f"{w.shape}:{float(w.mean())}"
             continuation_id = f"{f_hash}:{a_hash}:{continuation_media.get('video_merge_mode', '')}:{continuation_media.get('media_type', '')}"
@@ -249,7 +250,7 @@ class UC_MiniMaxH3ClipContinuationUnpack(io.ComfyNode):
             f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
             audio_entry = continuation_media.get("audio")
             a_hash = ""
-            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+            if audio_entry is not None and isinstance(audio_entry, Mapping) and torch.is_tensor(audio_entry.get("waveform")):
                 w = audio_entry["waveform"]
                 a_hash = f"{w.shape}:{float(w.mean())}"
             return f"media:{f_hash}:{a_hash}:{media_type}"
@@ -368,7 +369,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
             raise ValueError("MiniMax H3 Clip Continuation manual entries must be sequential or replace an existing entry.")
         images = images.detach().cpu().clone()
         if audio is not None and (
-            not isinstance(audio, dict)
+            not isinstance(audio, Mapping)
             or not torch.is_tensor(audio.get("waveform"))
             or not isinstance(audio.get("sample_rate"), int)
         ):

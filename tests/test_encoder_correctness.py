@@ -1112,6 +1112,38 @@ def test_minimax_h3_malformed_audio_still_fails(audio):
         encoder_helpers._encode_minimax_h3_audio_reference(audio, object())
 
 
+@pytest.mark.parametrize("helpers_module", ["encoder_helpers", "minimax_h3_reference_media_helpers"])
+def test_minimax_h3_audio_reference_accepts_lazy_audio_mapping(helpers_module):
+    """VHS Load Video emits a lazily decoded Mapping, not a dict, on its AUDIO output."""
+    import collections.abc
+    import importlib
+
+    module = importlib.import_module(f"utils_collection_encoder_test.helpers.{helpers_module}")
+
+    class LazyAudioMap(collections.abc.Mapping):
+        def __init__(self):
+            self._audio = {"waveform": torch.ones(1, 2, 800), "sample_rate": 32000}
+
+        def __getitem__(self, key):
+            return self._audio[key]
+
+        def __iter__(self):
+            return iter(self._audio)
+
+        def __len__(self):
+            return len(self._audio)
+
+    class AudioVAE:
+        audio_sample_rate = 32000
+        downscale_ratio = 800
+
+        def encode(self, waveform):
+            return torch.ones(1, 32, 2, 1)
+
+    block = module._encode_minimax_h3_audio_reference(LazyAudioMap(), AudioVAE())
+    assert block["kind"] == "audio"
+
+
 @pytest.mark.parametrize("node_name", [
     "UC_AdvancedMiniMaxH3ImageToVideo",
     "UC_AdvMiniMaxH3ImageToVideoTokenFusion",

@@ -1,4 +1,5 @@
 import ast
+from collections.abc import Mapping
 from contextlib import contextmanager
 import hashlib
 import operator
@@ -640,7 +641,7 @@ def _encode_minimax_h3_audio_reference(audio, audio_vae, cache=None):
         return None
     if audio_vae is None:
         raise ValueError("MiniMax H3 requires audio_vae when audio is provided.")
-    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+    if not isinstance(audio, Mapping) or not torch.is_tensor(audio.get("waveform")):
         raise ValueError("MiniMax H3 audio must contain a waveform tensor.")
     waveform = audio["waveform"]
     sample_rate = audio.get("sample_rate")
