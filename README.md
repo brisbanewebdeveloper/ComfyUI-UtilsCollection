@@ -347,7 +347,6 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_MiniMaxH3Cache`
 - `UC_MiniMaxH3DiffusionCache`
 - `UC_MiniMaxH3SlaAttentionConfig`
-- `UC_MiniMaxH3Spectrum`
 - `UC_MiniMaxH3PDDAcc`
 - `UC_UnifiedAttentionPatcher`
 - `UC_MarkdownPreview`
