@@ -121,6 +121,7 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
     output_images, output_path = result.args
     assert output_images.shape == images.shape
     assert pathlib.Path(output_path).is_file()
+    assert output_path.endswith("test_save_00001.mp4")
 
     # Verify keyframes placed at frame 0 and frame 20
     with av.open(output_path) as container:
@@ -132,3 +133,43 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
         ]
     assert 0 in key_frames
     assert 20 in key_frames
+
+    # Next execution with audio: should increment counter to 00002 and append -audio
+    audio = {
+        "waveform": torch.zeros((1, 2, 44100), dtype=torch.float32),
+        "sample_rate": 44100,
+    }
+    result_audio = video_nodes.UC_SaveVideo.execute(
+        images=images,
+        fps=24.0,
+        codec="libx264",
+        audio=audio,
+        filename_prefix="test_save",
+    )
+    _, output_path_audio = result_audio.args
+    assert output_path_audio.endswith("test_save_00002-audio.mp4")
+    assert pathlib.Path(output_path_audio).is_file()
+    with av.open(output_path_audio) as container:
+        assert len(container.streams.video) == 1
+        assert len(container.streams.audio) == 1
+        assert sum(1 for _ in container.demux(container.streams.audio[0])) > 0
+
+    # Next execution without audio: should increment counter to 00003 without -audio
+    result_no_audio = video_nodes.UC_SaveVideo.execute(
+        images=images,
+        fps=24.0,
+        codec="libx264",
+        filename_prefix="test_save",
+    )
+    _, output_path_no_audio = result_no_audio.args
+    assert output_path_no_audio.endswith("test_save_00003.mp4")
+
+    # Default prefix creates formatted date structure
+    result_default = video_nodes.UC_SaveVideo.execute(
+        images=images[:2],
+        fps=24.0,
+        codec="libx264",
+    )
+    _, output_path_default = result_default.args
+    assert "vid_" in output_path_default
+    assert "_default_00001.mp4" in output_path_default

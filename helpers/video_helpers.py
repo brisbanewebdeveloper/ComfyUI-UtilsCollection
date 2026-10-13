@@ -12,10 +12,12 @@ from fractions import Fraction
 import json
 import math
 import os
+import re
 from typing import Any
 
 import av
 import folder_paths
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -382,7 +384,7 @@ def save_keyframe_optimized_video(
     bitrate_mbps: float = 10.0,
     crf: float = 19.0,
     audio: Any = None,
-    filename_prefix: str = "video/ComfyUI",
+    filename_prefix: str = "video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default",
     prompt: Any = None,
     extra_pnginfo: Any = None,
 ) -> tuple[str, str, str]:
@@ -400,10 +402,53 @@ def save_keyframe_optimized_video(
     if out_width <= 0 or out_height <= 0:
         raise ValueError(f"Invalid video dimensions: {width}x{height}")
 
+    if not filename_prefix:
+        filename_prefix = "video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default"
+
+    has_audio = False
+    audio_np = None
+    audio_sample_rate = 44100
+    if audio is not None:
+        has_audio = True
+        waveform = None
+        if isinstance(audio, dict):
+            waveform = audio.get("waveform")
+            audio_sample_rate = int(audio.get("sample_rate", 44100))
+        elif hasattr(audio, "waveform"):
+            waveform = getattr(audio, "waveform")
+            audio_sample_rate = int(getattr(audio, "sample_rate", 44100))
+
+        if torch.is_tensor(waveform) and waveform.numel() > 0:
+            if waveform.ndim == 3:
+                waveform = waveform[0]
+            elif waveform.ndim == 1:
+                waveform = waveform.unsqueeze(0).repeat(2, 1)
+            if waveform.shape[0] == 1:
+                waveform = waveform.repeat(2, 1)
+            elif waveform.shape[0] > 2:
+                waveform = waveform[:2]
+            audio_np = waveform.detach().cpu().to(dtype=torch.float32).contiguous().numpy()
+
     full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
         filename_prefix, folder_paths.get_output_directory(), out_width, out_height
     )
-    file = f"{filename}_{counter:05}_.mp4"
+    os.makedirs(full_output_folder, exist_ok=True)
+
+    if os.path.exists(full_output_folder):
+        pattern = re.compile(rf"^{re.escape(filename)}_(\d+)")
+        existing_counters = []
+        for f in os.listdir(full_output_folder):
+            m = pattern.match(f)
+            if m:
+                try:
+                    existing_counters.append(int(m.group(1)))
+                except ValueError:
+                    pass
+        if existing_counters:
+            counter = max(counter, max(existing_counters) + 1)
+
+    suffix = "-audio" if has_audio else ""
+    file = f"{filename}_{counter:05}{suffix}.mp4"
     output_path = os.path.join(full_output_folder, file)
 
     available = av.codecs_available
@@ -454,6 +499,10 @@ def save_keyframe_optimized_video(
         else:
             stream.options = {"crf": str(int(crf))}
 
+        a_stream = None
+        if audio_np is not None:
+            a_stream = container.add_stream("aac", rate=audio_sample_rate, layout="stereo")
+
         prev_thumb = None
         for i in range(batch):
             frame_tensor = images[i, :out_height, :out_width, :3]
@@ -477,28 +526,22 @@ def save_keyframe_optimized_video(
         for packet in stream.encode():
             container.mux(packet)
 
-        if audio is not None and isinstance(audio, dict) and "waveform" in audio:
-            waveform = audio["waveform"]
-            sample_rate = int(audio.get("sample_rate", 44100))
-            if torch.is_tensor(waveform) and waveform.numel() > 0:
-                if waveform.ndim == 3:
-                    waveform = waveform[0]
-                elif waveform.ndim == 1:
-                    waveform = waveform.unsqueeze(0).repeat(2, 1)
-                if waveform.shape[0] == 1:
-                    waveform = waveform.repeat(2, 1)
-                elif waveform.shape[0] > 2:
-                    waveform = waveform[:2]
-
-                a_stream = container.add_stream("aac", rate=sample_rate, layout="stereo")
-                audio_np = waveform.detach().cpu().to(dtype=torch.float32).contiguous().numpy()
-                a_frame = av.AudioFrame.from_ndarray(audio_np, format="fltp", layout="stereo")
-                a_frame.sample_rate = sample_rate
-                a_frame.pts = 0
+        if a_stream is not None and audio_np is not None:
+            frame_size = a_stream.codec_context.frame_size or 1024
+            num_samples = audio_np.shape[1]
+            for start in range(0, num_samples, frame_size):
+                chunk = audio_np[:, start : start + frame_size]
+                if chunk.shape[1] < frame_size:
+                    padded = np.zeros((2, frame_size), dtype=np.float32)
+                    padded[:, : chunk.shape[1]] = chunk
+                    chunk = padded
+                a_frame = av.AudioFrame.from_ndarray(chunk, format="fltp", layout="stereo")
+                a_frame.sample_rate = audio_sample_rate
+                a_frame.pts = start
                 for packet in a_stream.encode(a_frame):
                     container.mux(packet)
-                for packet in a_stream.encode():
-                    container.mux(packet)
+            for packet in a_stream.encode():
+                container.mux(packet)
 
     finally:
         container.close()

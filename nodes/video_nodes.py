@@ -193,8 +193,8 @@ class UC_SaveVideo(io.ComfyNode):
                 ),
                 io.String.Input(
                     "filename_prefix",
-                    default="video/ComfyUI",
-                    tooltip="Prefix path in output folder.",
+                    default="video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default",
+                    tooltip="Prefix path in output folder. Supports date tokens like %date:yyyy-MM-dd%.",
                 ),
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
@@ -216,7 +216,7 @@ class UC_SaveVideo(io.ComfyNode):
         bitrate_mbps: float = 10.0,
         crf: float = 19.0,
         audio: Any = None,
-        filename_prefix: str = "video/ComfyUI",
+        filename_prefix: str = "video/%date:yyyy-MM-dd%/vid_%date:yyyy-MM-dd%_default",
     ) -> io.NodeOutput:
         prompt = cls.hidden.prompt if cls.hidden is not None else None
         extra_pnginfo = cls.hidden.extra_pnginfo if cls.hidden is not None else None
