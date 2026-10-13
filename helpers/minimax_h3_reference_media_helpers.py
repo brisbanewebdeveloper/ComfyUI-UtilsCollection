@@ -391,7 +391,16 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
             a_ref = None
             if soundtrack is not None and audio_vae is not None:
                 a_ref = _encode_minimax_h3_audio_reference(soundtrack, audio_vae, cache=cache)
-            if v_ref is not None:
+            if v_ref is not None and a_ref is not None:
+                # Core ref2va contract: a video's soundtrack shares the video block's time origin
+                v_ref = {
+                    **v_ref,
+                    "kind": "video_audio",
+                    "ref_audio_t": a_ref["ref_audio_t"],
+                    "audio_latent": a_ref["audio_latent"],
+                }
+                a_ref = None
+            elif v_ref is not None:
                 v_ref["kind"] = "video"
                 v_ref["ref_audio_t"] = 0
                 v_ref["audio_latent"] = None
