@@ -3419,7 +3419,7 @@ def test_temporal_node_schemas_keep_standard_sockets_except_picture_fusion():
     assert not standard.is_experimental
     assert not encoder_nodes.UC_AdvancedMiniMaxH3ImageToVideo.EXPERIMENTAL
     assert not encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTokenFusion.GET_SCHEMA().is_experimental
-    expected = [value.id for value in standard.inputs if value.id not in ("fusion_images", "fusion_method")] + ["text_blend_config", "fusion_method"]
+    expected = [value.id for value in standard.inputs if value.id not in ("fusion_images", "fusion_method", "reference_images")] + ["text_blend_config", "fusion_method"] + [value.id for value in standard.inputs if value.id == "reference_images"]
     for node in (encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalFusion, encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion):
         schema = node.GET_SCHEMA()
         assert schema.is_experimental
