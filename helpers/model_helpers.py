@@ -7,7 +7,7 @@ import base64
 import zlib
 from dataclasses import dataclass, field, fields, replace
 from functools import cached_property, lru_cache
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 from torch import Tensor
 from torch.distributions import Categorical
 import torchaudio.functional
@@ -33,12 +33,15 @@ from ..models.densepose import DensePoseModel
 import math
 import numbers
 import os
+import re
 import tempfile
 from contextlib import closing
 from pathlib import Path
 
+import node_helpers
 import torch
 import torch.nn.functional as F
+from comfy.nested_tensor import NestedTensor
 from unifiedefficientloader import IncrementalSafetensorsWriter, MemoryEfficientSafeOpen
 
 import comfy.model_management
@@ -453,6 +456,163 @@ def accumulate_minimax_h3_clip_continuations(
             raise ValueError("MiniMax H3 Clip Continuation accumulated audio must have matching sample rates and channels.")
         waveforms.append(waveform)
     return torch.cat(tuple(image_batches), dim=0), {"waveform": torch.cat(waveforms, dim=-1), "sample_rate": sample_rate}
+
+
+def concatenate_audio_list(audio_list: Sequence[dict | None]) -> dict | None:
+    """Concatenate a sequence of audio dicts along time (dim=-1) with resampling and channel matching."""
+    if not audio_list:
+        return None
+    valid_audios = []
+    for item in audio_list:
+        if item is None:
+            continue
+        if isinstance(item, list):
+            for sub in item:
+                if sub is not None and isinstance(sub, dict) and "waveform" in sub:
+                    valid_audios.append(sub)
+        elif isinstance(item, dict) and "waveform" in item:
+            valid_audios.append(item)
+
+    if not valid_audios:
+        return None
+    if len(valid_audios) == 1:
+        return valid_audios[0]
+
+    target_sr = None
+    for a in valid_audios:
+        sr = a.get("sample_rate")
+        if isinstance(sr, int) and sr > 0:
+            target_sr = sr
+            break
+    if target_sr is None:
+        target_sr = 44100
+
+    max_channels = 1
+    for a in valid_audios:
+        w = a.get("waveform")
+        if torch.is_tensor(w):
+            if w.ndim == 3 and w.shape[1] > max_channels:
+                max_channels = min(w.shape[1], 2)
+            elif w.ndim == 2 and w.shape[0] > max_channels:
+                max_channels = min(w.shape[0], 2)
+
+    waveforms = []
+    for a in valid_audios:
+        w = a.get("waveform")
+        sr = a.get("sample_rate", target_sr)
+        if not torch.is_tensor(w) or w.numel() == 0:
+            continue
+        if w.ndim == 1:
+            w = w.unsqueeze(0).unsqueeze(0)
+        elif w.ndim == 2:
+            w = w.unsqueeze(0)
+        elif w.ndim > 3:
+            w = w.view(1, w.shape[-2], w.shape[-1])
+
+        if w.shape[1] == 1 and max_channels == 2:
+            w = w.repeat(1, 2, 1)
+        elif w.shape[1] > 2:
+            w = w[:, :2, :]
+
+        if sr != target_sr and sr > 0:
+            w = torchaudio.functional.resample(w, sr, target_sr)
+
+        waveforms.append(w.to(dtype=torch.float32))
+
+    if not waveforms:
+        return None
+
+    concatenated = torch.cat(waveforms, dim=-1)
+    return {"waveform": concatenated, "sample_rate": target_sr}
+
+
+def audio_list_to_batch(audio_list: Sequence[dict | None]) -> dict | None:
+    """Pad and stack audio waveforms along batch dim (dim=0) into [B, C, max_N]."""
+    if not audio_list:
+        return None
+    valid_audios = []
+    for item in audio_list:
+        if item is None:
+            continue
+        if isinstance(item, list):
+            for sub in item:
+                if sub is not None and isinstance(sub, dict) and "waveform" in sub:
+                    valid_audios.append(sub)
+        elif isinstance(item, dict) and "waveform" in item:
+            valid_audios.append(item)
+
+    if not valid_audios:
+        return None
+
+    target_sr = None
+    for a in valid_audios:
+        sr = a.get("sample_rate")
+        if isinstance(sr, int) and sr > 0:
+            target_sr = sr
+            break
+    if target_sr is None:
+        target_sr = 44100
+
+    max_channels = 1
+    max_length = 0
+    prepared = []
+    for a in valid_audios:
+        w = a.get("waveform")
+        sr = a.get("sample_rate", target_sr)
+        if not torch.is_tensor(w) or w.numel() == 0:
+            continue
+        if w.ndim == 1:
+            w = w.unsqueeze(0).unsqueeze(0)
+        elif w.ndim == 2:
+            w = w.unsqueeze(0)
+        elif w.ndim > 3:
+            w = w.view(1, w.shape[-2], w.shape[-1])
+
+        if sr != target_sr and sr > 0:
+            w = torchaudio.functional.resample(w, sr, target_sr)
+
+        if w.shape[1] > max_channels:
+            max_channels = min(w.shape[1], 2)
+        if w.shape[-1] > max_length:
+            max_length = w.shape[-1]
+        prepared.append(w.to(dtype=torch.float32))
+
+    if not prepared:
+        return None
+
+    padded_list = []
+    for w in prepared:
+        if w.shape[1] == 1 and max_channels == 2:
+            w = w.repeat(1, 2, 1)
+        elif w.shape[1] > 2:
+            w = w[:, :2, :]
+
+        if w.shape[-1] < max_length:
+            pad_amount = max_length - w.shape[-1]
+            w = torch.nn.functional.pad(w, (0, pad_amount))
+        padded_list.append(w)
+
+    batched = torch.cat(padded_list, dim=0)
+    return {"waveform": batched, "sample_rate": target_sr}
+
+
+def audio_batch_to_list(audio: dict | None) -> list[dict]:
+    """Split a batched [B, C, N] audio dict into a list of individual [1, C, N] audio dicts."""
+    if audio is None or not isinstance(audio, dict) or "waveform" not in audio:
+        return []
+    waveform = audio["waveform"]
+    sample_rate = audio.get("sample_rate", 44100)
+    if not torch.is_tensor(waveform) or waveform.numel() == 0:
+        return []
+    if waveform.ndim == 1:
+        return [{"waveform": waveform.unsqueeze(0).unsqueeze(0), "sample_rate": sample_rate}]
+    if waveform.ndim == 2:
+        return [{"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate}]
+    batch_size = waveform.shape[0]
+    return [
+        {"waveform": waveform[i : i + 1].clone(), "sample_rate": sample_rate}
+        for i in range(batch_size)
+    ]
 
 
 def snapshot_minimax_h3_clip_continuation_media(media: dict | None) -> dict | None:
@@ -949,6 +1109,29 @@ def save_minimax_h3_clip_continuation_media(
     return str(path.relative_to(_minimax_h3_clip_continuation_root())).replace("\\", "/")
 
 
+def get_latest_minimax_h3_clip_continuation_index(filename_prefix: str) -> int:
+    """Find the highest saved clip index for a filename prefix, or 0 if none exist."""
+    root = _minimax_h3_clip_continuation_root()
+    prefix = _minimax_h3_clip_continuation_relative_prefix(filename_prefix)
+    parent = (root / prefix).parent
+    if not parent.exists():
+        return 0
+    pattern = re.compile(rf"^{re.escape(prefix.name)}_(\d{{5}})\.safetensors$")
+    indices = []
+    try:
+        for entry in parent.iterdir():
+            if entry.is_file():
+                m = pattern.match(entry.name)
+                if m:
+                    try:
+                        indices.append(int(m.group(1)))
+                    except ValueError:
+                        pass
+    except OSError:
+        return 0
+    return max(indices) if indices else 0
+
+
 def get_minimax_h3_clip_continuation_fingerprint(filename_prefix: str, clip_index: int) -> str:
     path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
     return _minimax_h3_clip_continuation_fingerprint_path(path)
@@ -1028,6 +1211,295 @@ def _load_minimax_h3_clip_continuation_media_path(path: Path) -> dict:
     if "padded_frames" in metadata:
         result["padded_frames"] = metadata["padded_frames"]
     return result
+
+
+# ---------------------------------------------------------------------------
+# Native MiniMax H3 Latent Motion Context Continuation helpers
+# ---------------------------------------------------------------------------
+
+H3_CONTINUATION_FPS = 24
+H3_AUDIO_LATENT_FPS = 40
+H3_VIDEO_LATENT_CHANNELS = 24
+H3_AUDIO_LATENT_CHANNELS = 32
+H3_AUDIO_CHANNELS = 2
+
+
+def h3_video_latent_t(frame_count: int) -> int:
+    """Return the MiniMax H3 video latent length for an aligned frame count."""
+    if frame_count < 5:
+        raise ValueError("frame_count must be at least 5")
+    if frame_count % 17 != 5:
+        raise ValueError("frame_count must satisfy the MiniMax H3 17k + 5 grid")
+    if frame_count == 5:
+        return 2
+    return ((frame_count - 5) // 17) * 5 + 2
+
+
+def h3_frame_count_from_video_latent_t(video_t: int) -> int:
+    """Return the pixel-frame count represented by a MiniMax H3 video latent."""
+    if video_t < 2:
+        raise ValueError("video temporal length must be at least 2")
+    if (video_t - 2) % 5 != 0:
+        raise ValueError("video temporal length must satisfy the MiniMax H3 5k + 2 grid")
+    groups = (video_t - 2) // 5
+    return groups * 17 + 5
+
+
+def h3_audio_t_at_frame_boundary(frame_index: int) -> int:
+    """Return the cumulative 40 Hz audio-latent index at a 24 fps frame boundary."""
+    if frame_index < 0:
+        raise ValueError("frame_index must be non-negative")
+    return round(frame_index * H3_AUDIO_LATENT_FPS / H3_CONTINUATION_FPS)
+
+
+def _extract_h3_av_streams(
+    latent: Any,
+    *,
+    name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Validate and extract the structural video/audio streams of an H3 latent."""
+    if not isinstance(latent, dict):
+        raise TypeError(f"{name} must be a dict containing a 'samples' entry")
+    if "samples" not in latent:
+        raise ValueError(f"{name} is missing the required 'samples' entry")
+
+    samples = latent["samples"]
+    if not isinstance(samples, NestedTensor):
+        raise TypeError(f"{name}['samples'] must be a comfy.nested_tensor.NestedTensor")
+
+    streams = samples.tensors
+    if len(streams) != 2:
+        raise ValueError(f"{name}['samples'] must contain exactly two streams: video then audio")
+    video, audio = streams
+    if not isinstance(video, torch.Tensor):
+        raise TypeError(f"{name} video stream must be a torch.Tensor")
+    if not isinstance(audio, torch.Tensor):
+        raise TypeError(f"{name} audio stream must be a torch.Tensor")
+    if video.ndim != 5:
+        raise ValueError(f"{name} video must have shape [1, 24, T, H, W], got {tuple(video.shape)}")
+    if audio.ndim != 4:
+        raise ValueError(
+            f"{name} audio must have shape [1, 32, 2, T_audio], got {tuple(audio.shape)}"
+        )
+    if video.shape[0] != 1 or audio.shape[0] != 1:
+        raise ValueError(f"{name} video and audio batch sizes must both be 1")
+    if video.shape[1] != H3_VIDEO_LATENT_CHANNELS:
+        raise ValueError(f"{name} video must have {H3_VIDEO_LATENT_CHANNELS} channels")
+    if audio.shape[1] != H3_AUDIO_LATENT_CHANNELS:
+        raise ValueError(f"{name} audio must have {H3_AUDIO_LATENT_CHANNELS} latent channels")
+    if audio.shape[2] != H3_AUDIO_CHANNELS:
+        raise ValueError(f"{name} audio must have {H3_AUDIO_CHANNELS} channels")
+    if video.shape[3] <= 0 or video.shape[4] <= 0:
+        raise ValueError(f"{name} video spatial dimensions must be positive")
+    if audio.shape[-1] <= 0:
+        raise ValueError(f"{name} audio temporal length must be positive")
+
+    h3_frame_count_from_video_latent_t(video.shape[2])
+    return video, audio
+
+
+def validate_h3_av_latent(
+    latent: Any,
+    *,
+    name: str,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Validate and extract a cumulative MiniMax H3 video/audio latent pair."""
+    video, audio = _extract_h3_av_streams(latent, name=name)
+    frame_count = h3_frame_count_from_video_latent_t(video.shape[2])
+    expected_audio_t = h3_audio_t_at_frame_boundary(frame_count)
+    if audio.shape[-1] != expected_audio_t:
+        raise ValueError(
+            f"{name} audio temporal length must be {expected_audio_t} for "
+            f"{frame_count} frames, got {audio.shape[-1]}"
+        )
+    return video, audio, frame_count
+
+
+def _valid_window_audio_lengths(frame_count: int) -> tuple[int, ...]:
+    """Return possible audio lengths for a frame-aligned slice of the global timeline."""
+    numerator = frame_count * H3_AUDIO_LATENT_FPS
+    lower, remainder = divmod(numerator, H3_CONTINUATION_FPS)
+    if remainder == 0:
+        return (lower,)
+    return (lower, lower + 1)
+
+
+def validate_h3_av_window(
+    latent: Any,
+    *,
+    name: str,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Validate an H3 AV window while allowing global-boundary audio rounding."""
+    video, audio = _extract_h3_av_streams(latent, name=name)
+    frame_count = h3_frame_count_from_video_latent_t(video.shape[2])
+    valid_audio_lengths = _valid_window_audio_lengths(frame_count)
+    if audio.shape[-1] not in valid_audio_lengths:
+        expected = " or ".join(str(length) for length in valid_audio_lengths)
+        raise ValueError(
+            f"{name} audio temporal length must be {expected} for an aligned "
+            f"{frame_count}-frame window, got {audio.shape[-1]}"
+        )
+    return video, audio, frame_count
+
+
+@dataclass(frozen=True)
+class _ContinuationLayout:
+    window_frame_count: int
+    overlap_video_t: int
+    new_video_t: int
+    overlap_audio_t: int
+    new_audio_t: int
+    transition_video_t: int
+    transition_audio_t: int
+
+
+def calculate_guided_continuation_layout(
+    previous_frame_count: int,
+    overlap_frames: int,
+    extension_frames: int,
+) -> _ContinuationLayout:
+    """Resolve a fresh target whose leading span is hidden motion context."""
+    if overlap_frames < 5 or overlap_frames % 17 != 5:
+        raise ValueError("overlap_frames must be at least 5 and satisfy 17k + 5")
+    if overlap_frames > previous_frame_count:
+        raise ValueError("overlap_frames cannot exceed the previous latent's frame count")
+    if extension_frames < 17 or extension_frames % 17 != 0:
+        raise ValueError("extension_frames must be at least 17 and be a multiple of 17")
+
+    overlap_video_t = h3_video_latent_t(overlap_frames)
+    new_video_t = extension_frames // 17 * 5
+    window_frame_count = overlap_frames + extension_frames
+    if overlap_video_t + new_video_t != h3_video_latent_t(window_frame_count):
+        raise ValueError("guided continuation window does not satisfy the MiniMax H3 video grid")
+
+    overlap_start_frame = previous_frame_count - overlap_frames
+    extended_frame_count = previous_frame_count + extension_frames
+    previous_audio_end = h3_audio_t_at_frame_boundary(previous_frame_count)
+    overlap_audio_start = h3_audio_t_at_frame_boundary(overlap_start_frame)
+    extended_audio_end = h3_audio_t_at_frame_boundary(extended_frame_count)
+    return _ContinuationLayout(
+        window_frame_count=window_frame_count,
+        overlap_video_t=overlap_video_t,
+        new_video_t=new_video_t,
+        overlap_audio_t=previous_audio_end - overlap_audio_start,
+        new_audio_t=extended_audio_end - previous_audio_end,
+        transition_video_t=0,
+        transition_audio_t=0,
+    )
+
+
+def assemble_guided_target(
+    previous_video: torch.Tensor,
+    previous_audio: torch.Tensor,
+    layout: _ContinuationLayout,
+) -> dict[str, NestedTensor]:
+    """Allocate an entirely fresh AV target for motion-context continuation."""
+    video = previous_video.new_zeros(
+        (
+            1,
+            H3_VIDEO_LATENT_CHANNELS,
+            layout.overlap_video_t + layout.new_video_t,
+            previous_video.shape[3],
+            previous_video.shape[4],
+        )
+    )
+    audio = previous_audio.new_zeros(
+        (
+            1,
+            H3_AUDIO_LATENT_CHANNELS,
+            H3_AUDIO_CHANNELS,
+            layout.overlap_audio_t + layout.new_audio_t,
+        )
+    )
+    return {"samples": NestedTensor((video, audio))}
+
+
+def apply_latent_tail_guide_to_conditioning(
+    positive: Any,
+    previous_av_latent: Any,
+    target_av_latent: Any,
+    overlap_video_tokens: int,
+    overlap_audio_tokens: int,
+) -> Any:
+    """Append one native synchronized AV guide built from the previous latent tail."""
+    previous_video, previous_audio, previous_frame_count = validate_h3_av_latent(
+        previous_av_latent,
+        name="previous_av_latent",
+    )
+    target_video, target_audio, target_frame_count = validate_h3_av_window(
+        target_av_latent,
+        name="target_av_latent",
+    )
+    if previous_video.shape[3:] != target_video.shape[3:]:
+        raise ValueError("target_av_latent video spatial dimensions must match previous latent")
+
+    guide_frames = h3_frame_count_from_video_latent_t(overlap_video_tokens)
+    if not isinstance(positive, list) or not positive:
+        raise TypeError("positive must be a non-empty ComfyUI CONDITIONING list")
+
+    first = positive[0]
+    if not isinstance(first, (list, tuple)) or len(first) < 2:
+        raise TypeError("positive entries must contain a tensor and metadata mapping")
+    metadata = first[1]
+    keyframes = [dict(k) for k in metadata.get("minimax_keyframes", [])]
+
+    for kf in keyframes:
+        pos = kf.get("resolved_frame_index")
+        if pos is not None and 0 <= float(pos) < guide_frames:
+            raise ValueError("positive already contains a MiniMax H3 guide inside the latent-tail overlap")
+
+    keyframes.append(
+        {
+            "resolved_frame_index": 0,
+            "latent": previous_video[:, :, -overlap_video_tokens:].clone(),
+            "audio_latent": previous_audio[..., -overlap_audio_tokens:].clone(),
+        }
+    )
+    keyframes.sort(key=lambda kf: float(kf["resolved_frame_index"]))
+    return node_helpers.conditioning_set_values(positive, {"minimax_keyframes": keyframes})
+
+
+def assemble_appended_continuation(
+    previous_av_latent: Any,
+    sampled_window: Any,
+    overlap_video_tokens: int,
+    overlap_audio_tokens: int,
+    transition_video_tokens: int = 0,
+    transition_audio_tokens: int = 0,
+) -> tuple[dict, int]:
+    """Trim hidden context, optionally replace a transition, and append new tokens."""
+    previous_video, previous_audio, previous_frame_count = validate_h3_av_latent(
+        previous_av_latent,
+        name="previous_av_latent",
+    )
+    sampled_video, sampled_audio = _extract_h3_av_streams(
+        sampled_window,
+        name="sampled_window",
+    )
+
+    new_video = sampled_video[:, :, overlap_video_tokens:]
+    new_audio = sampled_audio[..., overlap_audio_tokens:]
+    if transition_video_tokens > 0:
+        sampled_video_transition = sampled_video[
+            :, :, overlap_video_tokens - transition_video_tokens : overlap_video_tokens
+        ]
+        sampled_audio_transition = sampled_audio[
+            ..., overlap_audio_tokens - transition_audio_tokens : overlap_audio_tokens
+        ]
+        previous_video_prefix = previous_video[:, :, :-transition_video_tokens]
+        previous_audio_prefix = previous_audio[..., :-transition_audio_tokens]
+    else:
+        sampled_video_transition = sampled_video[:, :, :0]
+        sampled_audio_transition = sampled_audio[..., :0]
+        previous_video_prefix = previous_video
+        previous_audio_prefix = previous_audio
+
+    extended_video = torch.cat((previous_video_prefix, sampled_video_transition, new_video), dim=2)
+    extended_audio = torch.cat((previous_audio_prefix, sampled_audio_transition, new_audio), dim=-1)
+    total_length = h3_frame_count_from_video_latent_t(extended_video.shape[2])
+
+    extended_latent = {"samples": NestedTensor((extended_video, extended_audio))}
+    return extended_latent, total_length
 
 
 def _register_minimax_h3_ref_folder() -> None:
