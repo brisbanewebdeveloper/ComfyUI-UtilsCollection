@@ -992,6 +992,47 @@ def test_minimax_h3_audio_reference_encoding_and_resampling():
     assert len(audio_refs) == 3
 
 
+def test_reference_media_soundtrack_shares_video_time_origin():
+    """A video's soundtrack must pack as one video_audio block, not an audio block after the video."""
+    from comfy.ldm.minimax.model import PackedLayout
+    from utils_collection_encoder_test.helpers import minimax_h3_reference_media_helpers
+
+    class VideoVAE:
+        def encode(self, frames):
+            return torch.zeros(1, 48, 2 + (frames.shape[0] - 5) // 17 * 5, frames.shape[1] // 16, frames.shape[2] // 16)
+
+    class AudioVAE:
+        audio_sample_rate = 32000
+        downscale_ratio = 800
+
+        def encode(self, samples):
+            return torch.zeros(1, 32, 2, samples.shape[1] // 800)
+
+    ref_media = UC_MiniMaxH3ReferenceMedia.execute(
+        reference_video_1=torch.zeros(22, 64, 64, 3),
+        reference_video_audio_1={"waveform": torch.zeros(1, 2, 29333), "sample_rate": 32000},
+    ).args[0]
+    cond, _ = minimax_h3_reference_media_helpers.execute_advanced_minimax_h3_reference_media_image_to_video(
+        clip=_MiniMaxH3TestClip(),
+        vae=VideoVAE(),
+        prompt="prompt",
+        width=64,
+        height=64,
+        length=22,
+        reference_media=ref_media,
+        audio_vae=AudioVAE(),
+        enable_caching="disabled",
+    )
+
+    refs = cond[0][1]["minimax_refs"]
+    assert [ref["kind"] for ref in refs] == ["video_audio"]
+    assert refs[0]["ref_audio_t"] == refs[0]["audio_latent"].shape[-1] > 0
+
+    layout = PackedLayout(4, 7, 4, 4, 37, refs=refs)
+    starts = {kind: float(layout.position_ids[a:b, 0].min()) for a, b, kind in layout.segments if kind in ("ref_audio", "ref_img")}
+    assert starts["ref_audio"] == starts["ref_img"]
+
+
 def test_minimax_h3_media_config_schema_and_payload():
     schema = UC_MiniMaxH3MediaConfig.define_schema()
     inputs = {value.id: value for value in schema.inputs}
