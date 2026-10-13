@@ -218,6 +218,7 @@ the base-resolution conditioning fusion.
 - `UC_LoadVideoPath`
 - `UC_LoadVideoDirectory`
 - `UC_SaveVideo`
+- `UC_ConcatenateVideoList`
 - `UC_ConcatenateAudioList`
 - `UC_ListToAudioBatch`
 - `UC_AudioBatchToList`

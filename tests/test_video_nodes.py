@@ -118,10 +118,12 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
         b_frames=0,
         filename_prefix="test_save",
     )
-    output_images, output_path = result.args
+    output_images, output_path, video_obj, audio_out = result.args
     assert output_images.shape == images.shape
     assert pathlib.Path(output_path).is_file()
     assert output_path.endswith("test_save_00001.mp4")
+    assert video_obj is not None
+    assert audio_out is None
 
     # Verify keyframes placed at frame 0 and frame 20
     with av.open(output_path) as container:
@@ -146,9 +148,11 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
         audio=audio,
         filename_prefix="test_save",
     )
-    _, output_path_audio = result_audio.args
+    _, output_path_audio, video_obj_audio, audio_out_audio = result_audio.args
     assert output_path_audio.endswith("test_save_00002-audio.mp4")
     assert pathlib.Path(output_path_audio).is_file()
+    assert video_obj_audio is not None
+    assert audio_out_audio is audio
     with av.open(output_path_audio) as container:
         assert len(container.streams.video) == 1
         assert len(container.streams.audio) == 1
@@ -161,7 +165,7 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
         codec="libx264",
         filename_prefix="test_save",
     )
-    _, output_path_no_audio = result_no_audio.args
+    _, output_path_no_audio, video_obj3, _ = result_no_audio.args
     assert output_path_no_audio.endswith("test_save_00003.mp4")
 
     # Default prefix creates formatted date structure
@@ -170,6 +174,15 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
         fps=24.0,
         codec="libx264",
     )
-    _, output_path_default = result_default.args
+    _, output_path_default, _, _ = result_default.args
     assert "vid_" in output_path_default
     assert "_default_00001.mp4" in output_path_default
+
+    # Test Concatenate Video (List)
+    cat_result = video_nodes.UC_ConcatenateVideoList.execute([video_obj, video_obj_audio])
+    cat_video = cat_result.args[0]
+    assert cat_video is not None
+    cat_comp = cat_video.get_components()
+    # 40 frames + 40 frames = 80 frames
+    assert cat_comp.images.shape[0] == 80
+    assert cat_comp.audio is not None

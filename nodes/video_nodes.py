@@ -3,7 +3,8 @@ import os
 from typing import Any
 
 import torch
-from comfy_api.latest import InputImpl, io, ui
+from comfy_api.latest import InputImpl, Types, io, ui
+from ..helpers.model_helpers import concatenate_audio_list
 from ..helpers.video_helpers import (
     is_video_file,
     list_video_files,
@@ -202,6 +203,8 @@ class UC_SaveVideo(io.ComfyNode):
             outputs=[
                 io.Image.Output("images", display_name="IMAGES"),
                 io.String.Output("filepath", display_name="Filepath"),
+                io.Video.Output("video", display_name="VIDEO", tooltip="Native ComfyUI VIDEO object of the saved video."),
+                io.Audio.Output("audio", display_name="AUDIO", tooltip="The audio track (or None if no audio)."),
             ],
         )
 
@@ -233,9 +236,69 @@ class UC_SaveVideo(io.ComfyNode):
             prompt=prompt,
             extra_pnginfo=extra_pnginfo,
         )
+        video_obj = InputImpl.VideoFromFile(output_path)
         return io.NodeOutput(
             images,
             output_path,
+            video_obj,
+            audio,
             ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]),
         )
+
+
+class UC_ConcatenateVideoList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_ConcatenateVideoList",
+            display_name="Concatenate Video (List)",
+            category="video",
+            is_input_list=True,
+            description="Concatenates an arbitrary list of videos from a list execution into a single continuous video.",
+            inputs=[
+                io.Video.Input("videos", tooltip="List of videos to concatenate in sequence."),
+                io.Audio.Input(
+                    "complete_audio",
+                    optional=True,
+                    tooltip="Optional complete soundtrack to replace audio in the concatenated video. If disconnected, automatically joins audio tracks from the input videos.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output("video", display_name="VIDEO", tooltip="The concatenated video."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, videos, complete_audio=None) -> io.NodeOutput:
+        valid_videos = []
+        if isinstance(videos, list):
+            for v in videos:
+                if v is not None:
+                    if isinstance(v, list):
+                        valid_videos.extend([item for item in v if item is not None])
+                    else:
+                        valid_videos.append(v)
+        elif videos is not None:
+            valid_videos.append(videos)
+
+        if not valid_videos:
+            return io.NodeOutput(None)
+        if len(valid_videos) == 1 and complete_audio is None:
+            return io.NodeOutput(valid_videos[0])
+
+        audio_track = complete_audio[0] if (complete_audio and isinstance(complete_audio, list)) else complete_audio
+        if audio_track is None:
+            collected_audios = []
+            for v in valid_videos:
+                try:
+                    comp = v.get_components()
+                    if comp.audio is not None:
+                        collected_audios.append(comp.audio)
+                except Exception:
+                    pass
+            if collected_audios:
+                audio_track = concatenate_audio_list(collected_audios)
+
+        cat_video = InputImpl.VideoFromList(valid_videos, audio_track, Types.VideoCodec.AUTO)
+        return io.NodeOutput(cat_video)
 
