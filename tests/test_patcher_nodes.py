@@ -587,160 +587,6 @@ def test_schema_exposes_stable_cache_controls():
     assert inputs["device"].default == "auto"
 
 
-def test_spectrum_schema_exposes_measurable_experimental_controls():
-    schema = patcher_nodes.UC_MiniMaxH3Spectrum.define_schema()
-    inputs = {value.id: value for value in schema.inputs}
-
-    assert schema.node_id == "UC_MiniMaxH3Spectrum"
-    assert schema.is_experimental
-    assert inputs["execution_mode"].default == "spectrum"
-    assert inputs["degree"].default == 1
-    assert inputs["ridge_lambda"].default == 0.1
-    assert inputs["warmup_steps"].default == 1
-    assert inputs["video_blend_weight"].default == 0.5
-    assert inputs["offline_smoothing_replay"].default is True
-
-
-def test_spectrum_ridge_weights_reproduce_known_polynomial():
-    coordinates = [-1.0, -0.5, 0.0, 0.5, 1.0]
-    forecaster = patcher_helpers.HistoryWeightForecaster(
-        degree=2, ridge_lambda=0.0, max_history=5
-    )
-    for coordinate in coordinates:
-        feature = torch.tensor([[[2.0 + 3.0 * coordinate - coordinate * coordinate]]])
-        forecaster.update(coordinate, feature)
-
-    predicted = forecaster.predict(0.25, 1.0)
-    assert predicted.item() == pytest.approx(
-        2.0 + 3.0 * 0.25 - 0.25**2, abs=1e-5
-    )
-
-
-def _spectrum_config(**overrides):
-    values = {
-        "enabled": True,
-        "force_actual": False,
-        "degree": 2,
-        "ridge_lambda": 0.1,
-        "window_size": 2.0,
-        "flex_window": 0.75,
-        "warmup_steps": 3,
-        "tail_actual_steps": 1,
-        "max_history": 8,
-        "blend_weight": 1.0,
-        "audio_blend_weight": 0.0,
-        "history_storage": "system_ram",
-        "bootstrap_first_forecast": True,
-        "offline_smoothing_replay": False,
-        "offline_archive_storage": "system_ram",
-        "debug": False,
-    }
-    values.update(overrides)
-    return patcher_helpers.SpectrumH3Config(**values)
-
-
-def test_spectrum_config_rejects_insufficient_history():
-    with pytest.raises(ValueError, match="max_history"):
-        _spectrum_config(degree=4, max_history=4, bootstrap_first_forecast=False).validate()
-
-
-def test_spectrum_forced_actual_disables_replay(monkeypatch):
-    captured = {}
-
-    def patch(model, config):
-        captured["config"] = config
-        return model
-
-    monkeypatch.setattr(patcher_nodes, "patch_minimax_h3_spectrum_model", patch)
-    model = object()
-    patcher_nodes.UC_MiniMaxH3Spectrum.execute(
-        model,
-        "forced_actual",
-        1,
-        0.1,
-        2.0,
-        0.75,
-        1,
-        1,
-        8,
-        0.5,
-        0.0,
-        "system_ram",
-        True,
-        True,
-        "system_ram",
-        False,
-    )
-
-    assert captured["config"].force_actual is True
-    assert captured["config"].offline_smoothing_replay is False
-
-
-def test_spectrum_block_loop_observes_named_audio_then_video_targets(monkeypatch):
-    class FakeRuntime:
-        offline_phase = None
-
-        def begin_model_call(self, *_args, **kwargs):
-            assert kwargs["expected_shape"] == (1, 3, 2)
-            assert dict(kwargs["topology"])["target_audio_rows"] == 1
-            assert dict(kwargs["topology"])["target_video_rows"] == 2
-            return 0, True
-
-        def observe_actual(self, _run, _step, _call, feature):
-            self.feature = feature
-
-    monkeypatch.setattr(patcher_helpers, "SpectrumH3Runtime", FakeRuntime)
-    runtime = FakeRuntime()
-    hidden = torch.arange(12, dtype=torch.float32).reshape(6, 2)
-    options = {
-        patcher_helpers.RUNTIME_KEY: runtime,
-        patcher_helpers.RUN_ID_KEY: 1,
-        patcher_helpers.STEP_ID_KEY: 2,
-    }
-    output = patcher_helpers.SpectrumH3BlockLoop()(
-        {
-            "img": hidden,
-            "transformer_options": options,
-            "target_ranges": ((4, 6, "video"), (2, 3, "audio")),
-            "block_count": 2,
-        },
-        {"original_block": lambda args: {"img": args["img"] + 10}},
-    )
-
-    assert torch.equal(output["img"], hidden + 10)
-    assert torch.equal(runtime.feature, torch.cat(((hidden + 10)[2:3], (hidden + 10)[4:6])).unsqueeze(0))
-
-
-def test_spectrum_block_loop_inserts_forecast_into_named_targets(monkeypatch):
-    class FakeRuntime:
-        offline_phase = None
-
-        def begin_model_call(self, *_args, **_kwargs):
-            return 0, False
-
-        def predict(self, *_args, **_kwargs):
-            return torch.tensor([[[20.0], [40.0], [50.0]]])
-
-    monkeypatch.setattr(patcher_helpers, "SpectrumH3Runtime", FakeRuntime)
-    runtime = FakeRuntime()
-    hidden = torch.arange(6, dtype=torch.float32).reshape(6, 1)
-    result = patcher_helpers.SpectrumH3BlockLoop()(
-        {
-            "img": hidden,
-            "transformer_options": {
-                patcher_helpers.RUNTIME_KEY: runtime,
-                patcher_helpers.RUN_ID_KEY: 1,
-                patcher_helpers.STEP_ID_KEY: 2,
-            },
-            "target_ranges": ((4, 6, "video"), (2, 3, "audio")),
-            "block_count": 2,
-        },
-        {"original_block": lambda _args: pytest.fail("forecast ran transformer")},
-    )["img"]
-
-    assert result[:, 0].tolist() == [0.0, 1.0, 20.0, 3.0, 40.0, 50.0]
-
-
 def test_cache_reuses_residual_then_honors_maximum_skip_count():
     cache = _cache(max_steps=1)
     calls = []
@@ -835,6 +681,121 @@ def test_sampling_scope_always_clears_cache_state():
 
     sigmas = torch.tensor([1.0, 0.5, 0.0])
     with pytest.raises(RuntimeError, match="sampling failed"):
+        scope(fail, None, None, None, sigmas)
+
+    assert cache.cached_residual is None
+    assert cache.step_counter == 0
+
+
+def test_diffusion_cache_schema_exposes_physical_controls():
+    schema = patcher_nodes.UC_MiniMaxH3DiffusionCache.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+
+    assert schema.node_id == "UC_MiniMaxH3DiffusionCache"
+    assert not schema.is_experimental
+    assert [value.id for value in schema.inputs] == [
+        "model",
+        "preset",
+        "composition_cutoff",
+        "detail_protection",
+        "drift_tolerance",
+        "max_noise_span",
+        "device",
+        "verbose",
+    ]
+    assert inputs["preset"].default == "balanced"
+    assert inputs["preset"].options == ["balanced", "high_fidelity", "high_speed", "custom"]
+    assert inputs["composition_cutoff"].default == 0.75
+    assert inputs["detail_protection"].default == 0.15
+    assert inputs["drift_tolerance"].default == 1.0
+    assert inputs["max_noise_span"].default == 0.20
+    assert inputs["device"].default == "auto"
+
+
+def test_diffusion_cache_presets_and_custom_validation():
+    balanced = patcher_helpers.MiniMaxH3DiffusionCache(preset="balanced")
+    assert balanced.composition_cutoff == 0.75
+    assert balanced.detail_protection == 0.15
+    assert balanced.reuse_threshold == 0.05
+    assert balanced.max_noise_span == 0.20
+
+    high_fidelity = patcher_helpers.MiniMaxH3DiffusionCache(preset="high_fidelity", drift_tolerance=0.8)
+    assert high_fidelity.composition_cutoff == 0.65
+    assert high_fidelity.detail_protection == 0.25
+    assert high_fidelity.reuse_threshold == pytest.approx(0.03 * 0.8)
+    assert high_fidelity.max_noise_span == 0.12
+
+    high_speed = patcher_helpers.MiniMaxH3DiffusionCache(preset="high_speed", drift_tolerance=1.5)
+    assert high_speed.composition_cutoff == 0.85
+    assert high_speed.detail_protection == 0.10
+    assert high_speed.reuse_threshold == pytest.approx(0.08 * 1.5)
+    assert high_speed.max_noise_span == 0.30
+
+    custom = patcher_helpers.MiniMaxH3DiffusionCache(
+        preset="custom", composition_cutoff=0.80, detail_protection=0.20, drift_tolerance=2.0, max_noise_span=0.25
+    )
+    assert custom.composition_cutoff == 0.80
+    assert custom.detail_protection == 0.20
+    assert custom.reuse_threshold == pytest.approx(0.10)
+    assert custom.max_noise_span == 0.25
+
+    with pytest.raises(ValueError, match="Composition cutoff noise level"):
+        patcher_helpers.patch_minimax_h3_diffusion_cache_model(
+            None, preset="custom", composition_cutoff=0.10, detail_protection=0.80
+        )
+
+
+def test_diffusion_cache_phase_gating_and_span_limits():
+    cache = patcher_helpers.MiniMaxH3DiffusionCache(preset="balanced", drift_tolerance=1.0)
+    sigmas = torch.linspace(1.0, 0.0, 11)
+    cache.begin(sigmas)
+
+    calls = []
+
+    def original(args):
+        calls.append(args["img"].clone())
+        return {"img": args["img"] + 2.0}
+
+    # Step 1: noise = 0.90 (in composition phase > 0.75) -> must RUN
+    first = torch.ones((4, 8))
+    out1 = cache(_cache_args(first, 900.0), {"original_block": original})
+    assert len(calls) == 1
+    assert torch.equal(out1["img"], first + 2.0)
+
+    # Step 2: noise = 0.70 (in cache window [0.15, 0.75]) -> runs to establish first residual in window
+    second = first + 0.001
+    out2 = cache(_cache_args(second, 700.0), {"original_block": original})
+    assert len(calls) == 2
+    assert torch.equal(out2["img"], second + 2.0)
+
+    # Step 3: noise = 0.65 (delta 0.70 - 0.65 = 0.05 <= 0.20 max span, low drift) -> must SKIP
+    third = second + 0.0005
+    out3 = cache(_cache_args(third, 650.0), {"original_block": original})
+    assert len(calls) == 2  # No new call, skipped!
+    assert torch.allclose(out3["img"], third + 2.0)
+
+    # Step 4: noise = 0.45 (delta 0.70 - 0.45 = 0.25 > 0.20 max span!) -> must RUN to refresh
+    fourth = third + 0.0005
+    out4 = cache(_cache_args(fourth, 450.0), {"original_block": original})
+    assert len(calls) == 3
+    assert torch.equal(out4["img"], fourth + 2.0)
+
+    # Step 5: noise = 0.10 (in micro detail phase < 0.15) -> must RUN
+    fifth = fourth + 0.0005
+    out5 = cache(_cache_args(fifth, 100.0), {"original_block": original})
+    assert len(calls) == 4
+    assert torch.equal(out5["img"], fifth + 2.0)
+
+
+def test_diffusion_cache_sampling_scope_resets_on_error():
+    cache = patcher_helpers.MiniMaxH3DiffusionCache(preset="balanced")
+    scope = patcher_helpers.MiniMaxH3DiffusionSamplingScope(cache)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("diffusion sampling failed")
+
+    sigmas = torch.tensor([1.0, 0.5, 0.0])
+    with pytest.raises(RuntimeError, match="diffusion sampling failed"):
         scope(fail, None, None, None, sigmas)
 
     assert cache.cached_residual is None
@@ -1045,73 +1006,6 @@ def test_model_helper_adds_only_reversible_instance_patch(monkeypatch):
     assert patched.replacements[0][1:] == ("dit", "block_loop", 0)
     assert patched.wrappers[0][0] == patcher_helpers.comfy.patcher_extension.WrappersMP.OUTER_SAMPLE
     assert FakeH3.__dict__["_forward"] is original_class_forward
-
-
-def test_spectrum_helper_uses_clone_scoped_object_patch_and_hybrid_boundary(monkeypatch):
-    class FakeH3:
-        def _forward(self):
-            return "original"
-
-    monkeypatch.setattr(patcher_helpers.minimax_model, "MiniMaxH3Model", FakeH3)
-    monkeypatch.setattr(patcher_helpers, "install_sampler_wrappers", lambda model, runtime: model.wrappers.append(runtime))
-
-    class FakePatcher:
-        def __init__(self, diffusion):
-            self.model = types.SimpleNamespace(diffusion_model=diffusion)
-            self.model_options = {}
-            self.object_patches = {}
-            self.replacements = []
-            self.wrappers = []
-
-        def clone(self):
-            return FakePatcher(self.model.diffusion_model)
-
-        def add_object_patch(self, path, value):
-            self.object_patches[path] = value
-
-        def set_model_patch_replace(self, *args):
-            self.replacements.append(args)
-
-    original = FakePatcher(FakeH3())
-    original_class_forward = FakeH3.__dict__["_forward"]
-    patched = patcher_helpers.patch_minimax_h3_spectrum_model(
-        original, _spectrum_config(degree=1, warmup_steps=1)
-    )
-
-    assert original.model_options == {}
-    assert patched.model_options[patcher_helpers.MINIMAX_H3_SPECTRUM_OWNER_KEY] is True
-    assert set(patched.object_patches) == {"diffusion_model._forward"}
-    assert patched.object_patches["diffusion_model._forward"].__self__ is original.model.diffusion_model
-    assert isinstance(patched.replacements[0][0], patcher_helpers.SpectrumH3BlockLoop)
-    assert patched.replacements[0][1:] == ("dit", "block_loop", 0)
-    assert len(patched.wrappers) == 1
-    assert FakeH3.__dict__["_forward"] is original_class_forward
-
-
-def test_cache_and_spectrum_reject_both_stacking_orders():
-    cache_model = types.SimpleNamespace(
-        model_options={patcher_helpers.MINIMAX_H3_SPECTRUM_OWNER_KEY: True}
-    )
-    with pytest.raises(ValueError, match="cannot be combined"):
-        patcher_helpers.patch_minimax_h3_cache_model(
-            cache_model, 0.1, 0.1, 0.9, 2, "auto", False
-        )
-
-    spectrum_model = types.SimpleNamespace(
-        model_options={patcher_helpers.MINIMAX_H3_CACHE_OWNER_KEY: True}
-    )
-    with pytest.raises(ValueError, match="cannot be combined"):
-        patcher_helpers.patch_minimax_h3_spectrum_model(
-            spectrum_model, _spectrum_config(degree=1, warmup_steps=1)
-        )
-
-    pdd_model = types.SimpleNamespace(
-        model_options={patcher_helpers.MINIMAX_H3_PDD_OWNER_KEY: True}
-    )
-    with pytest.raises(ValueError, match="cannot be combined"):
-        patcher_helpers.patch_minimax_h3_spectrum_model(
-            pdd_model, _spectrum_config(degree=1, warmup_steps=1)
-        )
 
 
 def test_h3_sla_and_cache_preserve_both_model_patcher_contracts(monkeypatch):

@@ -1,5 +1,6 @@
 import sys
 import random
+from collections.abc import Mapping
 from fractions import Fraction
 from typing import Union
 import json
@@ -18,6 +19,7 @@ from ..helpers.text_helpers import (
 from ..helpers.image_helpers import prepare_h3_reference_components, cached_h3_reference_components, video_source_hash, resolve_h3_reference_window, VIDEO_FRAME_TIMESTAMP_FORMATS
 from ..helpers.model_helpers import (
     get_minimax_h3_clip_continuation_fingerprint,
+    get_latest_minimax_h3_clip_continuation_index,
     load_minimax_h3_clip_continuation_media,
     save_minimax_h3_clip_continuation_media,
     snapshot_minimax_h3_clip_continuation_media,
@@ -25,6 +27,9 @@ from ..helpers.model_helpers import (
     trim_minimax_h3_clip_continuation_batch,
     transcribe_reference_audio,
     trim_minimax_h3_clip_continuation,
+    concatenate_audio_list,
+    audio_list_to_batch,
+    audio_batch_to_list,
 )
 
 _MAX_SEED = 0xFFFFFFFFFFFFFFFF
@@ -76,7 +81,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
             f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
             audio_entry = continuation_media.get("audio")
             a_hash = ""
-            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+            if audio_entry is not None and isinstance(audio_entry, Mapping) and torch.is_tensor(audio_entry.get("waveform")):
                 w = audio_entry["waveform"]
                 a_hash = f"{w.shape}:{float(w.mean())}"
             continuation_id = f"{f_hash}:{a_hash}:{continuation_media.get('video_merge_mode', '')}:{continuation_media.get('media_type', '')}"
@@ -132,23 +137,28 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationSave",
             display_name="MiniMax H3 Clip Continuation Save",
             category="advanced/conditioning",
-            description="Keeps the end of one clip so the next clip can continue it.",
+            description="Saves the ending of a generated clip so the next clip in your sequence can pick up seamlessly where it left off.",
             inputs=[
-                io.Image.Input("images", tooltip="Frames from the clip you just made."),
-                io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip. Its ending is saved with the frames."),
-                io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="How many ending frames to keep for the next clip."),
-                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used to pair this node with Load. Use the same name on both nodes."),
-                io.Int.Input("clip_index", default=1, min=1, max=99999, step=1, tooltip="Number for this clip. Start with 1, then increase by 1 for each new clip. Re-running a number replaces that clip."),
-                io.Int.Input("padded_frames", default=0, min=0, max=99999, step=1, optional=True, tooltip="Trailing padded frames to skip at the end of the clip (e.g. from H3 duration rounding or final segment padding). Tail frames will be extracted from active content immediately before this padding."),
+                io.Image.Input("images", tooltip="Frames from the video clip you just made."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional sound track from the same clip. The tail audio is saved to match the ending frames."),
+                io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="How many ending frames to keep for the next clip to follow (default 22 = ~0.9s)."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Name or folder for this continuation sequence. Keep this the same on both Save and Load."),
+                io.Int.Input("clip_index", default=1, min=0, max=99999, step=1, tooltip="Manual clip number. Start with 1, then increase by 1 for each new clip. Ignored when auto_index is enabled."),
+                io.Boolean.Input("auto_index", default=False, label_on="Auto (next clip number)", label_off="Manual", tooltip="When enabled, automatically numbers this clip as the next one in sequence (latest + 1). Eliminates the need for integer counters or math nodes."),
+                io.Int.Input("padded_frames", default=0, min=0, max=99999, step=1, optional=True, tooltip="Optional extra frames at the very end to skip before extracting the tail (useful if the clip has trailing freeze padding)."),
             ],
-            outputs=[io.String.Output("path")],
+            outputs=[io.String.Output("path", tooltip="File path of the saved continuation data.")],
             is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0):
+    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0, auto_index=False):
+        if auto_index or int(clip_index) <= 0:
+            target_index = get_latest_minimax_h3_clip_continuation_index(filename_prefix) + 1
+        else:
+            target_index = int(clip_index)
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, clip_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0,
+            images, int(tail_frames), filename_prefix, target_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0,
         )
         return io.NodeOutput(path)
 
@@ -160,18 +170,28 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationLoad",
             display_name="MiniMax H3 Clip Continuation Load",
             category="advanced/conditioning",
-            description="Gets a saved clip ending so the next clip can continue it.",
+            description="Loads a saved clip ending so your next clip continues characters, motion, and sound seamlessly.",
             inputs=[
-                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="File name used by Save. Use the same name on both nodes."),
-                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip. Nothing is loaded."),
+                io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Name or folder for this continuation sequence. Keep this the same on both Save and Load."),
+                io.Int.Input("clip_index", default=0, min=0, max=99999, step=1, tooltip="Which earlier clip to continue from. Use 0 for your first clip (nothing is loaded). Ignored when auto_index is enabled."),
+                io.Boolean.Input("auto_index", default=False, label_on="Auto (latest saved clip)", label_off="Manual", tooltip="When enabled, automatically loads the previous clip's ending. On your first run, it loads nothing so generation starts fresh. Eliminates the need for math nodes or counter primitives."),
                 io.Combo.Input("media_type", options=["video+audio", "video only", "audio only"], default="video+audio", tooltip="Select which continuation components to load. Video only ignores saved audio; audio only ignores saved video frames."),
-                io.Combo.Input("video_merge_mode", options=["replace", "prepend", "temporal fusion"], default="replace", tooltip="Replace substitutes opening Qwen context. Prepend shifts reference video later. Temporal fusion combines saved interior frames with reference frames at the same times through Qwen temporal consensus, preserving the reference timeline and prompt. Fusion requires an additional Qwen encoding lane.", advanced=True),
+                io.Combo.Input("video_merge_mode", options=["replace", "prepend", "temporal fusion"], default="replace", tooltip="How previous frames blend with your prompt: 'replace' swaps opening context, 'prepend' shifts reference video later, 'temporal fusion' smoothly blends overlapping frames.", advanced=True),
             ],
-            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media")],
+            outputs=[MiniMaxH3ClipContinuationMedia.Output("continuation_media", tooltip="Continuation data ready to connect to your clip encoder.")],
         )
 
     @classmethod
-    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio"):
+    def IS_CHANGED(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio", auto_index=False):
+        if auto_index:
+            latest = get_latest_minimax_h3_clip_continuation_index(filename_prefix)
+            if latest <= 0:
+                return float("nan")
+            try:
+                fingerprint = get_minimax_h3_clip_continuation_fingerprint(filename_prefix, latest)
+                return f"{fingerprint}:{video_merge_mode}:{media_type}:auto"
+            except FileNotFoundError:
+                return float("nan")
         if int(clip_index) <= 0:
             return "disabled"
         if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
@@ -185,14 +205,15 @@ class UC_MiniMaxH3ClipContinuationLoad(io.ComfyNode):
             return float("nan")
 
     @classmethod
-    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio"):
-        if int(clip_index) <= 0:
+    def execute(cls, filename_prefix="h3_clip_continuation/clip", clip_index=0, video_merge_mode="replace", media_type="video+audio", auto_index=False):
+        target_index = get_latest_minimax_h3_clip_continuation_index(filename_prefix) if auto_index else int(clip_index)
+        if target_index <= 0:
             return io.NodeOutput(None)
         if video_merge_mode not in ("replace", "prepend", "temporal fusion"):
             raise ValueError("Unsupported MiniMax H3 continuation video merge mode.")
         if media_type not in ("video+audio", "video only", "audio only"):
             raise ValueError("Unsupported MiniMax H3 continuation media type.")
-        media = load_minimax_h3_clip_continuation_media(filename_prefix, int(clip_index))
+        media = load_minimax_h3_clip_continuation_media(filename_prefix, target_index)
         media["video_merge_mode"] = video_merge_mode
         media["media_type"] = media_type
         if media_type == "video only":
@@ -229,7 +250,7 @@ class UC_MiniMaxH3ClipContinuationUnpack(io.ComfyNode):
             f_hash = f"{frames.shape}:{float(frames.mean())}" if frames is not None and torch.is_tensor(frames) else ""
             audio_entry = continuation_media.get("audio")
             a_hash = ""
-            if audio_entry is not None and isinstance(audio_entry, dict) and torch.is_tensor(audio_entry.get("waveform")):
+            if audio_entry is not None and isinstance(audio_entry, Mapping) and torch.is_tensor(audio_entry.get("waveform")):
                 w = audio_entry["waveform"]
                 a_hash = f"{w.shape}:{float(w.mean())}"
             return f"media:{f_hash}:{a_hash}:{media_type}"
@@ -348,7 +369,7 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
             raise ValueError("MiniMax H3 Clip Continuation manual entries must be sequential or replace an existing entry.")
         images = images.detach().cpu().clone()
         if audio is not None and (
-            not isinstance(audio, dict)
+            not isinstance(audio, Mapping)
             or not torch.is_tensor(audio.get("waveform"))
             or not isinstance(audio.get("sample_rate"), int)
         ):
@@ -378,6 +399,140 @@ class UC_MiniMaxH3ClipContinuationAccumulate(io.ComfyNode):
         )
         del _MINIMAX_H3_CLIP_ACCUMULATION[state_key]
         return io.NodeOutput(*output)
+
+
+class UC_MiniMaxH3ClipContinuationAccumulateList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationAccumulateList",
+            display_name="MiniMax H3 Clip Continuation Accumulate (List)",
+            category="advanced/conditioning",
+            is_input_list=True,
+            description="Automatically cuts out repeated overlapping frames between continued clips and seamlessly stitches them into one complete video and soundtrack.",
+            inputs=[
+                io.Image.Input("images", tooltip="Connect the list of video clips generated from your continuation run."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional list of audio tracks from the same clips."),
+                MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Optional continuation data from your Load node to help guide frame alignment."),
+                io.Float.Input("overlap_threshold", display_name="Duplicate boundary threshold (%)", default=88.0, min=0.0, max=100.0, step=0.1, tooltip="How closely frames must look alike to count as repeated. 88% works for most scenes.", advanced=True),
+                io.Int.Input("maximum_overlap_frames", display_name="Maximum duplicate frames to check", default=56, min=1, max=99999, step=1, tooltip="Maximum number of frames to search for repeated motion between clips."),
+                io.Float.Input("continuation_prune_range", display_name="Continuation prune range (%)", default=0.0, min=0.0, max=100.0, step=1.0, tooltip="Percentage of saved continuation frames to safely remove from the boundary before matching."),
+                io.Float.Input("near_identical_tolerance", display_name="Near-identical match tolerance (%)", default=1.0, min=0.0, max=5.0, step=0.1, tooltip="Match strictness when selecting the smoothest transition point.", advanced=True),
+            ],
+            outputs=[
+                io.Image.Output("images", tooltip="The final stitched video frames without duplicate or jumpy transitions."),
+                io.Audio.Output("audio", tooltip="The matching continuous soundtrack."),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        images,
+        audio=None,
+        continuation_media=None,
+        overlap_threshold=88.0,
+        maximum_overlap_frames=56,
+        continuation_prune_range=0.0,
+        near_identical_tolerance=1.0,
+    ) -> io.NodeOutput:
+        thresh = float(overlap_threshold[0] if isinstance(overlap_threshold, list) else overlap_threshold)
+        max_f = int(maximum_overlap_frames[0] if isinstance(maximum_overlap_frames, list) else maximum_overlap_frames)
+        prune_r = float(continuation_prune_range[0] if isinstance(continuation_prune_range, list) else continuation_prune_range)
+        near_tol = float(near_identical_tolerance[0] if isinstance(near_identical_tolerance, list) else near_identical_tolerance)
+
+        image_batches = [img for img in images if img is not None and torch.is_tensor(img)]
+        if not image_batches:
+            return io.NodeOutput(None, None)
+        if len(image_batches) == 1:
+            first_audio = audio[0] if audio and len(audio) > 0 else None
+            return io.NodeOutput(image_batches[0], first_audio)
+
+        audio_batches = audio if audio is not None else [None] * len(image_batches)
+        if len(audio_batches) < len(image_batches):
+            audio_batches = list(audio_batches) + [None] * (len(image_batches) - len(audio_batches))
+
+        cont_batches = continuation_media if continuation_media is not None else None
+
+        trimmed_images, trimmed_audio = trim_minimax_h3_clip_continuation_batch(
+            image_batches,
+            audio_batches,
+            thresh,
+            max_f,
+            near_tol,
+            continuation_batches=cont_batches,
+            continuation_prune_range=prune_r,
+        )
+        output = accumulate_minimax_h3_clip_continuations(trimmed_images, trimmed_audio)
+        return io.NodeOutput(*output)
+
+
+class UC_ConcatenateAudioList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_ConcatenateAudioList",
+            display_name="Concatenate Audio (List)",
+            category="audio",
+            is_input_list=True,
+            description="Stitches a list of audio clips together end-to-end into one continuous soundtrack.",
+            inputs=[
+                io.Audio.Input("audio", tooltip="Connect audio clips to join in sequence. Accepts a list of audio clips from a queue or loop."),
+            ],
+            outputs=[
+                io.Audio.Output(display_name="audio", tooltip="The single combined audio track."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio) -> io.NodeOutput:
+        result = concatenate_audio_list(audio)
+        return io.NodeOutput(result)
+
+
+class UC_ListToAudioBatch(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_ListToAudioBatch",
+            display_name="List to Audio Batch",
+            category="audio",
+            is_input_list=True,
+            description="Combines a list of audio clips into a single batch for nodes that process audio in batches.",
+            inputs=[
+                io.Audio.Input("audio", tooltip="List of audio clips to stack into a batch."),
+            ],
+            outputs=[
+                io.Audio.Output(display_name="audio", tooltip="Batched audio clips padded to the same length."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio) -> io.NodeOutput:
+        result = audio_list_to_batch(audio)
+        return io.NodeOutput(result)
+
+
+class UC_AudioBatchToList(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_AudioBatchToList",
+            display_name="Audio Batch to List",
+            category="audio",
+            description="Unpacks a batched audio track into a list of individual clips.",
+            inputs=[
+                io.Audio.Input("audio", tooltip="Batched audio to split."),
+            ],
+            outputs=[
+                io.Audio.Output(display_name="audio", is_output_list=True, tooltip="List of individual audio clips."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio) -> io.NodeOutput:
+        result = audio_batch_to_list(audio)
+        return io.NodeOutput(result)
 
 
 class UC_SeedCluster(io.ComfyNode):

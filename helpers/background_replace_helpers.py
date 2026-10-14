@@ -5,6 +5,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
+from .composite_helpers import _expand_mask, _feather_mask
+
 
 def _ordered_ring(edges):
     adjacency = {}
@@ -357,3 +359,86 @@ def _warp_source(
             np.zeros(2, dtype=np.float32),
         )
     return _tps_warp_image(source, controls, values)
+
+
+def _apply_face_mask_options(
+    placed_oval,
+    placed_foreground,
+    mask_expansion,
+    feather_radius,
+    placed_points,
+    feature_indices=None,
+    nose_indices=None,
+    oval_count=None,
+):
+    mask_expansion = int(mask_expansion)
+    feather_radius = int(feather_radius)
+    inverted_foreground = 1.0 - placed_foreground
+    solid_foreground = ((placed_foreground - inverted_foreground) * 2.0).clamp(
+        0.0, 1.0
+    )
+
+    if mask_expansion == 0 and feather_radius == 0:
+        return placed_oval * solid_foreground
+
+    uniform_opaque = _expand_mask(placed_oval, mask_expansion).clamp(0.0, 1.0)
+    if feather_radius:
+        uniform_alpha = _feather_mask(uniform_opaque, feather_radius)
+    else:
+        uniform_alpha = uniform_opaque
+
+    if isinstance(placed_points, torch.Tensor):
+        pts = placed_points.detach().cpu().numpy()
+    else:
+        pts = np.asarray(placed_points)
+
+    nose_positions = []
+    if feature_indices is not None and nose_indices:
+        nose_positions = [
+            i
+            for i, idx in enumerate(feature_indices)
+            if idx in nose_indices and i < len(pts)
+        ]
+
+    if not nose_positions:
+        return uniform_alpha * solid_foreground
+
+    nose_pts = pts[nose_positions]
+    if oval_count is not None and oval_count > 0:
+        oval_pts = pts[:oval_count]
+    else:
+        oval_pts = pts
+
+    nose_center = nose_pts.mean(axis=0)
+    oval_distances = np.linalg.norm(oval_pts - nose_center, axis=-1)
+    if len(oval_distances) == 0:
+        return uniform_alpha * solid_foreground
+
+    r_max = float(oval_distances.max())
+    if r_max < 1.0:
+        return uniform_alpha * solid_foreground
+
+    r0 = 0.25 * r_max
+    r1 = 0.75 * r_max
+
+    nose_tensor = torch.as_tensor(
+        nose_pts, device=placed_oval.device, dtype=torch.float32
+    )
+    height, width = placed_oval.shape[:2]
+    yy, xx = torch.meshgrid(
+        torch.arange(height, device=placed_oval.device, dtype=torch.float32),
+        torch.arange(width, device=placed_oval.device, dtype=torch.float32),
+        indexing="ij",
+    )
+    pixel_coords = torch.stack((xx, yy), dim=-1)
+
+    dist = torch.norm(pixel_coords - nose_tensor[0], dim=-1)
+    for k in range(1, len(nose_tensor)):
+        dist = torch.minimum(dist, torch.norm(pixel_coords - nose_tensor[k], dim=-1))
+
+    t = torch.clamp((dist - r0) / max(r1 - r0, 1e-4), 0.0, 1.0)
+    w = _smoothstep(t)
+
+    blended_alpha = (1.0 - w) * placed_oval + w * uniform_alpha
+    return (blended_alpha * solid_foreground).clamp(0.0, 1.0)
+

@@ -466,10 +466,24 @@ class UC_MiniMaxH3ReferenceMedia(io.ComfyNode):
         reference_audios: io.Autogrow.Type = None,
         **kwargs,
     ) -> io.NodeOutput:
+        vids = dict(reference_videos) if isinstance(reference_videos, dict) else {}
+        vid_auds = dict(reference_video_audios) if isinstance(reference_video_audios, dict) else {}
+        auds = dict(reference_audios) if isinstance(reference_audios, dict) else {}
+
+        for k, v in kwargs.items():
+            if v is None:
+                continue
+            if k.startswith("reference_video_audio_"):
+                vid_auds[k] = v
+            elif k.startswith("reference_video_"):
+                vids[k] = v
+            elif k.startswith("reference_audio_"):
+                auds[k] = v
+
         return io.NodeOutput({
-            "reference_videos": reference_videos,
-            "reference_video_audios": reference_video_audios,
-            "reference_audios": reference_audios,
+            "reference_videos": vids,
+            "reference_video_audios": vid_auds,
+            "reference_audios": auds,
         })
 
 
@@ -4325,9 +4339,11 @@ class UC_AdvMiniMaxH3ImageToVideoTemporalFusion(UC_AdvancedMiniMaxH3ImageToVideo
         schema.description = "Experimentally fuses corresponding video visual blocks before or after Qwen encoding, preserving the ordinary video token budget."
         selector = next(value for value in schema.inputs if value.id == "fusion_method")
         selector.tooltip = "Temporal fusion target: corresponding video visual blocks. conds_fusion blends their conditioning after separate Qwen encodes. token_fusion blends their features and DeepStack before one Qwen encode per schedule. Temporal density and consensus/spatial settings remain in their existing configurators."
-        schema.inputs = [value for value in schema.inputs if value.id not in ("fusion_images", "fusion_method")]
+        autogrow = [value for value in schema.inputs if value.id == "reference_images"]
+        schema.inputs = [value for value in schema.inputs if value.id not in ("fusion_images", "fusion_method", "reference_images")]
         schema.inputs.append(TextBlendConfig.Input("text_blend_config", optional=True, tooltip="Temporal consensus settings. Disconnected uses custom index consensus with norm rescaling."))
         schema.inputs.append(selector)
+        schema.inputs.extend(autogrow)
         return schema
 
     @classmethod
@@ -4375,6 +4391,13 @@ class UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion(UC_AdvMiniMaxH3ImageToVideo
 
 
 class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
+    """Encodes MiniMax H3 prompt conditioning, multi-video and audio references from a Reference Media container.
+
+    This node accepts a bundled MiniMaxH3ReferenceMedia container (holding multiple reference
+    videos, video soundtracks, and standalone audio tracks) along with native reference images,
+    first/last keyframe anchors, and text prompts. It coordinates Qwen3-VL VLM token presentations
+    and VAE latent structures.
+    """
     @classmethod
     def define_schema(cls):
         reference_template = io.Autogrow.TemplateNames(
@@ -4454,6 +4477,13 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
         reference_images=None,
         **kwargs,
     ) -> io.NodeOutput:
+        ref_imgs = dict(reference_images) if isinstance(reference_images, dict) else {}
+        for k, v in kwargs.items():
+            if k.startswith("reference_image_") and v is not None:
+                ref_imgs[k] = v
+        if not ref_imgs and not isinstance(reference_images, dict):
+            ref_imgs = reference_images
+
         conditioning, latent = execute_advanced_minimax_h3_reference_media_image_to_video(
             clip=clip,
             vae=vae,
@@ -4471,7 +4501,128 @@ class UC_AdvancedMiniMaxH3RefMediaImageToVideo(io.ComfyNode):
             vlm_video_resolution=vlm_video_resolution,
             enable_caching=enable_caching,
             media_config=media_config,
-            reference_images=reference_images,
+            reference_images=ref_imgs,
+            **kwargs,
+        )
+        return io.NodeOutput(conditioning, latent)
+
+
+class UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion(UC_AdvancedMiniMaxH3RefMediaImageToVideo):
+    """Temporal fusion child node for Reference Media MiniMax H3 video generation.
+
+    Fuses corresponding video visual blocks from reference media before or after Qwen encoding,
+    preserving the standard video token budget.
+
+    Architecture & Configuration:
+        - fusion_method:
+            - 'conds_fusion': Blends conditioning tensors post-Qwen after separate encoding
+              passes for each temporal lane.
+            - 'token_fusion': Blends visual token embeddings and DeepStack layers pre-Qwen,
+              running only one Qwen encoding pass per schedule.
+        - media_config (from UC_MiniMaxH3MediaConfig):
+            - temporal_density (1-24): Number of temporal sampling offsets to evaluate.
+              Density 1 bypasses multi-lane fusion.
+            - temporal_fusion_method:
+                - 'consensus': Mathematical consensus across temporal lanes (configured via
+                  text_blend_config).
+                - 'spatial': Spatial token-grid interleaving across temporal lanes (configured
+                  via visual_fusion_config).
+        - text_blend_config (optional, from UC_TextConsensusBlendConfig):
+            Provides consensus hyperparameters (blend_preset, alignment_method, power_alpha,
+            diversity_beta, rescale_norm, global_scale).
+        - visual_fusion_config (optional, from UC_VisualFusionConfig):
+            Provides spatial fusion settings when temporal_fusion_method is 'spatial'.
+    """
+    _EXPERIMENTAL = None
+    DEFAULT_FUSION_METHOD = "conds_fusion"
+
+    @classmethod
+    def define_schema(cls):
+        schema = super().define_schema()
+        schema.node_id = "UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion"
+        schema.is_experimental = True
+        schema.display_name = "Adv MiniMax H3 Reference Media to Video (Temporal Fusion)"
+        schema.description = "Experimentally fuses corresponding video visual blocks from reference media before or after Qwen encoding, preserving the ordinary video token budget."
+        autogrow = [value for value in schema.inputs if value.id == "reference_images"]
+        schema.inputs = [value for value in schema.inputs if value.id != "reference_images"]
+        schema.inputs.append(VisualFusionConfig.Input(
+            "visual_fusion_config",
+            optional=True,
+            display_name="Fusion Config",
+            tooltip="Optional spatial visual fusion configuration from UC_VisualFusionConfig when temporal_fusion_method is spatial."
+        ))
+        schema.inputs.append(TextBlendConfig.Input(
+            "text_blend_config",
+            optional=True,
+            tooltip="Temporal consensus settings. Disconnected uses custom index consensus with norm rescaling."
+        ))
+        schema.inputs.append(io.Combo.Input(
+            "fusion_method",
+            options=["conds_fusion", "token_fusion"],
+            default=cls.DEFAULT_FUSION_METHOD,
+            optional=True,
+            tooltip="Temporal fusion target: corresponding video visual blocks. conds_fusion blends their conditioning after separate Qwen encodes. token_fusion blends their features and DeepStack before one Qwen encode per schedule. Temporal density and consensus/spatial settings remain in their existing configurators."
+        ))
+        schema.inputs.extend(autogrow)
+        return schema
+
+    @classmethod
+    def execute(
+        cls,
+        clip,
+        vae=None,
+        prompt="",
+        width=1344,
+        height=768,
+        length=124,
+        first_frame=None,
+        last_frame=None,
+        reference_media=None,
+        audio_vae=None,
+        multiplier=1.0,
+        ref_image_size="match",
+        vlm_resolution=384,
+        vlm_video_resolution=384,
+        enable_caching="all",
+        media_config=None,
+        reference_images=None,
+        visual_fusion_config=None,
+        text_blend_config=None,
+        fusion_method=None,
+        **kwargs,
+    ) -> io.NodeOutput:
+        fusion_method = cls.DEFAULT_FUSION_METHOD if fusion_method is None else fusion_method
+        if fusion_method not in ("conds_fusion", "token_fusion"):
+            raise ValueError(f"Unsupported MiniMax H3 temporal fusion method: {fusion_method}")
+        ref_imgs = dict(reference_images) if isinstance(reference_images, dict) else {}
+        for k, v in kwargs.items():
+            if k.startswith("reference_image_") and v is not None:
+                ref_imgs[k] = v
+        if not ref_imgs and not isinstance(reference_images, dict):
+            ref_imgs = reference_images
+
+        conditioning, latent = execute_advanced_minimax_h3_reference_media_image_to_video(
+            clip=clip,
+            vae=vae,
+            prompt=prompt,
+            width=width,
+            height=height,
+            length=length,
+            first_frame=first_frame,
+            last_frame=last_frame,
+            reference_media=reference_media,
+            audio_vae=audio_vae,
+            multiplier=multiplier,
+            ref_image_size=ref_image_size,
+            vlm_resolution=vlm_resolution,
+            vlm_video_resolution=vlm_video_resolution,
+            enable_caching=enable_caching,
+            media_config=media_config,
+            reference_images=ref_imgs,
+            visual_fusion_config=visual_fusion_config,
+            temporal_fusion=True,
+            temporal_token_fusion=fusion_method == "token_fusion",
+            text_blend_config=text_blend_config,
             **kwargs,
         )
         return io.NodeOutput(conditioning, latent)

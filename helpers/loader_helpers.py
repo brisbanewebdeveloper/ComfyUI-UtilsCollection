@@ -1,5 +1,5 @@
 import re
-from typing import Any
+from typing import Any, Sequence
 import torch
 
 import comfy.lora
@@ -7,6 +7,7 @@ import comfy.lora_convert
 import comfy.sd
 import comfy.utils
 import folder_paths
+from comfy_api.latest import io
 
 
 _TEXT_PROJECTION_KEY = (
@@ -239,3 +240,210 @@ def load_sam31_clip_patcher(
         disable_dynamic=disable_dynamic,
     )
     return clip.patcher
+
+
+def build_lora_stack_dynamic_combo(
+    depth: int = 1, max_depth: int = 15, strength_key: str = "strength_model"
+) -> io.DynamicCombo.Input:
+    sub_inputs: list[io.Input] = [
+        io.Combo.Input(
+            "lora_name",
+            options=folder_paths.get_filename_list("loras"),
+            tooltip="The name of the LoRA file to apply.",
+        ),
+        io.Float.Input(
+            strength_key,
+            default=1.0,
+            min=-100.0,
+            max=100.0,
+            step=0.01,
+            tooltip="How strongly to apply this LoRA. 0 = off, negative inverts the effect.",
+        ),
+        io.Boolean.Input(
+            "enabled",
+            default=True,
+            tooltip="Turn off to skip this LoRA without removing its settings.",
+        ),
+    ]
+    if depth < max_depth:
+        sub_inputs.append(
+            build_lora_stack_dynamic_combo(
+                depth + 1, max_depth=max_depth, strength_key=strength_key
+            )
+        )
+
+    input_id = "add_lora" if depth == 1 else f"add_lora_{depth}"
+    return io.DynamicCombo.Input(
+        input_id,
+        options=[
+            io.DynamicCombo.Option("False", inputs=[]),
+            io.DynamicCombo.Option("True", inputs=sub_inputs),
+        ],
+        display_name="add_lora",
+        tooltip="Enable to configure and add a LoRA to the stack.",
+    )
+
+
+def extract_lora_stack_entries(
+    add_lora_data: Any = None, **kwargs: Any
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+
+    # 1. Walk nested dictionary structure
+    curr = add_lora_data
+    depth = 1
+    while isinstance(curr, dict):
+        key = f"add_lora_{depth}" if depth > 1 else "add_lora"
+        combo_val = curr.get(key, curr.get("add_lora"))
+        is_active = False
+        if combo_val is not None:
+            if isinstance(combo_val, bool):
+                is_active = combo_val
+            elif isinstance(combo_val, str):
+                is_active = combo_val.strip().lower() in ("true", "1", "yes")
+
+        if not is_active:
+            break
+
+        lora_name = curr.get("lora_name")
+        strength_val = curr.get("strength", curr.get("strength_model", 1.0))
+        enabled = curr.get("enabled", True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("true", "1", "yes")
+
+        if lora_name:
+            try:
+                strength_float = float(strength_val)
+            except (ValueError, TypeError):
+                strength_float = 1.0
+
+            entries.append(
+                {
+                    "lora_name": str(lora_name),
+                    "strength": strength_float,
+                    "strength_model": strength_float,
+                    "enabled": bool(enabled),
+                }
+            )
+
+        depth += 1
+        next_key = f"add_lora_{depth}"
+        next_child = curr.get(next_key)
+        if not isinstance(next_child, dict):
+            for k, v in curr.items():
+                if k.startswith("add_lora") and k != key and isinstance(v, dict):
+                    next_child = v
+                    break
+        curr = next_child
+
+    # 2. Fallback: inspect kwargs if add_lora was not a dict
+    if not entries and kwargs:
+        single_active = False
+        raw_add = kwargs.get("add_lora", add_lora_data)
+        if raw_add is not None:
+            if isinstance(raw_add, bool):
+                single_active = raw_add
+            elif isinstance(raw_add, str):
+                single_active = raw_add.strip().lower() in ("true", "1", "yes")
+        if single_active and "lora_name" in kwargs:
+            lora_name = kwargs["lora_name"]
+            if lora_name:
+                strength_val = kwargs.get(
+                    "strength", kwargs.get("strength_model", 1.0)
+                )
+                enabled = kwargs.get("enabled", True)
+                if isinstance(enabled, str):
+                    enabled = enabled.strip().lower() in ("true", "1", "yes")
+                try:
+                    strength_float = float(strength_val)
+                except (ValueError, TypeError):
+                    strength_float = 1.0
+                entries.append(
+                    {
+                        "lora_name": str(lora_name),
+                        "strength": strength_float,
+                        "strength_model": strength_float,
+                        "enabled": bool(enabled),
+                    }
+                )
+
+    return entries
+
+
+def apply_lora_stack_to_model(
+    model: Any,
+    lora_entries: Sequence[dict[str, Any]],
+    cache: dict[str, tuple[Any, Any]] | None = None,
+) -> tuple[Any, dict[str, tuple[Any, Any]]]:
+    if cache is None:
+        cache = {}
+
+    for entry in lora_entries:
+        lora_name = entry.get("lora_name")
+        strength = entry.get("strength_model", entry.get("strength", 1.0))
+        enabled = entry.get("enabled", True)
+
+        if not lora_name or not enabled or strength == 0:
+            continue
+
+        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        cached_entry = cache.get(lora_path)
+        if cached_entry is not None:
+            lora, metadata = cached_entry
+        else:
+            lora, metadata = comfy.utils.load_torch_file(
+                lora_path, safe_load=True, return_metadata=True
+            )
+            if len(cache) >= 32:
+                cache.clear()
+            cache[lora_path] = (lora, metadata)
+
+        model, _ = comfy.sd.load_lora_for_models(
+            model, None, lora, strength, 0, lora_metadata=metadata
+        )
+
+    return model, cache
+
+
+def enable_dynamic_group_link_support() -> bool:
+    """Enables ComfyUI Core _DynamicGroup inputs (e.g. 'loras' in LoadLoraModel) to accept link sockets.
+
+    In ComfyUI Core, _DynamicGroup only checks for in-node widget keys like 'loras.0.lora_name'
+    and fails validation with DynamicInputError ('0 rows; expected between 1 and 20') when
+    connected to another node via a socket link. This patch detects when the dynamic group
+    input is connected to an upstream link and preserves it as a valid link input.
+    """
+    try:
+        from comfy_api.latest._io import (
+            DYNAMIC_INPUT_LOOKUP,
+            _DynamicGroup,
+            finalize_prefix,
+            register_dynamic_input_func,
+        )
+        from execution import is_link
+
+        orig_func = DYNAMIC_INPUT_LOOKUP.get(_DynamicGroup.io_type)
+        if orig_func is None or getattr(orig_func, "_supports_links", False):
+            return True
+
+        def _expand_dynamic_group_with_links(
+            out_dict, live_inputs, value, input_type, curr_prefix
+        ):
+            finalized_prefix = finalize_prefix(curr_prefix)
+            val = live_inputs.get(finalized_prefix)
+            if is_link(val):
+                out_dict[input_type][finalized_prefix] = value
+                return
+            return orig_func(out_dict, live_inputs, value, input_type, curr_prefix)
+
+        _expand_dynamic_group_with_links._supports_links = True
+        register_dynamic_input_func(
+            _DynamicGroup.io_type, _expand_dynamic_group_with_links
+        )
+        return True
+    except Exception:
+        return False
+
+
+enable_dynamic_group_link_support()
+

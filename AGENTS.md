@@ -10,6 +10,9 @@ rules and must remain local only; do not stage or commit it.
 - Keep changes within the requested scope and preserve unrelated worktree edits.
 - Base behavioral claims on the relevant implementation and inputs. Report what
   was actually tested and distinguish inference from verified behavior.
+- Avoid using the regular `grep` tool for open-ended searches, as it triggers broad
+  filesystem-wide searches across millions of files. Always scope searches using
+  `rg` (ripgrep) directly with explicit target directories, file globs, and bounded patterns.
 
 ## Python module structure
 

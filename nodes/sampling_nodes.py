@@ -3,6 +3,13 @@
 import torch
 import comfy.samplers
 from comfy_api.latest import io
+from ..helpers.model_helpers import (
+    validate_h3_av_latent,
+    calculate_guided_continuation_layout,
+    assemble_guided_target,
+    apply_latent_tail_guide_to_conditioning,
+    assemble_appended_continuation,
+)
 from ..helpers.sampling_helpers import (
     H3_CHUNK_SECONDS_OPTIONS,
     H3_OVERLAP_SECONDS_OPTIONS,
@@ -518,9 +525,182 @@ class UC_SamplerDMADReNoise(io.ComfyNode):
     get_sampler = execute
 
 
+class UC_MiniMaxH3GuidedContinuationWindow(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3GuidedContinuationWindow",
+            display_name="MiniMax H3 Guided Continuation Window",
+            category="utils/sampling",
+            description=(
+                "Prepares a blank canvas for the next clip with a hidden overlapping seam "
+                "so motion and sound continue smoothly from the previous clip."
+            ),
+            inputs=[
+                io.Latent.Input(
+                    "previous_av_latent",
+                    tooltip="The completed latent from your previous clip.",
+                ),
+                io.Int.Input(
+                    "overlap_frames",
+                    default=22,
+                    min=5,
+                    max=3600,
+                    step=17,
+                    tooltip="Hidden seam duration in frames to match motion and sound (default 22 frames = ~0.9s).",
+                ),
+                io.Int.Input(
+                    "extension_frames",
+                    default=119,
+                    min=17,
+                    max=3570,
+                    step=17,
+                    tooltip="How many new visible frames to generate (default 119 frames = ~5s).",
+                ),
+            ],
+            outputs=[
+                io.Latent.Output(
+                    "latent",
+                    tooltip="Fresh canvas ready to connect to your sampler.",
+                ),
+                io.Int.Output(
+                    "window_length",
+                    tooltip="Total frames in this window. Connect to the length input of your prompt encoder.",
+                ),
+                io.Int.Output("overlap_video_tokens", tooltip="Seam measurement for video. Connect to Latent Tail Guide and Append Continuation."),
+                io.Int.Output("overlap_audio_tokens", tooltip="Seam measurement for audio. Connect to Latent Tail Guide and Append Continuation."),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        previous_av_latent,
+        overlap_frames: int = 22,
+        extension_frames: int = 119,
+    ) -> io.NodeOutput:
+        previous_video, previous_audio, previous_frame_count = validate_h3_av_latent(
+            previous_av_latent, name="previous_av_latent"
+        )
+        layout = calculate_guided_continuation_layout(
+            previous_frame_count, int(overlap_frames), int(extension_frames)
+        )
+        target = assemble_guided_target(previous_video, previous_audio, layout)
+        return io.NodeOutput(
+            target,
+            layout.window_frame_count,
+            layout.overlap_video_t,
+            layout.overlap_audio_t,
+        )
+
+
+class UC_MiniMaxH3LatentTailGuide(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3LatentTailGuide",
+            display_name="MiniMax H3 Latent Tail Guide",
+            category="utils/sampling",
+            description=(
+                "Guides the beginning of the new clip using the ending of the previous clip "
+                "so characters, scene, and sound flow naturally without any VAE round trip."
+            ),
+            inputs=[
+                io.Conditioning.Input(
+                    "positive",
+                    tooltip="Positive prompt conditioning.",
+                ),
+                io.Latent.Input(
+                    "previous_av_latent",
+                    tooltip="The completed latent from your previous clip.",
+                ),
+                io.Latent.Input(
+                    "target_av_latent",
+                    tooltip="The fresh canvas from Guided Continuation Window.",
+                ),
+                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+            ],
+            outputs=[io.Conditioning.Output(display_name="positive", tooltip="Conditioning with seamless motion guidance attached.")],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        positive,
+        previous_av_latent,
+        target_av_latent,
+        overlap_video_tokens: int,
+        overlap_audio_tokens: int,
+    ) -> io.NodeOutput:
+        guided = apply_latent_tail_guide_to_conditioning(
+            positive,
+            previous_av_latent,
+            target_av_latent,
+            int(overlap_video_tokens),
+            int(overlap_audio_tokens),
+        )
+        return io.NodeOutput(guided)
+
+
+class UC_MiniMaxH3AppendContinuation(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3AppendContinuation",
+            display_name="MiniMax H3 Append Continuation",
+            category="utils/sampling",
+            description=(
+                "Cuts away the hidden seam from the newly sampled clip and joins the new "
+                "video and audio onto your growing video latent."
+            ),
+            inputs=[
+                io.Latent.Input(
+                    "previous_av_latent",
+                    tooltip="The completed latent before this clip was added.",
+                ),
+                io.Latent.Input(
+                    "sampled_window",
+                    tooltip="The output from your sampler.",
+                ),
+                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
+                io.Int.Input("transition_video_tokens", default=0, min=0, tooltip="Optional re-blended transition video tokens (0 discards the hidden seam completely)."),
+                io.Int.Input("transition_audio_tokens", default=0, min=0, tooltip="Optional re-blended transition audio tokens (0 discards the hidden seam completely)."),
+            ],
+            outputs=[
+                io.Latent.Output("latent", tooltip="The combined full-length video and audio latent."),
+                io.Int.Output("total_length", tooltip="Total frame count of the assembled video so far."),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        previous_av_latent,
+        sampled_window,
+        overlap_video_tokens: int,
+        overlap_audio_tokens: int,
+        transition_video_tokens: int = 0,
+        transition_audio_tokens: int = 0,
+    ) -> io.NodeOutput:
+        extended_latent, total_length = assemble_appended_continuation(
+            previous_av_latent,
+            sampled_window,
+            int(overlap_video_tokens),
+            int(overlap_audio_tokens),
+            int(transition_video_tokens),
+            int(transition_audio_tokens),
+        )
+        return io.NodeOutput(extended_latent, total_length)
+
+
 SAMPLING_NODES = [
     UC_H3LoopSampler,
     UC_H3RefVideoSegments,
     UC_SamplerDMADReNoise,
+    UC_MiniMaxH3GuidedContinuationWindow,
+    UC_MiniMaxH3LatentTailGuide,
+    UC_MiniMaxH3AppendContinuation,
 ]
 

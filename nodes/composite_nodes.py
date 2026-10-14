@@ -41,6 +41,7 @@ from ..helpers.composite_helpers import (
     crop_staged_layers_by_indices,
 )
 from ..helpers.background_replace_helpers import (
+    _apply_face_mask_options,
     _detect_largest_face_adaptive,
     _expanded_box,
     _largest_face,
@@ -1846,8 +1847,16 @@ class UC_MediaPipeFaceCompositeOptions(io.ComfyNode):
                     min=-MAX_RESOLUTION,
                     max=MAX_RESOLUTION,
                     step=1,
+                    tooltip="Pixels used to expand (positive) or contract (negative) the face mask. Automatically preserves nose and profile features based on distance to the nose landmark.",
                 ),
-                io.Int.Input("feather_radius", default=8, min=-512, max=512, step=1),
+                io.Int.Input(
+                    "feather_radius",
+                    default=8,
+                    min=-512,
+                    max=512,
+                    step=1,
+                    tooltip="Radius used to feather the face mask boundary. Automatically preserves crisp facial feature edges near the nose landmark.",
+                ),
                 io.Float.Input(
                     "source_warp_strength",
                     default=1.0,
@@ -1975,6 +1984,7 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         ring = _ordered_ring(face_detection_model.connection_sets["face_oval"])
 
         feature_indices = list(ring)
+        nose_indices = set()
         if hasattr(face_detection_model, "connection_sets") and isinstance(
             face_detection_model.connection_sets, dict
         ):
@@ -1990,6 +2000,9 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
                 connections = face_detection_model.connection_sets.get(part)
                 if connections:
                     for a, b in connections:
+                        if part == "nose":
+                            nose_indices.add(a)
+                            nose_indices.add(b)
                         if a not in feature_indices:
                             feature_indices.append(a)
                         if b not in feature_indices:
@@ -1999,6 +2012,11 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
             len(source_face["landmarks_xy"]), len(target_face["landmarks_xy"])
         )
         feature_indices = [idx for idx in feature_indices if idx < max_idx]
+        nose_indices = {idx for idx in nose_indices if idx < max_idx}
+        if not nose_indices:
+            for fallback_idx in (1, 4):
+                if fallback_idx < max_idx and fallback_idx in feature_indices:
+                    nose_indices.add(fallback_idx)
         oval_count = len([idx for idx in ring if idx < max_idx])
 
         source = source.to(target)
@@ -2088,12 +2106,16 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         else:
             warped_target = target_crop
 
-        opaque = _expand_mask(placed_oval, options["mask_expansion"]).clamp(0.0, 1.0)
-        inverted_foreground = 1.0 - placed_foreground
-        solid_foreground = ((placed_foreground - inverted_foreground) * 2.0).clamp(
-            0.0, 1.0
+        alpha = _apply_face_mask_options(
+            placed_oval,
+            placed_foreground,
+            options["mask_expansion"],
+            options["feather_radius"],
+            placed_source_points,
+            feature_indices,
+            nose_indices,
+            oval_count=oval_count,
         )
-        alpha = _feather_mask(opaque, options["feather_radius"]) * solid_foreground
         completed_crop = warped_target * (
             1.0 - alpha.unsqueeze(-1)
         ) + placed_source * alpha.unsqueeze(-1)

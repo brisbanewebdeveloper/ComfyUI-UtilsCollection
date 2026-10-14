@@ -1190,3 +1190,140 @@ def test_schema_nested_dynamic_combo_autogrow_order_and_registration_source(monk
     for source in ((CUSTOM_NODE_ROOT / "nodes" / "model_nodes.py").read_text(encoding="utf-8"), (CUSTOM_NODE_ROOT / "helpers" / "model_helpers.py").read_text(encoding="utf-8")):
         assert "reference/" not in source
         assert "add_object_patch" not in source
+
+
+def test_clip_continuation_auto_index_save_and_load(monkeypatch, tmp_path):
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+    prefix = "h3_clip_continuation/auto_test"
+
+    # 1. First run: nothing saved yet -> auto_index Load returns None
+    load_out = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.execute(
+        filename_prefix=prefix,
+        clip_index=0,
+        auto_index=True,
+    )
+    assert load_out.args[0] is None
+
+    # 2. First Save with auto_index: saves as clip 1
+    frames1 = torch.full((22, 8, 8, 3), 1.0)
+    save_out1 = utils_nodes.UC_MiniMaxH3ClipContinuationSave.execute(
+        frames1, tail_frames="22", filename_prefix=prefix, auto_index=True,
+    )
+    assert "00001.safetensors" in save_out1.args[0]
+
+    # 3. Second run: Load with auto_index loads clip 1
+    load_out1 = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.execute(
+        filename_prefix=prefix,
+        auto_index=True,
+    )
+    media1 = load_out1.args[0]
+    assert media1 is not None
+    torch.testing.assert_close(media1["frames"], frames1)
+
+    # 4. Second Save with auto_index: saves as clip 2
+    frames2 = torch.full((22, 8, 8, 3), 2.0)
+    save_out2 = utils_nodes.UC_MiniMaxH3ClipContinuationSave.execute(
+        frames2, tail_frames="22", filename_prefix=prefix, auto_index=True,
+    )
+    assert "00002.safetensors" in save_out2.args[0]
+
+    # 5. Third run: Load with auto_index loads clip 2
+    load_out2 = utils_nodes.UC_MiniMaxH3ClipContinuationLoad.execute(
+        filename_prefix=prefix,
+        auto_index=True,
+    )
+    media2 = load_out2.args[0]
+    assert media2 is not None
+    torch.testing.assert_close(media2["frames"], frames2)
+
+
+def test_clip_continuation_accumulate_list_node():
+    f1 = torch.zeros(10, 8, 8, 3)
+    f2 = torch.ones(10, 8, 8, 3)
+    f3 = torch.full((10, 8, 8, 3), 2.0)
+    a1 = {"waveform": torch.zeros(1, 1, 100), "sample_rate": 240}
+    a2 = {"waveform": torch.ones(1, 1, 100), "sample_rate": 240}
+    a3 = {"waveform": torch.full((1, 1, 100), 2.0), "sample_rate": 240}
+
+    out = utils_nodes.UC_MiniMaxH3ClipContinuationAccumulateList.execute(
+        images=[f1, f2, f3],
+        audio=[a1, a2, a3],
+        overlap_threshold=100.0,
+    )
+    out_images, out_audio = out.args
+    assert out_images.shape == (30, 8, 8, 3)
+    assert out_audio["waveform"].shape == (1, 1, 300)
+    assert out_audio["sample_rate"] == 240
+
+
+def test_concatenate_audio_list_and_batch_nodes():
+    # Audio 1: 44.1kHz mono (1 second)
+    a1 = {"waveform": torch.ones(1, 1, 44100), "sample_rate": 44100}
+    # Audio 2: 22.05kHz stereo (1 second)
+    a2 = {"waveform": torch.full((1, 2, 22050), 2.0), "sample_rate": 22050}
+
+    # Concatenate list
+    cat_out = utils_nodes.UC_ConcatenateAudioList.execute([a1, a2]).args[0]
+    assert cat_out is not None
+    assert cat_out["sample_rate"] == 44100
+    # Both expanded to stereo and resampled to 44.1kHz: 44100 + 44100 = 88200
+    assert cat_out["waveform"].shape == (1, 2, 88200)
+
+    # Batch list (padding shorter to longest)
+    a3 = {"waveform": torch.ones(1, 2, 1000), "sample_rate": 44100}
+    a4 = {"waveform": torch.ones(1, 2, 2000), "sample_rate": 44100}
+    batch_out = utils_nodes.UC_ListToAudioBatch.execute([a3, a4]).args[0]
+    assert batch_out["waveform"].shape == (2, 2, 2000)
+
+    # Batch to list
+    split_out = utils_nodes.UC_AudioBatchToList.execute(batch_out).args[0]
+    assert len(split_out) == 2
+    assert split_out[0]["waveform"].shape == (1, 2, 2000)
+    assert split_out[1]["waveform"].shape == (1, 2, 2000)
+
+
+def test_latent_motion_context_nodes():
+    from utils_collection_minimax_h3_refs_test.nodes import sampling_nodes
+    from comfy.nested_tensor import NestedTensor
+
+    # Create previous latent: 124 frames -> video_t = 37, audio_t = 207
+    prev_video = torch.zeros(1, 24, 37, 8, 8)
+    prev_audio = torch.zeros(1, 32, 2, 207)
+    previous_av = {"samples": NestedTensor((prev_video, prev_audio))}
+
+    # 1. Guided Continuation Window: overlap=22, extension=119 -> window=141 frames
+    win_out = sampling_nodes.UC_MiniMaxH3GuidedContinuationWindow.execute(
+        previous_av, overlap_frames=22, extension_frames=119,
+    )
+    target_latent, win_len, ov_v, ov_a = win_out.args
+    assert win_len == 141
+    assert ov_v == 7  # video_latent_t(22) = 7
+    assert ov_a == 37  # h3_audio_t_at_frame_boundary(124) - h3_audio_t_at_frame_boundary(102) = 207 - 170 = 37
+    t_video, t_audio = target_latent["samples"].tensors
+    assert t_video.shape == (1, 24, 42, 8, 8)  # 7 overlap + 35 new = 42
+
+    # 2. Latent Tail Guide: adds keyframe guide at frame 0
+    pos_cond = [[torch.zeros(1, 77, 4096), {}]]
+    guided_pos = sampling_nodes.UC_MiniMaxH3LatentTailGuide.execute(
+        pos_cond, previous_av, target_latent, ov_v, ov_a,
+    ).args[0]
+    keyframes = guided_pos[0][1]["minimax_keyframes"]
+    assert len(keyframes) == 1
+    assert keyframes[0]["resolved_frame_index"] == 0
+    assert keyframes[0]["latent"].shape == (1, 24, 7, 8, 8)
+
+    # 3. Append Continuation: trims overlap and appends new tokens
+    # Simulated sampled window with 42 video tokens, 235 audio tokens
+    sampled_window = {
+        "samples": NestedTensor((
+            torch.ones(1, 24, 42, 8, 8),
+            torch.ones(1, 32, 2, 235),
+        ))
+    }
+    appended, total_len = sampling_nodes.UC_MiniMaxH3AppendContinuation.execute(
+        previous_av, sampled_window, ov_v, ov_a,
+    ).args
+    assert total_len == 124 + 119  # 243 frames
+    ext_v, ext_a = appended["samples"].tensors
+    assert ext_v.shape == (1, 24, 37 + 35, 8, 8)  # 72 video tokens
+

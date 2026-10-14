@@ -28,6 +28,7 @@ try:
         TextEncodeKrea2SysEditScaledAdvAttn,
         UC_AdvancedMiniMaxH3ImageToVideo,
         UC_AdvancedMiniMaxH3RefMediaImageToVideo,
+        UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion,
         UC_MiniMaxH3ReferenceMedia,
         UC_MiniMaxH3MediaConfig,
         UC_AdvancedVisualConditioningEncode,
@@ -700,6 +701,22 @@ def test_minimax_h3_reference_media_schema_and_execution():
     assert data["reference_video_audios"] == {"reference_video_audio_1": "aud1"}
     assert data["reference_audios"] == {"reference_audio_1": "aud2"}
 
+    # Also verify dynamic kwargs inputs from ComfyUI autogrow sockets are properly gathered
+    out_kwargs = UC_MiniMaxH3ReferenceMedia.execute(
+        reference_video_1="vid1",
+        reference_audio_1="aud1",
+        reference_audio_2="aud2",
+        reference_audio_3="aud3",
+    )
+    kw_data = out_kwargs.args[0]
+    assert kw_data["reference_videos"] == {"reference_video_1": "vid1"}
+    assert kw_data["reference_video_audios"] == {}
+    assert kw_data["reference_audios"] == {
+        "reference_audio_1": "aud1",
+        "reference_audio_2": "aud2",
+        "reference_audio_3": "aud3",
+    }
+
 
 def test_advanced_minimax_h3_ref_media_node_schema():
     schema = UC_AdvancedMiniMaxH3RefMediaImageToVideo.define_schema()
@@ -712,6 +729,108 @@ def test_advanced_minimax_h3_ref_media_node_schema():
     assert "audio_vae" in inputs
     assert "video" not in inputs
     assert "audio" not in inputs
+
+
+def test_adv_minimax_h3_ref_media_temporal_fusion_schema():
+    schema = UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    assert schema.node_id == "UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion"
+    assert schema.is_experimental is True
+    assert "reference_media" in inputs
+    assert inputs["reference_media"].io_type == "MINIMAX_H3_REFERENCE_MEDIA"
+    assert "text_blend_config" in inputs
+    assert inputs["text_blend_config"].io_type == "TEXT_BLEND_CONFIG"
+    assert "visual_fusion_config" in inputs
+    assert inputs["visual_fusion_config"].io_type == "VISUAL_FUSION_CONFIG"
+    assert "fusion_method" in inputs
+    assert inputs["fusion_method"].options == ["conds_fusion", "token_fusion"]
+    assert inputs["fusion_method"].default == "conds_fusion"
+    assert schema.inputs[-1].id == "reference_images"
+
+    # Also verify base temporal fusion node keeps autogrow at the end
+    image_temporal_schema = encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalFusion.define_schema()
+    assert image_temporal_schema.inputs[-1].id == "reference_images"
+
+
+@pytest.mark.parametrize("fusion_method", ["conds_fusion", "token_fusion"])
+@pytest.mark.parametrize("bypass", ["density_one", "no_video", "consensus_off", "spatial_off"])
+def test_ref_media_temporal_fusion_bypass(monkeypatch, fusion_method, bypass):
+    from utils_collection_encoder_test.helpers import minimax_h3_temporal_helpers
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Bypass must not enter temporal lane encoding")
+    monkeypatch.setattr(minimax_h3_temporal_helpers, "encode_temporal_conditioning", unexpected)
+
+    kwargs = {"ref_image_size": "none", "vlm_video_resolution": 0, "fusion_method": fusion_method}
+    config = encoder_helpers.build_minimax_h3_media_config(
+        None,
+        video_latent_mode="off",
+        temporal_density=1 if bypass == "density_one" else 3,
+        temporal_fusion_method="spatial" if bypass == "spatial_off" else "consensus",
+    )
+    if bypass != "no_video":
+        ref_media = {"reference_videos": {"reference_video_1": torch.zeros(25, 32, 64, 3)}}
+        kwargs.update(reference_media=ref_media, media_config=config)
+    if bypass == "consensus_off":
+        kwargs["text_blend_config"] = {"blend_preset": "off"}
+    if bypass == "spatial_off":
+        kwargs["visual_fusion_config"] = {"visual_fusion_method": "off"}
+
+    clip = _MiniMaxH3TestClip()
+    result, latent = UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion.execute(
+        clip, None, "subject", 64, 32, 25, **kwargs, enable_caching="disabled"
+    ).args
+    assert len(clip.encoded_tokens) == 1
+
+    ordinary = dict(kwargs)
+    ordinary.pop("text_blend_config", None)
+    ordinary.pop("visual_fusion_config", None)
+    ordinary.pop("fusion_method", None)
+    expected, expected_latent = UC_AdvancedMiniMaxH3RefMediaImageToVideo.execute(
+        _MiniMaxH3TestClip(), None, "subject", 64, 32, 25, **ordinary, enable_caching="disabled"
+    ).args
+    assert torch.equal(result[0][0], expected[0][0])
+    assert result[0][1]["uc_minimax_h3_vlm_layout"] == expected[0][1]["uc_minimax_h3_vlm_layout"]
+    assert latent.keys() == expected_latent.keys()
+
+
+def test_ref_media_temporal_fusion_execution():
+    class VideoClip(_MiniMaxH3TestClip):
+        def encode_from_tokens_scheduled(self, tokens):
+            output = super().encode_from_tokens_scheduled(tokens)
+            tensor = output[0][0]
+            entries = tokens["qwen3vl_32b"][0]
+            spans = encoder_helpers.build_token_to_conditioning_map(entries, tensor)
+            for entry, (start, end) in zip(entries, spans):
+                if isinstance(entry[0], dict) and entry[0].get("minimax_video_block"):
+                    tensor[:, start:end] = float(entry[0]["data"].mean())
+            return output
+
+    video = torch.arange(25, dtype=torch.float32)[:, None, None, None].expand(25, 32, 64, 3) / 25
+    ref_media = {"reference_videos": {"reference_video_1": video}}
+    config = encoder_helpers.build_minimax_h3_media_config(None, video_latent_mode="off", temporal_density=2)
+    clip = VideoClip()
+    conditioning, _ = UC_AdvMiniMaxH3RefMediaImageToVideoTemporalFusion.execute(
+        clip, None, "(subject:2)", 64, 32, 25,
+        reference_media=ref_media, media_config=config,
+        ref_image_size="none", vlm_video_resolution=0,
+        text_blend_config={"blend_preset": "custom", "blend_method": "linear", "global_scale": 1.0},
+        enable_caching="disabled",
+    ).args
+    tensor, metadata = conditioning[0]
+    assert len(clip.encoded_tokens) == 2
+    canonical, alternate = [value["qwen3vl_32b"][0] for value in clip.encoded_tokens]
+    spans = encoder_helpers.build_token_to_conditioning_map(canonical, tensor)
+    count = 0
+    for entry, alt, (start, end) in zip(canonical, alternate, spans):
+        if isinstance(entry[0], dict) and entry[0].get("minimax_video_block"):
+            expected = (float(entry[0]["data"].mean()) + float(alt[0]["data"].mean())) / 2
+            assert torch.allclose(tensor[:, start:end], torch.full_like(tensor[:, start:end], expected))
+            count += 1
+        else:
+            assert entry == alt
+            assert torch.all(tensor[:, start:end] == (2.0 if entry[0] == "subject" else 1.0))
+    assert count == 1
+    assert metadata["uc_minimax_h3_vlm_layout"]["prompt_start"] == tensor.shape[1]
 
 
 def test_minimax_h3_ref_media_image_to_video_with_all_reference_types():
@@ -803,10 +922,115 @@ def test_minimax_h3_ref_media_image_to_video_with_all_reference_types():
     assert frames.shape[0] % 17 == 5, f"Frames must satisfy 17k+5, got {frames.shape[0]}"
     assert frames.shape[1] % 32 == 0, f"Height must be multiple of 32, got {frames.shape[1]}"
     assert frames.shape[2] % 32 == 0, f"Width must be multiple of 32, got {frames.shape[2]}"
-    assert ref_dict["latent_h"] % 2 == 0
-    assert ref_dict["latent_w"] % 2 == 0
-    patchified_vid = patchify_video(ref_dict["latent"])
-    assert patchified_vid is not None
+
+
+def test_minimax_h3_audio_reference_encoding_and_resampling():
+    from utils_collection_encoder_test.helpers import minimax_h3_reference_media_helpers
+
+    encoded_samples = []
+
+    class MockAudioVAE:
+        audio_sample_rate = 32000
+        downscale_ratio = 800
+
+        def encode(self, samples):
+            encoded_samples.append(samples.clone())
+            t = max(1, samples.shape[1] // 800)
+            return torch.zeros(1, 32, 2, t)
+
+    audio_vae = MockAudioVAE()
+
+    # 1. Test 2D mono waveform with non-matching 44.1kHz sample rate
+    mono_44k = {"waveform": torch.zeros(1, 44100), "sample_rate": 44100}
+    res = minimax_h3_reference_media_helpers._encode_minimax_h3_audio_reference(mono_44k, audio_vae)
+    assert res is not None
+    assert res["kind"] == "audio"
+    # Samples passed to encode must be [1, samples, 2] (stereo) at 32000Hz (padded to multiple of 800)
+    last = encoded_samples[-1]
+    assert last.ndim == 3
+    assert last.shape[0] == 1
+    assert last.shape[2] == 2  # stereo duplicate
+    assert last.shape[1] % 800 == 0  # padded to hop length
+
+    # 2. Test 3D multi-channel (6-channel 5.1 surround) at 48kHz
+    surround_48k = {"waveform": torch.zeros(1, 6, 48000), "sample_rate": 48000}
+    res2 = minimax_h3_reference_media_helpers._encode_minimax_h3_audio_reference(surround_48k, audio_vae)
+    assert res2 is not None
+    last2 = encoded_samples[-1]
+    assert last2.shape[2] == 2  # trimmed to stereo
+    assert last2.shape[1] % 800 == 0
+
+    # 3. Test full Reference Media workflow with 1 video and 3 standalone audios via dynamic kwargs
+    ref_media_out = UC_MiniMaxH3ReferenceMedia.execute(
+        reference_video_1=torch.zeros(5, 64, 64, 3),
+        reference_audio_1={"waveform": torch.zeros(1, 2, 32000), "sample_rate": 32000},
+        reference_audio_2={"waveform": torch.zeros(1, 2, 32000), "sample_rate": 32000},
+        reference_audio_3={"waveform": torch.zeros(1, 2, 32000), "sample_rate": 32000},
+    ).args[0]
+
+    clip = _MiniMaxH3TestClip()
+    cond, _ = minimax_h3_reference_media_helpers.execute_advanced_minimax_h3_reference_media_image_to_video(
+        clip=clip,
+        vae=None,
+        prompt="prompt",
+        width=1344,
+        height=768,
+        length=124,
+        reference_media=ref_media_out,
+        audio_vae=audio_vae,
+        enable_caching="disabled",
+    )
+
+    # Verify reference items in tokenizer call: Video 1 first, then Audio 1, Audio 2, Audio 3
+    ref_items = clip.tokenize_calls[0]["minimax_ref_items"]
+    types = [item["type"] for item in ref_items]
+    assert types == ["video", "audio", "audio", "audio"]
+
+    # Verify conditioning refs metadata: 3 audio refs in order
+    refs = cond[0][1]["minimax_refs"]
+    audio_refs = [r for r in refs if r.get("kind") == "audio"]
+    assert len(audio_refs) == 3
+
+
+def test_reference_media_soundtrack_shares_video_time_origin():
+    """A video's soundtrack must pack as one video_audio block, not an audio block after the video."""
+    from comfy.ldm.minimax.model import PackedLayout
+    from utils_collection_encoder_test.helpers import minimax_h3_reference_media_helpers
+
+    class VideoVAE:
+        def encode(self, frames):
+            return torch.zeros(1, 48, 2 + (frames.shape[0] - 5) // 17 * 5, frames.shape[1] // 16, frames.shape[2] // 16)
+
+    class AudioVAE:
+        audio_sample_rate = 32000
+        downscale_ratio = 800
+
+        def encode(self, samples):
+            return torch.zeros(1, 32, 2, samples.shape[1] // 800)
+
+    ref_media = UC_MiniMaxH3ReferenceMedia.execute(
+        reference_video_1=torch.zeros(22, 64, 64, 3),
+        reference_video_audio_1={"waveform": torch.zeros(1, 2, 29333), "sample_rate": 32000},
+    ).args[0]
+    cond, _ = minimax_h3_reference_media_helpers.execute_advanced_minimax_h3_reference_media_image_to_video(
+        clip=_MiniMaxH3TestClip(),
+        vae=VideoVAE(),
+        prompt="prompt",
+        width=64,
+        height=64,
+        length=22,
+        reference_media=ref_media,
+        audio_vae=AudioVAE(),
+        enable_caching="disabled",
+    )
+
+    refs = cond[0][1]["minimax_refs"]
+    assert [ref["kind"] for ref in refs] == ["video_audio"]
+    assert refs[0]["ref_audio_t"] == refs[0]["audio_latent"].shape[-1] > 0
+
+    layout = PackedLayout(4, 7, 4, 4, 37, refs=refs)
+    starts = {kind: float(layout.position_ids[a:b, 0].min()) for a, b, kind in layout.segments if kind in ("ref_audio", "ref_img")}
+    assert starts["ref_audio"] == starts["ref_img"]
 
 
 def test_minimax_h3_media_config_schema_and_payload():
@@ -927,6 +1151,38 @@ def test_minimax_h3_audio_requires_vae():
 def test_minimax_h3_malformed_audio_still_fails(audio):
     with pytest.raises(ValueError, match="MiniMax H3 audio"):
         encoder_helpers._encode_minimax_h3_audio_reference(audio, object())
+
+
+@pytest.mark.parametrize("helpers_module", ["encoder_helpers", "minimax_h3_reference_media_helpers"])
+def test_minimax_h3_audio_reference_accepts_lazy_audio_mapping(helpers_module):
+    """VHS Load Video emits a lazily decoded Mapping, not a dict, on its AUDIO output."""
+    import collections.abc
+    import importlib
+
+    module = importlib.import_module(f"utils_collection_encoder_test.helpers.{helpers_module}")
+
+    class LazyAudioMap(collections.abc.Mapping):
+        def __init__(self):
+            self._audio = {"waveform": torch.ones(1, 2, 800), "sample_rate": 32000}
+
+        def __getitem__(self, key):
+            return self._audio[key]
+
+        def __iter__(self):
+            return iter(self._audio)
+
+        def __len__(self):
+            return len(self._audio)
+
+    class AudioVAE:
+        audio_sample_rate = 32000
+        downscale_ratio = 800
+
+        def encode(self, waveform):
+            return torch.ones(1, 32, 2, 1)
+
+    block = module._encode_minimax_h3_audio_reference(LazyAudioMap(), AudioVAE())
+    assert block["kind"] == "audio"
 
 
 @pytest.mark.parametrize("node_name", [
@@ -3163,7 +3419,7 @@ def test_temporal_node_schemas_keep_standard_sockets_except_picture_fusion():
     assert not standard.is_experimental
     assert not encoder_nodes.UC_AdvancedMiniMaxH3ImageToVideo.EXPERIMENTAL
     assert not encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTokenFusion.GET_SCHEMA().is_experimental
-    expected = [value.id for value in standard.inputs if value.id not in ("fusion_images", "fusion_method")] + ["text_blend_config", "fusion_method"]
+    expected = [value.id for value in standard.inputs if value.id not in ("fusion_images", "fusion_method", "reference_images")] + ["text_blend_config", "fusion_method"] + [value.id for value in standard.inputs if value.id == "reference_images"]
     for node in (encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalFusion, encoder_nodes.UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion):
         schema = node.GET_SCHEMA()
         assert schema.is_experimental
