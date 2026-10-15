@@ -28,7 +28,9 @@ except ImportError:
 
 import comfy.lora
 import comfy.ldm.common_dit
+from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.ideogram4 import model as ideogram4_model
+from comfy.ldm.krea2 import model as krea2_model
 import comfy.ldm.modules.attention
 import comfy.model_management
 import comfy.model_patcher
@@ -59,6 +61,13 @@ MINIMAX_H3_VISION_END = 151653
 IDEOGRAM4_DEBANNER_WRAPPER_KEY = "utilscollection_ideogram4_debanner"
 IDEOGRAM4_DEBANNER_STATE_KEY = "utilscollection_ideogram4_debanner_state"
 IDEOGRAM4_DEBANNER_BUNDLE = Path(__file__).resolve().parent.parent / "models" / "ideogram4_correction_v1.safetensors"
+KREA2_NAG_DIFFUSION_WRAPPER_KEY = "utilscollection_krea2_nag_diffusion"
+KREA2_NAG_CALC_COND_WRAPPER_KEY = "utilscollection_krea2_nag_calc_cond"
+KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY = "utilscollection_krea2_nag_predict_noise"
+KREA2_NAG_STATE_KEY = "utilscollection_krea2_nag_state"
+KREA2_NAG_NEG_CONTEXT_KEY = "utilscollection_krea2_nag_neg_context"
+KREA2_NAG_CFG_SCALE_KEY = "utilscollection_krea2_nag_cfg_scale"
+KREA2_NAG_ATTN_STEP_KEY = "utilscollection_krea2_nag_attn_step"
 
 
 def _register_minimax_h3_projection_folder() -> None:
@@ -2563,3 +2572,398 @@ def patch_ideogram4_debanner_model(model: Any, directions: dict[int, torch.Tenso
 
 def patch_ideogram4_debanner(model: Any, strength: float) -> Any:
     return patch_ideogram4_debanner_model(model, load_ideogram4_debanner_directions(), strength)
+
+
+def apply_nag_guidance(
+    z_pos: torch.Tensor,
+    z_neg: torch.Tensor,
+    nag_scale: float,
+    nag_tau: float,
+    nag_alpha: float,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    z_pos_f = z_pos.float()
+    z_neg_f = z_neg.float()
+    guided = z_pos_f * nag_scale - z_neg_f * (nag_scale - 1.0)
+    norm_pos = torch.linalg.vector_norm(z_pos_f, ord=1, dim=-1, keepdim=True).clamp_min(eps)
+    norm_guided = torch.linalg.vector_norm(guided, ord=1, dim=-1, keepdim=True).clamp_min(eps)
+    ratio = norm_guided / norm_pos
+    scale_factor = torch.clamp(ratio, max=nag_tau) / ratio
+    guided_normalized = guided * scale_factor
+    z_final = guided_normalized * nag_alpha + z_pos_f * (1.0 - nag_alpha)
+    return z_final.to(dtype=z_pos.dtype)
+
+
+def _extract_krea2_cross_attn(cond_source: Any) -> torch.Tensor | None:
+    if torch.is_tensor(cond_source):
+        return cond_source
+    if isinstance(cond_source, Sequence) and len(cond_source) > 0:
+        first = cond_source[0]
+        if isinstance(first, (list, tuple)) and len(first) > 0 and torch.is_tensor(first[0]):
+            return first[0]
+        if isinstance(first, dict):
+            model_conds = first.get("model_conds")
+            if isinstance(model_conds, dict) and "c_crossattn" in model_conds:
+                c_ca = model_conds["c_crossattn"]
+                tensor = getattr(c_ca, "cond", c_ca)
+                if torch.is_tensor(tensor):
+                    return tensor
+            if torch.is_tensor(first.get("cross_attn")):
+                return first["cross_attn"]
+            if torch.is_tensor(first.get("c_crossattn")):
+                return first["c_crossattn"]
+    return None
+
+
+def _is_krea2_nag_sigma_active(
+    sigma_source: Any,
+    sigma_window: tuple[float, float] | None,
+) -> bool:
+    if sigma_window is None or sigma_source is None:
+        return True
+    sigma_start, sigma_end = sigma_window
+    if torch.is_tensor(sigma_source):
+        if sigma_source.numel() == 0:
+            return True
+        sigma_val = float(sigma_source.reshape(-1)[0].detach().cpu().item())
+    elif isinstance(sigma_source, Sequence) and len(sigma_source) > 0:
+        first = sigma_source[0]
+        sigma_val = float(first.detach().cpu().item()) if torch.is_tensor(first) else float(first)
+    else:
+        sigma_val = float(sigma_source)
+    return (sigma_end - 1e-5) <= sigma_val <= (sigma_start + 1e-5)
+
+
+def _krea2_nag_post_input_patch(args: dict[str, Any]) -> dict[str, Any]:
+    transformer_options = args["transformer_options"]
+    state = transformer_options.get(KREA2_NAG_STATE_KEY)
+    if state is None:
+        return args
+
+    dit = state["dit"]
+    img = args["img"]
+    context = args["txt"]
+    imgpos = args["img_ids"]
+    txtpos = args["txt_ids"]
+    bs = context.shape[0]
+
+    neg_context = state["neg_context"]
+    neg_context = comfy.model_management.cast_to_device(neg_context, context.device, context.dtype)
+    neg_context = comfy.utils.repeat_to_batch_size(neg_context, bs)
+    neg_unpacked = dit._unpack_context(neg_context)
+    txt_neg = dit.txtfusion(neg_unpacked, mask=None, transformer_options=transformer_options)
+    txt_neg = dit.txtmlp(txt_neg)
+
+    l_pos = context.shape[1]
+    l_neg = txt_neg.shape[1]
+    ref_num_tokens = transformer_options.get("reference_image_num_tokens")
+    ref_total = sum(ref_num_tokens) if ref_num_tokens else 0
+    img_tokens = img.shape[1] - ref_total
+
+    txtpos_neg = torch.zeros(bs, l_neg, 3, device=imgpos.device, dtype=imgpos.dtype)
+    if ref_total > 0:
+        img = torch.cat((img[:, :img_tokens], txt_neg, img[:, img_tokens:]), dim=1)
+        imgpos = torch.cat((imgpos[:, :img_tokens], txtpos_neg, imgpos[:, img_tokens:]), dim=1)
+    else:
+        img = torch.cat((img, txt_neg), dim=1)
+        imgpos = torch.cat((imgpos, txtpos_neg), dim=1)
+
+    state["l_pos"] = l_pos
+    state["img_tokens"] = img_tokens
+    state["l_neg"] = l_neg
+    state["ref_total"] = ref_total
+    return {
+        "img": img,
+        "txt": context,
+        "img_ids": imgpos,
+        "txt_ids": txtpos,
+        "transformer_options": transformer_options,
+    }
+
+
+def _krea2_nag_attn1_patch(q, k, v, pe=None, attn_mask=None, extra_options=None):
+    if extra_options is None:
+        return {"q": q, "k": k, "v": v, "pe": pe, "attn_mask": attn_mask}
+    state = extra_options.get(KREA2_NAG_STATE_KEY)
+    if state is None or "l_neg" not in state:
+        return {"q": q, "k": k, "v": v, "pe": pe, "attn_mask": attn_mask}
+
+    if pe is not None:
+        q, k = apply_rope(q, k, pe)
+
+    l_pos = state["l_pos"]
+    img_tokens = state["img_tokens"]
+    l_neg = state["l_neg"]
+    ref_total = state["ref_total"]
+    neg_start = l_pos + img_tokens
+    neg_end = neg_start + l_neg
+
+    if ref_total > 0:
+        q_pos = torch.cat((q[:, :, :neg_start, :], q[:, :, neg_end:, :]), dim=2)
+        k_pos = torch.cat((k[:, :, :neg_start, :], k[:, :, neg_end:, :]), dim=2)
+        v_pos = torch.cat((v[:, :, :neg_start, :], v[:, :, neg_end:, :]), dim=2)
+        q_neg = torch.cat((q[:, :, neg_start:neg_end, :], q[:, :, l_pos:neg_start, :], q[:, :, neg_end:, :]), dim=2)
+        k_neg = torch.cat((k[:, :, neg_start:neg_end, :], k[:, :, l_pos:neg_start, :], k[:, :, neg_end:, :]), dim=2)
+        v_neg = torch.cat((v[:, :, neg_start:neg_end, :], v[:, :, l_pos:neg_start, :], v[:, :, neg_end:, :]), dim=2)
+    else:
+        q_pos = q[:, :, :neg_start, :]
+        k_pos = k[:, :, :neg_start, :]
+        v_pos = v[:, :, :neg_start, :]
+        q_neg = torch.cat((q[:, :, neg_start:, :], q[:, :, l_pos:neg_start, :]), dim=2)
+        k_neg = torch.cat((k[:, :, neg_start:, :], k[:, :, l_pos:neg_start, :]), dim=2)
+        v_neg = torch.cat((v[:, :, neg_start:, :], v[:, :, l_pos:neg_start, :]), dim=2)
+
+    extra_options[KREA2_NAG_ATTN_STEP_KEY] = (q_neg, k_neg, v_neg, attn_mask)
+    return {"q": q_pos, "k": k_pos, "v": v_pos, "pe": None, "attn_mask": attn_mask}
+
+
+def _krea2_nag_attn1_output_patch(out_pos, extra_options):
+    if extra_options is None:
+        return out_pos
+    step_tensors = extra_options.pop(KREA2_NAG_ATTN_STEP_KEY, None)
+    state = extra_options.get(KREA2_NAG_STATE_KEY)
+    if step_tensors is None or state is None:
+        return out_pos
+
+    q_neg, k_neg, v_neg, attn_mask = step_tensors
+    heads = q_neg.shape[1]
+    if k_neg.shape[1] != heads:
+        rep = heads // k_neg.shape[1]
+        k_neg = k_neg.repeat_interleave(rep, dim=1)
+        v_neg = v_neg.repeat_interleave(rep, dim=1)
+
+    dit = state["dit"]
+    block_index = extra_options.get("block_index", 0)
+    preferred_attention = None
+    if hasattr(dit, "blocks") and block_index < len(dit.blocks):
+        preferred_attention = getattr(dit.blocks[block_index].attn, "comfy_attention", None)
+
+    q_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(q_neg)
+    k_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(k_neg)
+    v_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(v_neg)
+    out_neg = comfy.ldm.modules.attention.optimized_attention_masked(
+        q_neg_c,
+        k_neg_c,
+        v_neg_c,
+        heads,
+        mask=attn_mask,
+        skip_reshape=True,
+        preferred_attention=preferred_attention,
+        transformer_options=extra_options,
+    )
+
+    l_pos = state["l_pos"]
+    img_tokens = state["img_tokens"]
+    l_neg = state["l_neg"]
+    ref_total = state["ref_total"]
+
+    z_img_pos = out_pos[:, l_pos : l_pos + img_tokens, :]
+    z_img_neg = out_neg[:, l_neg : l_neg + img_tokens, :]
+    z_img_nag = apply_nag_guidance(
+        z_img_pos,
+        z_img_neg,
+        nag_scale=state["nag_scale"],
+        nag_tau=state["nag_tau"],
+        nag_alpha=state["nag_alpha"],
+    )
+
+    if ref_total > 0:
+        return torch.cat(
+            (
+                out_pos[:, :l_pos, :],
+                z_img_nag,
+                out_neg[:, :l_neg, :],
+                out_pos[:, l_pos + img_tokens :, :],
+            ),
+            dim=1,
+        )
+    return torch.cat((out_pos[:, :l_pos, :], z_img_nag, out_neg[:, :l_neg, :]), dim=1)
+
+
+_krea2_nag_post_input_patch._uc_krea2_nag_patch = True
+_krea2_nag_attn1_patch._uc_krea2_nag_patch = True
+_krea2_nag_attn1_output_patch._uc_krea2_nag_patch = True
+
+
+def _make_krea2_nag_block_forward(original: Callable[..., torch.Tensor]):
+    def forward(self, x, vec, freqs, mask=None, timestep_zero_index=None, transformer_options={}):
+        if timestep_zero_index is not None:
+            state = transformer_options.get(KREA2_NAG_STATE_KEY)
+            if state is not None and "l_neg" in state:
+                timestep_zero_index = timestep_zero_index + state["l_neg"]
+        return original(
+            x,
+            vec,
+            freqs,
+            mask=mask,
+            timestep_zero_index=timestep_zero_index,
+            transformer_options=transformer_options,
+        )
+
+    return forward
+
+
+def _make_krea2_nag_diffusion_wrapper(
+    nag_scale: float,
+    nag_tau: float,
+    nag_alpha: float,
+    sigma_window: tuple[float, float] | None,
+    explicit_neg_context: torch.Tensor | None,
+):
+    def wrapper(executor, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
+        options = {} if transformer_options is None else dict(transformer_options)
+        options.pop(KREA2_NAG_STATE_KEY, None)
+
+        cond_or_uncond = options.get("cond_or_uncond")
+        if cond_or_uncond is not None and 0 not in cond_or_uncond:
+            return executor(x, timesteps, context, attention_mask, ref_latents, options, **kwargs)
+
+        neg_context = options.get(KREA2_NAG_NEG_CONTEXT_KEY, explicit_neg_context)
+        sigma_source = options.get("sigmas", timesteps)
+        if neg_context is not None and context is not None and _is_krea2_nag_sigma_active(sigma_source, sigma_window):
+            options[KREA2_NAG_STATE_KEY] = {
+                "dit": executor.class_obj,
+                "neg_context": neg_context,
+                "nag_scale": nag_scale,
+                "nag_tau": nag_tau,
+                "nag_alpha": nag_alpha,
+            }
+        return executor(x, timesteps, context, attention_mask, ref_latents, options, **kwargs)
+
+    return wrapper
+
+
+def _make_krea2_nag_predict_noise_wrapper():
+    def wrapper(executor, x, timestep, model_options={}, seed=None):
+        guider = executor.class_obj
+        cfg = getattr(guider, "cfg", None)
+        options = comfy.model_patcher.create_model_options_clone(model_options)
+        options.setdefault("transformer_options", {})[KREA2_NAG_CFG_SCALE_KEY] = cfg
+        return executor(x, timestep, options, seed)
+
+    return wrapper
+
+
+def _make_krea2_nag_calc_cond_batch_wrapper(
+    sigma_window: tuple[float, float] | None,
+    explicit_neg_context: torch.Tensor | None,
+):
+    def wrapper(executor, model, conds, x_in, timestep, model_options):
+        if not conds or conds[0] is None:
+            return executor(model, conds, x_in, timestep, model_options)
+
+        uncond = conds[1] if len(conds) > 1 else None
+        neg_context = explicit_neg_context if explicit_neg_context is not None else _extract_krea2_cross_attn(uncond)
+        active = neg_context is not None and _is_krea2_nag_sigma_active(timestep, sigma_window)
+
+        transformer_options = model_options.get("transformer_options", {})
+        cfg = transformer_options.get(KREA2_NAG_CFG_SCALE_KEY)
+        has_custom_cfg = (
+            "sampler_cfg_function" in model_options
+            or bool(model_options.get("sampler_pre_cfg_function"))
+            or bool(model_options.get("sampler_post_cfg_function"))
+        )
+        skip_uncond = cfg is not None and math.isclose(float(cfg), 1.0) and not has_custom_cfg
+
+        if not active:
+            if skip_uncond and uncond is not None:
+                return executor(model, [conds[0], None], x_in, timestep, model_options)
+            return executor(model, conds, x_in, timestep, model_options)
+
+        pos_options = comfy.model_patcher.create_model_options_clone(model_options)
+        pos_options.setdefault("transformer_options", {})[KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+
+        if uncond is None or skip_uncond:
+            conds_to_run = [conds[0], None] if len(conds) > 1 else [conds[0]]
+            return executor(model, conds_to_run, x_in, timestep, pos_options)
+
+        out_pos = executor(model, [conds[0], None], x_in, timestep, pos_options)[0]
+        out_neg = executor(model, [None, uncond], x_in, timestep, model_options)[1]
+        return [out_pos, out_neg]
+
+    return wrapper
+
+
+def patch_krea2_nag_model(
+    model: Any,
+    nag_scale: float = 5.0,
+    nag_tau: float = 2.5,
+    nag_alpha: float = 0.25,
+    start_percent: float = 0.0,
+    end_percent: float = 1.0,
+    nag_negative: Any = None,
+) -> Any:
+    nag_scale = float(nag_scale)
+    nag_tau = float(nag_tau)
+    nag_alpha = float(nag_alpha)
+    start_percent = float(start_percent)
+    end_percent = float(end_percent)
+
+    if nag_scale < 0.0:
+        raise ValueError("Krea2 NAG scale must be nonnegative.")
+    if nag_tau <= 0.0:
+        raise ValueError("Krea2 NAG tau must be positive.")
+    if not 0.0 <= nag_alpha <= 1.0:
+        raise ValueError("Krea2 NAG alpha must be between 0.0 and 1.0.")
+    if not 0.0 <= start_percent <= 1.0 or not 0.0 <= end_percent <= 1.0:
+        raise ValueError("Krea2 NAG start_percent and end_percent must be between 0.0 and 1.0.")
+
+    diffusion_model = model.get_model_object("diffusion_model")
+    if not isinstance(diffusion_model, krea2_model.SingleStreamDiT):
+        raise ValueError("Krea2 NAG requires a Krea2 SingleStreamDiT diffusion model.")
+
+    explicit_neg_context = None
+    if nag_negative is not None:
+        explicit_neg_context = _extract_krea2_cross_attn(nag_negative)
+        if explicit_neg_context is None:
+            raise ValueError("Krea2 NAG nag_negative must contain a valid conditioning tensor.")
+
+    patched = model.clone()
+    if nag_alpha == 0.0 or nag_scale <= 1.0 or start_percent >= end_percent:
+        return patched
+
+    sigma_window: tuple[float, float] | None = None
+    if start_percent > 0.0 or end_percent < 1.0:
+        model_sampling = patched.get_model_object("model_sampling")
+        if model_sampling is not None:
+            sigma_window = (
+                float(model_sampling.percent_to_sigma(start_percent)),
+                float(model_sampling.percent_to_sigma(end_percent)),
+            )
+
+    patches = patched.model_options.setdefault("transformer_options", {}).setdefault("patches", {})
+    for patch_name in ("post_input", "attn1_patch", "attn1_output_patch"):
+        if patch_name in patches:
+            patches[patch_name] = [
+                fn for fn in patches[patch_name] if not getattr(fn, "_uc_krea2_nag_patch", False)
+            ]
+
+    patched.set_model_post_input_patch(_krea2_nag_post_input_patch)
+    patched.set_model_attn1_patch(_krea2_nag_attn1_patch)
+    patched.set_model_attn1_output_patch(_krea2_nag_attn1_output_patch)
+
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+        KREA2_NAG_DIFFUSION_WRAPPER_KEY,
+        _make_krea2_nag_diffusion_wrapper(nag_scale, nag_tau, nag_alpha, sigma_window, explicit_neg_context),
+    )
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.PREDICT_NOISE,
+        KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY,
+        _make_krea2_nag_predict_noise_wrapper(),
+    )
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.CALC_COND_BATCH,
+        KREA2_NAG_CALC_COND_WRAPPER_KEY,
+        _make_krea2_nag_calc_cond_batch_wrapper(sigma_window, explicit_neg_context),
+    )
+
+    if hasattr(diffusion_model, "blocks"):
+        for index, block in enumerate(diffusion_model.blocks):
+            patched_forward = types.MethodType(_make_krea2_nag_block_forward(block.forward), block)
+            patched.add_object_patch(f"diffusion_model.blocks.{index}.forward", patched_forward)
+
+    if explicit_neg_context is None:
+        patched.disable_model_cfg1_optimization()
+
+    return patched

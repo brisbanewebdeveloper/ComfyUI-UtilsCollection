@@ -86,6 +86,7 @@ DESCRIPTIONS = {
     "UC_AdvancedMiniMaxH3RefMediaImageToVideo": "Encodes MiniMax H3 conditioning, multi-video and audio references from a Reference Media container.",
     "UC_MiniMaxH3RadialAttentionConfig": "Configures sparse radial attention for target video rows in MiniMax H3.",
     "UC_UnifiedAttentionPatcher": "Applies one selected attention implementation to a cloned model.",
+    "UC_Krea2NAG": "Enables negative prompts on Krea2 even at CFG 1.0 by steering attention away from unwanted concepts without breaking image quality.",
     "UC_AdvancedVisConEncoder": "Spatially fuses visual sources at each encoder resolution, then consensus-blends the complete conditionings.",
     "UC_AdvancedVisConEncoderTokenFusion": "Fuses per-source visual tokens at each encoder resolution before consensus-blending the completed resolution samples.",
     "UC_VisualConsensusConfiguration": "Configures independent spatial-fusion and complete-conditioning consensus stages.",
@@ -203,6 +204,7 @@ EXTRA_ALIASES = {
     "UC_LoraLoaderModelOnly": ["model lora", "filter lora", "filtered lora", "load lora", "block filter"],
     "UC_LoraStackLoaderModelOnly": ["lora stack", "stack loader", "model lora", "load lora", "lora loader"],
     "UC_LoraStack": ["lora stack", "stack", "dynamic group", "lora template", "load lora"],
+    "UC_Krea2NAG": ["nag", "normalized attention guidance", "krea2 negative prompt", "negative guidance"],
 }
 
 

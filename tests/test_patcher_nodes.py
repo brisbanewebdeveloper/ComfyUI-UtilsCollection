@@ -1519,3 +1519,192 @@ def test_minimax_h3_pdd_head_bank_is_core_modelpatcher_managed():
     assert patcher.model_size() == sum(tensor.nbytes for tensor in bank.state_dict().values())
     assert video.shape == (1, 3)
     assert audio.shape == (1, 2)
+
+
+def test_krea2_nag_schema_and_formula_contract(monkeypatch):
+    schema = patcher_nodes.UC_Krea2NAG.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    model = object()
+
+    assert schema.node_id == "UC_Krea2NAG"
+    assert inputs["nag_scale"].default == 5.0
+    assert inputs["nag_tau"].default == 2.5
+    assert inputs["nag_alpha"].default == 0.25
+    assert inputs["start_percent"].default == 0.0
+    assert inputs["end_percent"].default == 1.0
+    assert inputs["nag_negative"].optional is True
+    assert all(value.tooltip for value in schema.inputs)
+    assert all(value.tooltip for value in schema.outputs)
+
+    monkeypatch.setattr(patcher_nodes, "patch_krea2_nag_model", lambda **_kwargs: pytest.fail("noop must not patch"))
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.0).result == (model,)
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=1.0, nag_tau=2.5, nag_alpha=0.25).result == (model,)
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25, start_percent=0.5, end_percent=0.5).result == (model,)
+
+    z_pos = torch.tensor([[[1.0, 2.0, -1.0, 2.0]]])
+    z_neg = torch.tensor([[[-1.0, 0.0, 1.0, -2.0]]])
+    # guided = 5*z_pos - 4*z_neg = [9, 10, -9, 18], L1(guided)=46, L1(z_pos)=6 -> ratio=46/6 > tau=2.5
+    # guided_norm = guided * (2.5 / (46/6)) = guided * (15/46)
+    # z_final = 0.25 * guided_norm + 0.75 * z_pos
+    expected = 0.25 * (z_pos * 5.0 - z_neg * 4.0) * (15.0 / 46.0) + 0.75 * z_pos
+    actual = patcher_helpers.apply_nag_guidance(z_pos, z_neg, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25)
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(
+        patcher_helpers.apply_nag_guidance(z_pos, z_pos, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25),
+        z_pos,
+        atol=1e-6,
+    )
+
+
+def test_krea2_nag_end_to_end_variable_length_and_ref_latents():
+    import comfy.ops
+    from comfy.ldm.krea2.model import SingleStreamDiT
+
+    torch.manual_seed(42)
+    dit = SingleStreamDiT(
+        features=32,
+        tdim=16,
+        txtdim=16,
+        heads=2,
+        kvheads=1,
+        multiplier=1,
+        layers=2,
+        patch=2,
+        channels=4,
+        txtlayers=2,
+        txtheads=2,
+        txtkvheads=1,
+        default_ref_method="index_timestep_zero",
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        operations=comfy.ops.manual_cast,
+    )
+    with torch.no_grad():
+        for name, param in dit.named_parameters():
+            if "scale" in name or "lin" in name:
+                param.normal_(0.0, 0.05)
+            else:
+                param.normal_(0.0, 0.1)
+
+    class FakeModelSampling:
+        def percent_to_sigma(self, percent: float) -> float:
+            return 1.0 - float(percent)
+
+    class FakeKrea2Patcher:
+        def __init__(self, diffusion_model, model_sampling):
+            self.diffusion_model = diffusion_model
+            self.model_sampling = model_sampling
+            self.model_options = {"transformer_options": {}}
+            self.object_patches = {}
+
+        def clone(self):
+            cloned = FakeKrea2Patcher(self.diffusion_model, self.model_sampling)
+            cloned.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
+            cloned.object_patches = dict(self.object_patches)
+            return cloned
+
+        def get_model_object(self, name):
+            if name == "diffusion_model":
+                return self.diffusion_model
+            if name == "model_sampling":
+                return self.model_sampling
+            raise KeyError(name)
+
+        def set_model_patch(self, patch, name):
+            patches = self.model_options.setdefault("transformer_options", {}).setdefault("patches", {})
+            patches[name] = patches.get(name, []) + [patch]
+
+        def set_model_post_input_patch(self, patch):
+            self.set_model_patch(patch, "post_input")
+
+        def set_model_attn1_patch(self, patch):
+            self.set_model_patch(patch, "attn1_patch")
+
+        def set_model_attn1_output_patch(self, patch):
+            self.set_model_patch(patch, "attn1_output_patch")
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            wrappers = self.model_options.setdefault("wrappers", {}).setdefault(wrapper_type, {})
+            wrappers[key] = [wrapper]
+
+        def add_object_patch(self, path, value):
+            self.object_patches[path] = value
+
+        def disable_model_cfg1_optimization(self):
+            self.model_options["disable_cfg1_optimization"] = True
+
+    base_patcher = FakeKrea2Patcher(dit, FakeModelSampling())
+    x = torch.randn(1, 4, 4, 4)
+    timesteps = torch.tensor([0.5])
+    pos_context = torch.randn(1, 7, 32)
+    neg_context = torch.randn(1, 3, 32)
+    ref_latent = torch.randn(1, 4, 4, 4)
+
+    baseline_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options={})
+
+    patched = patcher_helpers.patch_krea2_nag_model(
+        base_patcher,
+        nag_scale=5.0,
+        nag_tau=2.5,
+        nag_alpha=0.25,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+    assert patched.model_options.get("disable_cfg1_optimization") is True
+
+    for index, block in enumerate(dit.blocks):
+        block.forward = patched.object_patches[f"diffusion_model.blocks.{index}.forward"]
+
+    # When positive and negative conditioning are identical, NAG output must equal baseline
+    same_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    same_opts["wrappers"] = patched.model_options["wrappers"]
+    same_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = pos_context
+    same_opts["sigmas"] = torch.tensor([0.5])
+    same_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=same_opts)
+    assert torch.allclose(same_out, baseline_out, atol=1e-5)
+
+    # With variable-length negative prompt (L_pos=7 vs L_neg=3), NAG actively steers output
+    nag_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    nag_opts["wrappers"] = patched.model_options["wrappers"]
+    nag_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+    nag_opts["sigmas"] = torch.tensor([0.5])
+    nag_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=nag_opts)
+    assert nag_out.shape == baseline_out.shape
+    assert not torch.allclose(nag_out, baseline_out, atol=1e-4)
+
+    # Outside sigma window (sigma=0.1 < sigma_end=0.2 for end_percent=0.8), NAG is bypassed
+    late_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    late_opts["wrappers"] = patched.model_options["wrappers"]
+    late_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+    late_opts["sigmas"] = torch.tensor([0.1])
+    late_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=late_opts)
+    assert torch.allclose(late_out, baseline_out, atol=1e-5)
+
+    # CALC_COND_BATCH wrapper at cfg=1.0 skips redundant uncond forward pass and injects neg_context
+    calls = []
+
+    def fake_calc_cond_batch(_model, conds, x_in, _timestep, model_options):
+        calls.append((conds, model_options))
+        return [torch.ones_like(x_in), torch.zeros_like(x_in)]
+
+    calc_wrapper = patched.model_options["wrappers"][comfy.patcher_extension.WrappersMP.CALC_COND_BATCH][
+        patcher_helpers.KREA2_NAG_CALC_COND_WRAPPER_KEY
+    ][0]
+    predict_wrapper = patched.model_options["wrappers"][comfy.patcher_extension.WrappersMP.PREDICT_NOISE][
+        patcher_helpers.KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY
+    ][0]
+
+    class FakeGuiderExec:
+        class_obj = types.SimpleNamespace(cfg=1.0)
+
+        def __call__(self, x_in, ts, opts, _seed):
+            cond_pos = [{"model_conds": {"c_crossattn": types.SimpleNamespace(cond=pos_context)}}]
+            cond_neg = [{"model_conds": {"c_crossattn": types.SimpleNamespace(cond=neg_context)}}]
+            return calc_wrapper(fake_calc_cond_batch, None, [cond_pos, cond_neg], x_in, ts, opts)
+
+    predict_wrapper(FakeGuiderExec(), x, torch.tensor([0.5]), dict(patched.model_options), None)
+    assert len(calls) == 1
+    recorded_conds, recorded_opts = calls[0]
+    assert recorded_conds[1] is None
+    assert recorded_opts["transformer_options"][patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] is neg_context
+

@@ -349,6 +349,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_MiniMaxH3SlaAttentionConfig`
 - `UC_MiniMaxH3PDDAcc`
 - `UC_UnifiedAttentionPatcher`
+- `UC_Krea2NAG`
 - `UC_MarkdownPreview`
 - `UC_BoldFrakturTextStyle`
 - `UC_UnBoldFrakturTextStyle`
@@ -438,6 +439,35 @@ reported once in the ComfyUI console for that sampling run. A sparse-kernel
 failure also disables further sparse attempts for the remainder of that run.
 This preserves a usable model path when SLA cannot apply, but it also means a
 run may receive less acceleration than its selected sparsity suggests.
+
+### Krea2 Normalized Attention Guidance
+
+`UC_Krea2NAG` enables negative prompts on Krea2 models even when sampling at
+`CFG 1.0`, steering attention away from unwanted concepts without the quality
+breakdown caused by standard CFG on distilled or few-step runs. Unlike ComfyUI
+Core's built-in `Normalized Attention Guidance` node (which is bypassed on
+Krea2 whenever the positive and negative prompts have different token lengths),
+`UC_Krea2NAG` processes positive and negative prompts at their native lengths
+and skips the redundant second model pass when `CFG` is `1.0`.
+
+Connect the Krea2 `model` through `UC_Krea2NAG` to your sampler. By default it
+uses the negative conditioning connected to your sampler; connect `nag_negative`
+only when you want a separate negative prompt specifically for NAG or are using
+a guider without a negative input.
+
+- `nag_scale`: how strongly to push away from the negative prompt (default
+  `5.0`). Higher values remove unwanted elements more aggressively; `1.0` or
+  lower turns guidance off.
+- `nag_tau`: safety limit that prevents strong guidance from causing color burn
+  or visual artifacts (default `2.5`). Lower values keep the image closer to
+  normal output; higher values allow stronger changes.
+- `nag_alpha`: how much of the guided result is blended into the original image
+  features (default `0.25`). Raising it strengthens the negative prompt effect;
+  `0.0` turns guidance off.
+- `start_percent` and `end_percent`: sampling range where guidance is active
+  (defaults `0.0` to `1.0`). Lowering `end_percent` (for example to `0.5`) stops
+  guidance halfway through sampling to save generation time while keeping most
+  of the negative prompt effect.
 
 ### Scheduler presets
 
