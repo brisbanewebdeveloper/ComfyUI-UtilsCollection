@@ -2581,9 +2581,15 @@ def apply_nag_guidance(
     nag_tau: float,
     nag_alpha: float,
     eps: float = 1e-6,
+    heads: int | None = None,
 ) -> torch.Tensor:
+    orig_shape = z_pos.shape
     z_pos_f = z_pos.float()
     z_neg_f = z_neg.float()
+    if heads is not None and heads > 1 and orig_shape[-1] % heads == 0:
+        head_shape = (*orig_shape[:-1], heads, orig_shape[-1] // heads)
+        z_pos_f = z_pos_f.reshape(head_shape)
+        z_neg_f = z_neg_f.reshape(head_shape)
     guided = z_pos_f * nag_scale - z_neg_f * (nag_scale - 1.0)
     norm_pos = torch.linalg.vector_norm(z_pos_f, ord=1, dim=-1, keepdim=True).clamp_min(eps)
     norm_guided = torch.linalg.vector_norm(guided, ord=1, dim=-1, keepdim=True).clamp_min(eps)
@@ -2591,7 +2597,7 @@ def apply_nag_guidance(
     scale_factor = torch.clamp(ratio, max=nag_tau) / ratio
     guided_normalized = guided * scale_factor
     z_final = guided_normalized * nag_alpha + z_pos_f * (1.0 - nag_alpha)
-    return z_final.to(dtype=z_pos.dtype)
+    return z_final.reshape(orig_shape).to(dtype=z_pos.dtype)
 
 
 def _extract_krea2_cross_attn(cond_source: Any) -> torch.Tensor | None:
@@ -2656,6 +2662,14 @@ def _krea2_nag_post_input_patch(args: dict[str, Any]) -> dict[str, Any]:
 
     l_pos = context.shape[1]
     l_neg = txt_neg.shape[1]
+    neg_key_log_scale = 0.0
+    if 0 < l_neg < l_pos:
+        idx = torch.arange(l_pos, device=txt_neg.device) % l_neg
+        txt_neg = txt_neg[:, idx, :]
+        l_neg = l_pos
+    elif l_neg > l_pos > 0:
+        neg_key_log_scale = math.log(l_pos / l_neg)
+
     ref_num_tokens = transformer_options.get("reference_image_num_tokens")
     ref_total = sum(ref_num_tokens) if ref_num_tokens else 0
     img_tokens = img.shape[1] - ref_total
@@ -2672,6 +2686,7 @@ def _krea2_nag_post_input_patch(args: dict[str, Any]) -> dict[str, Any]:
     state["img_tokens"] = img_tokens
     state["l_neg"] = l_neg
     state["ref_total"] = ref_total
+    state["neg_key_log_scale"] = neg_key_log_scale
     return {
         "img": img,
         "txt": context,
@@ -2738,6 +2753,24 @@ def _krea2_nag_attn1_output_patch(out_pos, extra_options):
     if hasattr(dit, "blocks") and block_index < len(dit.blocks):
         preferred_attention = getattr(dit.blocks[block_index].attn, "comfy_attention", None)
 
+    l_pos = state["l_pos"]
+    img_tokens = state["img_tokens"]
+    l_neg = state["l_neg"]
+    ref_total = state["ref_total"]
+    neg_key_log_scale = state.get("neg_key_log_scale", 0.0)
+    neg_mask = attn_mask
+    if neg_key_log_scale != 0.0:
+        bias = q_neg.new_zeros(1, 1, 1, k_neg.shape[2])
+        bias[..., :l_neg] = neg_key_log_scale
+        if neg_mask is None:
+            neg_mask = bias
+        elif neg_mask.dtype == torch.bool:
+            additive = torch.zeros(neg_mask.shape, device=neg_mask.device, dtype=q_neg.dtype)
+            additive.masked_fill_(~neg_mask, -torch.finfo(q_neg.dtype).max)
+            neg_mask = additive + bias
+        else:
+            neg_mask = neg_mask.to(dtype=q_neg.dtype) + bias
+
     q_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(q_neg)
     k_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(k_neg)
     v_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(v_neg)
@@ -2746,16 +2779,11 @@ def _krea2_nag_attn1_output_patch(out_pos, extra_options):
         k_neg_c,
         v_neg_c,
         heads,
-        mask=attn_mask,
+        mask=neg_mask,
         skip_reshape=True,
         preferred_attention=preferred_attention,
         transformer_options=extra_options,
     )
-
-    l_pos = state["l_pos"]
-    img_tokens = state["img_tokens"]
-    l_neg = state["l_neg"]
-    ref_total = state["ref_total"]
 
     z_img_pos = out_pos[:, l_pos : l_pos + img_tokens, :]
     z_img_neg = out_neg[:, l_neg : l_neg + img_tokens, :]
@@ -2765,6 +2793,7 @@ def _krea2_nag_attn1_output_patch(out_pos, extra_options):
         nag_scale=state["nag_scale"],
         nag_tau=state["nag_tau"],
         nag_alpha=state["nag_alpha"],
+        heads=heads,
     )
 
     if ref_total > 0:

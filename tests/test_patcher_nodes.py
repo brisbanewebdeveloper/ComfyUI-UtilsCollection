@@ -1555,6 +1555,16 @@ def test_krea2_nag_schema_and_formula_contract(monkeypatch):
         atol=1e-6,
     )
 
+    # Per-head L1 normalization preserves spatial RoPE heads (head 0: z_pos == z_neg)
+    # when semantic text heads (head 1: z_neg == -z_pos) exceed nag_tau.
+    two_head_pos = torch.cat((torch.ones(1, 4, 4), torch.ones(1, 4, 4)), dim=-1)
+    two_head_neg = torch.cat((torch.ones(1, 4, 4), -torch.ones(1, 4, 4)), dim=-1)
+    guided_two_head = patcher_helpers.apply_nag_guidance(
+        two_head_pos, two_head_neg, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.5, heads=2
+    )
+    assert torch.allclose(guided_two_head[..., :4], torch.ones(1, 4, 4), atol=1e-6)
+    assert not torch.allclose(guided_two_head[..., 4:], torch.ones(1, 4, 4), atol=1e-6)
+
 
 def test_krea2_nag_end_to_end_variable_length_and_ref_latents():
     import comfy.ops
@@ -1634,11 +1644,11 @@ def test_krea2_nag_end_to_end_variable_length_and_ref_latents():
             self.model_options["disable_cfg1_optimization"] = True
 
     base_patcher = FakeKrea2Patcher(dit, FakeModelSampling())
-    x = torch.randn(1, 4, 4, 4)
+    x = torch.randn(1, 4, 4, 8)
     timesteps = torch.tensor([0.5])
     pos_context = torch.randn(1, 7, 32)
     neg_context = torch.randn(1, 3, 32)
-    ref_latent = torch.randn(1, 4, 4, 4)
+    ref_latent = torch.randn(1, 4, 4, 8)
 
     baseline_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options={})
 
