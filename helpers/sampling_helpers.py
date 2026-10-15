@@ -412,7 +412,7 @@ def plan_h3_windows(
 def prepare_chunk_guider(guider: Any, positive_cond: Any, frame0: Optional[int] = None) -> Any:
     """Create isolated clone of guider with swapped positive cond and timeline frame0 offsets."""
     chunk_g = copy.copy(guider)
-    chunk_g.original_conds = dict(guider.original_conds)
+    chunk_g.original_conds = dict(getattr(guider, "original_conds", {}) or {})
 
     if frame0 is not None:
         opts = dict(getattr(guider, "model_options", {}) or {})
@@ -429,7 +429,9 @@ def prepare_chunk_guider(guider: Any, positive_cond: Any, frame0: Optional[int] 
         raw_conds = (c_dict.get("positive"), c_dict.get("negative"))
 
     _, negative = raw_conds
-    if negative is None:
+    if hasattr(chunk_g, "inner_set_conds") and callable(chunk_g.inner_set_conds):
+        chunk_g.inner_set_conds({"positive": positive_cond})
+    elif negative is None:
         chunk_g.set_conds(positive_cond)
     else:
         chunk_g.set_conds(positive_cond, negative)
@@ -761,6 +763,162 @@ def start_sampling_loop(
     return final_latent, num_chunks, report, passthrough_audio
 
 
+def _unwrap_first_scalar(val: Any) -> Any:
+    while isinstance(val, list) and len(val) > 0:
+        if isinstance(val[0], dict) and "samples" in val[0]:
+            return val[0]
+        val = val[0]
+    return val
+
+
+def _unwrap_conditioning_list(conditioning: Any) -> list[Any]:
+    if isinstance(conditioning, dict) and "conds" in conditioning:
+        return list(conditioning["conds"])
+    if isinstance(conditioning, list):
+        unwrapped = conditioning
+        if len(conditioning) == 1 and isinstance(conditioning[0], list):
+            if len(conditioning[0]) > 0 and isinstance(conditioning[0][0], list):
+                unwrapped = conditioning[0]
+        if len(unwrapped) > 0 and isinstance(unwrapped[0], list):
+            if len(unwrapped[0]) > 0 and isinstance(unwrapped[0][0], list):
+                return list(unwrapped)
+            if len(unwrapped[0]) == 2 and isinstance(unwrapped[0][1], dict):
+                return [unwrapped]
+            return list(unwrapped)
+        return [unwrapped]
+    return [conditioning]
+
+
+def _unwrap_latent_list(latent: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+
+    def _collect(item: Any) -> None:
+        if isinstance(item, dict) and "samples" in item:
+            out.append(item)
+        elif isinstance(item, list):
+            for sub in item:
+                _collect(sub)
+
+    _collect(latent)
+    return out
+
+
+def _unwrap_guider_list(guider: Any) -> list[Any]:
+    out: list[Any] = []
+
+    def _collect(item: Any) -> None:
+        if item is None:
+            return
+        if isinstance(item, list):
+            for sub in item:
+                _collect(sub)
+        else:
+            out.append(item)
+
+    _collect(guider)
+    return out
+
+
+def _extract_positive_cond_from_guider(guider: Any) -> list[Any]:
+    raw_conds = getattr(guider, "raw_conds", None)
+    if raw_conds is not None and raw_conds[0] is not None:
+        return raw_conds[0]
+    orig = getattr(guider, "original_conds", None) or {}
+    pos = orig.get("positive")
+    if not pos:
+        return []
+    out = []
+    for item in pos:
+        if isinstance(item, dict):
+            emb = item.get("cross_attn")
+            extra = {k: v for k, v in item.items() if k not in ("cross_attn", "uuid")}
+            out.append([emb, extra])
+        elif isinstance(item, (list, tuple)) and len(item) >= 2:
+            out.append([item[0], dict(item[1])])
+    return out
+
+
+def sample_minimax_h3_clip_continuation_chain(
+    noise: Any,
+    guider: Any,
+    sampler: Any,
+    sigmas: Any,
+    latent: Any,
+    tail_frames: int | str = "22",
+    audio_tail_frames: int = 24,
+) -> tuple[list[dict[str, Any]], list[int], dict[str, Any], dict[str, Any]]:
+    """Sample a list of MiniMax H3 segment guiders and latents in one run, chaining each segment's sampled AV latent tail into the next."""
+    from .model_helpers import apply_minimax_h3_clip_continuation, h3_steps_for_frames
+
+    noise_val = _unwrap_first_scalar(noise)
+    sampler_val = _unwrap_first_scalar(sampler)
+    sigmas_val = _unwrap_first_scalar(sigmas)
+    guider_list = _unwrap_guider_list(guider)
+    tail_f_val = int(_unwrap_first_scalar(tail_frames) or 22)
+    aud_tail_f_val = int(_unwrap_first_scalar(audio_tail_frames) if audio_tail_frames is not None else 24)
+
+    if not guider_list:
+        raise ValueError("UC_MiniMaxH3ClipContinuationSampler requires a 'guider' input (from CFGGuider or BasicGuider).")
+
+    cond_list = [_extract_positive_cond_from_guider(g) for g in guider_list]
+    cond_list = [c for c in cond_list if c]
+    latent_list = _unwrap_latent_list(latent)
+    if not cond_list:
+        raise ValueError("UC_MiniMaxH3ClipContinuationSampler guider has no positive conditioning.")
+    if not latent_list:
+        raise ValueError("UC_MiniMaxH3ClipContinuationSampler requires at least one latent_image input.")
+
+    num_segments = max(len(cond_list), len(guider_list), len(latent_list))
+    sampled_latents: list[dict[str, Any]] = []
+    trim_leading_list: list[int] = []
+    trim_trailing_list: list[int] = []
+
+    for i in range(num_segments):
+        base_guider = guider_list[min(i, len(guider_list) - 1)]
+        seg_cond = cond_list[min(i, len(cond_list) - 1)]
+        raw_lat = latent_list[min(i, len(latent_list) - 1)]
+        sub_v, sub_a = h3_unpack_av(raw_lat, f"segment_{i}_latent")
+        seg_latent = h3_pack_av(raw_lat, sub_v.clone(), None if sub_a is None else sub_a.clone())
+
+        seg_tail_frames = int(raw_lat.get("uc_overlap_frames", tail_f_val) or tail_f_val)
+        seg_padded_frames = int(raw_lat.get("uc_padded_frames", 0) or 0)
+
+        if i == 0:
+            existing_trim = (
+                int(seg_cond[0][1].get("minimax_trim_frames", 0))
+                if seg_cond and len(seg_cond[0]) > 1 and isinstance(seg_cond[0][1], dict)
+                else 0
+            )
+            active_cond = seg_cond
+            trim_i = existing_trim
+        else:
+            prev_sampled = sampled_latents[i - 1]
+            active_cond, trim_i = apply_minimax_h3_clip_continuation(
+                seg_cond,
+                seg_latent,
+                tail_frames=seg_tail_frames,
+                audio_tail_frames=aud_tail_f_val,
+                continuation_latent=prev_sampled,
+            )
+
+        chunk_g = prepare_chunk_guider(base_guider, active_cond)
+        reset_model_caches(chunk_g)
+
+        c_noise = chunk_noise(noise_val, i)
+        sampled = run_chunk_sampling(
+            c_noise,
+            chunk_g,
+            sampler_val,
+            sigmas_val,
+            seg_latent,
+        )
+        sampled_latents.append(sampled)
+        trim_leading_list.append(int(trim_i))
+        trim_trailing_list.append(seg_padded_frames)
+
+    return sampled_latents, trim_leading_list, trim_trailing_list
+
+
 def split_h3_video_components_into_segments(
     video: Any,
     megapixels: float = 0.5,
@@ -771,11 +929,13 @@ def split_h3_video_components_into_segments(
     whisper_model: Any = None,
     timestamp_format: str = "00.000s",
     enable_whisper: bool = True,
-) -> tuple[list[torch.Tensor], list[dict[str, Any]], int, int, list[int], list[Any], list[str]]:
-    """Split reference video components across planned H3 schedule windows, returning lists."""
+    *,
+    return_trim_metadata: bool = False,
+):
+    """Split reference video components across sequential H3 windows with exact overlap and trailing-padding tracking."""
     from fractions import Fraction
     from comfy_api.latest import InputImpl, Types
-    from .image_helpers import cached_h3_reference_components, prepare_h3_reference_components, h3_video_length_from_seconds
+    from .image_helpers import cached_h3_reference_components, h3_video_length_from_seconds
     from .model_helpers import transcribe_reference_audio
 
     components = cached_h3_reference_components(video, megapixels)
@@ -784,54 +944,101 @@ def split_h3_video_components_into_segments(
     source_count = source_frames.shape[0]
     source_seconds = source_count / source_rate
     total_frames = max(1, round(source_seconds * 24))
+    out_h, out_w = int(source_frames.shape[1]), int(source_frames.shape[2])
 
-    # If segment_count is provided, derive window_frames to divide evenly into segment_count windows
+    start_offset = max(0, round(float(start_at_timestamp) * 24)) if start_at_timestamp > 0 else 0
+    if start_offset >= total_frames:
+        raise ValueError("Start timestamp rounds past the end of the reference video.")
+
+    ov_frames = max(0, int(overlap_frames))
+    rem_total = max(1, total_frames - start_offset)
     if segment_count > 0:
-        target_f = total_frames / segment_count
-        window_frames = h3_snap_frame_count(round(target_f))
+        import math
+        target_f = (rem_total + max(0, int(segment_count) - 1) * ov_frames) / int(segment_count)
+        window_frames = h3_snap_frame_count(math.ceil(target_f))
     elif duration_seconds > 0:
         window_frames = h3_video_length_from_seconds(duration_seconds)
     else:
         window_frames = 124
 
-    # Use the single authoritative schedule planner so window frame spans match the sampler 1:1
-    _, _, window_records, _ = plan_h3_schedule(
-        total_frames=total_frames,
-        window_frames=window_frames,
-        overlap_frames=overlap_frames,
-    )
+    if ov_frames >= window_frames:
+        ov_frames = max(0, window_frames - 17)
+
+    windows: list[tuple[int, int, int, int]] = []
+    curr = start_offset
+    while curr < total_frames:
+        if segment_count > 0 and len(windows) == int(segment_count) - 1:
+            real_end = total_frames
+        else:
+            real_end = min(total_frames, curr + window_frames)
+        real_len = max(1, real_end - curr)
+        seg_length = h3_snap_frame_count(real_len)
+        padded_frames = max(0, seg_length - real_len)
+        windows.append((curr, real_end, seg_length, padded_frames))
+        if real_end >= total_frames or (segment_count > 0 and len(windows) >= int(segment_count)):
+            break
+        next_curr = real_end - ov_frames
+        if next_curr <= curr:
+            next_curr = curr + max(1, window_frames - ov_frames)
+        curr = next_curr
 
     frames_list = []
     audio_list = []
     length_list = []
     video_list = []
     transcript_list = []
-    out_w = 0
-    out_h = 0
+    trim_trailing_list = []
+    soundtrack = components.audio
 
-    for w in window_records:
-        f_start = w["frame_start"]
-        f_end = w["frame_end"]
-        f_len = f_end - f_start
-        s_time = f_start / 24.0
-        s_dur = f_len / 24.0
+    for f_start, real_end, seg_length, padded_frames in windows:
+        frame_positions = [min(pos, max(f_start, real_end - 1)) for pos in range(f_start, f_start + seg_length)]
+        frame_indices = [min(max(0, round(pos * source_rate / 24)), source_count - 1) for pos in frame_positions]
+        frames = source_frames[frame_indices]
 
-        frames, audio, width, height, length, _, _ = prepare_h3_reference_components(
-            components,
-            megapixels,
-            duration_seconds=s_dur,
-            start_at_timestamp=s_time,
-            spatially_prepared=True,
-        )
-        out_w, out_h = width, height
-        t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
+        audio_window = round(seg_length / 24 * 32000)
+        aligned_samples = ((audio_window + 799) // 800) * 800
+        if soundtrack is not None and soundtrack.get("waveform") is not None and soundtrack["waveform"].numel() > 0:
+            sr = int(soundtrack["sample_rate"])
+            start_sample = round(f_start / 24 * sr)
+            end_sample = round(real_end / 24 * sr)
+            audio_samples = soundtrack["waveform"][..., start_sample:max(start_sample, end_sample)]
+            if sr != 32000 and audio_samples.numel():
+                audio_samples = torchaudio.functional.resample(audio_samples, sr, 32000)
+            audio_samples = audio_samples[..., :audio_window]
+            if audio_samples.shape[-1] < aligned_samples:
+                audio_samples = F.pad(audio_samples, (0, aligned_samples - audio_samples.shape[-1]))
+        else:
+            audio_samples = torch.zeros(1, 2, aligned_samples)
+
+        audio = {"waveform": audio_samples, "sample_rate": 32000}
+        t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, seg_length) if enable_whisper else ""
         prep_video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
+        frames._uc_overlap_frames = int(ov_frames)
+        frames._uc_padded_frames = int(padded_frames)
+        try:
+            prep_video._uc_overlap_frames = int(ov_frames)
+            prep_video._uc_padded_frames = int(padded_frames)
+        except Exception:
+            pass
         frames_list.append(frames)
         audio_list.append(audio)
-        length_list.append(length)
+        length_list.append(seg_length)
         video_list.append(prep_video)
         transcript_list.append(t_audio)
+        trim_trailing_list.append(int(padded_frames))
 
+    if return_trim_metadata:
+        return (
+            frames_list,
+            audio_list,
+            out_w,
+            out_h,
+            length_list,
+            video_list,
+            transcript_list,
+            str(ov_frames if ov_frames in (5, 22, 39, 56) else 22),
+            trim_trailing_list,
+        )
     return frames_list, audio_list, out_w, out_h, length_list, video_list, transcript_list
 
 

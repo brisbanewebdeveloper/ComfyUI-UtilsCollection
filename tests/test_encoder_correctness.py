@@ -1811,7 +1811,8 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
 
         def encode(self, frames):
             self.frames.append(frames.clone())
-            return torch.full((1, 4, 2, 4, 4), frames.mean())
+            count = 2 if frames.shape[0] <= 5 else ((frames.shape[0] - 5) // 17) * 5 + 2
+            return torch.full((1, 4, count, 4, 4), frames.mean())
 
     clip = _MiniMaxH3TestClip()
     vae = VideoVAE()
@@ -1850,9 +1851,10 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
     assert pictures[-1]["data"].eq(0).all()
     metadata = result.args[0][0][1]
     keyframes = metadata["minimax_keyframes"]
-    assert [item["resolved_frame_index"] for item in keyframes] == [0, 21]
-    assert [float(item["latent"].mean()) for item in keyframes] == pytest.approx([0.0, 1.0])
-    assert [float(frames.mean()) for frames in vae.frames] == pytest.approx([0.0, 1.0])
+    assert [item["resolved_frame_index"] for item in keyframes] == [0, 1, 5, 9, 13, 17, 18]
+    assert len(vae.frames) == 1
+    assert vae.frames[0].shape[0] == 22
+    assert result.args[2] == 22
     assert all(
         item["type"] != "audio"
         for call in clip.tokenize_calls
@@ -1861,9 +1863,9 @@ def test_clip_continuation_encoder_anchors_tail_start_without_renumbering_pictur
 
 
 @pytest.mark.parametrize("merge_mode,expected,expected_means", [
-    ("replace", [0, 21, 34, 51], [0, 0, 1, 1]),
-    ("prepend", [0, 21, 22, 39, 56, 73], [0, 0, 1, 1, 1, 1]),
-    ("temporal fusion", [0, 0, 17, 21, 34, 51], [0, 1, 1, 0, 1, 1]),
+    ("replace", [0, 1, 5, 9, 13, 17, 18, 34, 51], [0, 0, 0, 0, 0, 0, 0, 1, 1]),
+    ("prepend", [0, 1, 5, 9, 13, 17, 18, 22, 39, 56, 73], [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1]),
+    ("temporal fusion", [0, 0, 1, 5, 9, 13, 17, 17, 18, 34, 51], [0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1]),
 ])
 def test_clip_continuation_preserves_all_native_video_keyframes(merge_mode, expected, expected_means):
     class VideoVAE:

@@ -411,6 +411,29 @@ def test_node_schema():
     assert (out_w, out_h) == (120, 60)
     assert tuple(frames_list[0].shape[1:3]) == (60, 120)
 
+    # Verify exact 22-frame overlap start_frame (102, not rounded to 107) and trailing padding metadata
+    frames_200 = torch.arange(200, dtype=torch.float32).view(200, 1, 1, 1).expand(200, 32, 32, 3)
+    comp_200 = types.SimpleNamespace(images=frames_200, frame_rate=24, audio=None)
+    vid_200 = types.SimpleNamespace(get_components=lambda: comp_200)
+    f_list, _, _, _, l_list, _, _, tail_opt, trail_list = split_h3_video_components_into_segments(
+        vid_200, megapixels=0.0, overlap_frames=22, enable_whisper=False, return_trim_metadata=True
+    )
+    assert l_list == [124, 107]
+    assert tail_opt == "22"
+    assert trail_list == [0, 9]
+    assert float(f_list[1][0].mean()) == pytest.approx(102.0)
+
+    # Verify 15.062s clip (361 frames at 24fps) with segment_count=3 produces exactly 3 segments (not 4)
+    frames_361 = torch.zeros(361, 32, 32, 3)
+    comp_361 = types.SimpleNamespace(images=frames_361, frame_rate=361 / 15.062, audio=None)
+    vid_361 = types.SimpleNamespace(get_components=lambda: comp_361)
+    _, _, _, _, l_361, _, _, tail_361, trail_361 = split_h3_video_components_into_segments(
+        vid_361, megapixels=0.0, segment_count=3, overlap_frames=22, enable_whisper=False, return_trim_metadata=True
+    )
+    assert len(l_361) == 3
+    assert l_361 == [141, 141, 124]
+    assert trail_361 == [0, 0, 1]
+
 
 def test_dmad_scheduler_exact_values():
     """Verify dmad_scheduler matches exact grid from reference/DMAD/dmad_h3/sampling.py."""

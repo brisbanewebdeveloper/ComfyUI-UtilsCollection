@@ -3937,8 +3937,13 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
                 ),
             ],
             outputs=[
-                io.Conditioning.Output(display_name="positive"),
-                io.Latent.Output(),
+                io.Conditioning.Output(
+                    display_name="positive",
+                    tooltip="Encoded prompt, visual, and audio guidance ready to connect to your guider or continuation sampler.",
+                ),
+                io.Latent.Output(
+                    tooltip="Blank video and audio canvas sized to your selected width, height, and frame length.",
+                ),
             ],
         )
 
@@ -3947,6 +3952,7 @@ class UC_AdvancedMiniMaxH3ImageToVideo(io.ComfyNode):
         continuation_audio = (
             isinstance(continuation_media, dict)
             and continuation_media.get("audio") is not None
+            and continuation_media.get("latent") is None
         )
         return ["audio_vae"] if (audio is not None or continuation_audio) and audio_vae is None else []
 
@@ -4014,9 +4020,8 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
         schema.node_id = "UC_MiniMaxH3ClipContinuationEncoder"
         schema.display_name = "MiniMax H3 Clip Continuation Encoder"
         schema.description = (
-            "Uses a saved tail as target frames: frame 0 and the final tail frame are "
-            "native guides, interior frames are Qwen Video context, and the first tail "
-            "frame is an appended Qwen Picture anchored at 00.00s. Saved audio is native-only."
+            "Encodes MiniMax H3 prompts and reference media while pinning a saved clip's ending "
+            "(from latent or decoded frames/audio) so motion and sound continue seamlessly across clips."
         )
         video_index = next(index for index, value in enumerate(schema.inputs) if value.id == "video")
         schema.inputs.insert(
@@ -4025,12 +4030,20 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
                 "continuation_media",
                 optional=True,
                 tooltip=(
-                    "Optional output from MiniMax H3 Clip Continuation Load. Tail frame 0 "
-                    "owns target frame 0. Interior frames are Qwen-only Video context. The "
-                    "final tail frame remains a native guide. The appended Qwen Picture anchors tail frame 0 at 00.00s."
+                    "Optional output from MiniMax H3 Clip Continuation Load. When saved from a latent, "
+                    "pins both video and audio directly in latent space without re-encoding. Also outputs "
+                    "trim_frames for MiniMax H3 Clip Continuation Trim."
                 ),
             ),
         )
+        schema.outputs = [
+            *schema.outputs,
+            io.Int.Output(
+                "trim_frames",
+                display_name="trim_frames",
+                tooltip="Number of leading pinned frames to remove with MiniMax H3 Clip Continuation Trim after decoding (0 when no continuation is active).",
+            ),
+        ]
         return schema
 
     @classmethod
@@ -4087,7 +4100,12 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
             enable_caching=enable_caching,
             token_fusion=fusion_method == "token_fusion",
         )
-        return io.NodeOutput(conditioning, latent)
+        trim_frames = (
+            int(conditioning[0][1].get("minimax_trim_frames", 0))
+            if conditioning and len(conditioning[0]) > 1 and isinstance(conditioning[0][1], dict)
+            else 0
+        )
+        return io.NodeOutput(conditioning, latent, trim_frames)
 
 
 class UC_AdvancedVisConEncoder(io.ComfyNode):

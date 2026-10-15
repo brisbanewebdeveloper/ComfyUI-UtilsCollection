@@ -1282,48 +1282,100 @@ def test_concatenate_audio_list_and_batch_nodes():
     assert split_out[1]["waveform"].shape == (1, 2, 2000)
 
 
-def test_latent_motion_context_nodes():
+def test_clip_continuation_apply_and_sampler(monkeypatch, tmp_path):
     from utils_collection_minimax_h3_refs_test.nodes import sampling_nodes
+    from utils_collection_minimax_h3_refs_test.helpers import sampling_helpers
     from comfy.nested_tensor import NestedTensor
 
+    monkeypatch.setattr(model_helpers.folder_paths, "get_output_directory", lambda: str(tmp_path))
+
     # Create previous latent: 124 frames -> video_t = 37, audio_t = 207
-    prev_video = torch.zeros(1, 24, 37, 8, 8)
-    prev_audio = torch.zeros(1, 32, 2, 207)
+    prev_video = torch.arange(37, dtype=torch.float32).view(1, 1, 37, 1, 1).expand(1, 24, 37, 8, 8).clone()
+    prev_audio = torch.arange(207, dtype=torch.float32).view(1, 1, 1, 207).expand(1, 32, 2, 207).clone()
     previous_av = {"samples": NestedTensor((prev_video, prev_audio))}
 
-    # 1. Guided Continuation Window: overlap=22, extension=119 -> window=141 frames
-    win_out = sampling_nodes.UC_MiniMaxH3GuidedContinuationWindow.execute(
-        previous_av, overlap_frames=22, extension_frames=119,
-    )
-    target_latent, win_len, ov_v, ov_a = win_out.args
-    assert win_len == 141
-    assert ov_v == 7  # video_latent_t(22) = 7
-    assert ov_a == 37  # h3_audio_t_at_frame_boundary(124) - h3_audio_t_at_frame_boundary(102) = 207 - 170 = 37
-    t_video, t_audio = target_latent["samples"].tensors
-    assert t_video.shape == (1, 24, 42, 8, 8)  # 7 overlap + 35 new = 42
-
-    # 2. Latent Tail Guide: adds keyframe guide at frame 0
-    pos_cond = [[torch.zeros(1, 77, 4096), {}]]
-    guided_pos = sampling_nodes.UC_MiniMaxH3LatentTailGuide.execute(
-        pos_cond, previous_av, target_latent, ov_v, ov_a,
-    ).args[0]
-    keyframes = guided_pos[0][1]["minimax_keyframes"]
-    assert len(keyframes) == 1
-    assert keyframes[0]["resolved_frame_index"] == 0
-    assert keyframes[0]["latent"].shape == (1, 24, 7, 8, 8)
-
-    # 3. Append Continuation: trims overlap and appends new tokens
-    # Simulated sampled window with 42 video tokens, 235 audio tokens
-    sampled_window = {
+    # Target latent: 124 frames -> video_t = 37, audio_t = 207
+    target_latent = {
         "samples": NestedTensor((
-            torch.ones(1, 24, 42, 8, 8),
-            torch.ones(1, 32, 2, 235),
+            torch.zeros(1, 24, 37, 8, 8),
+            torch.zeros(1, 32, 2, 207),
         ))
     }
-    appended, total_len = sampling_nodes.UC_MiniMaxH3AppendContinuation.execute(
-        previous_av, sampled_window, ov_v, ov_a,
-    ).args
-    assert total_len == 124 + 119  # 243 frames
-    ext_v, ext_a = appended["samples"].tensors
-    assert ext_v.shape == (1, 24, 37 + 35, 8, 8)  # 72 video tokens
+    pos_cond = [[torch.zeros(1, 77, 4096), {"minimax_keyframes": [{"resolved_frame_index": 123, "latent": torch.ones(1, 24, 1, 8, 8)}]}]]
+
+    # 1. UC_MiniMaxH3ClipContinuationApply pins 7 video steps at [0, 1, 5, 9, 13, 17, 18],
+    #    end-aligns 40 audio steps (24 frames) with overhang compensation -> resolved_frame_index = -1.8,
+    #    and preserves the last_frame keyframe at 123.
+    mc_out = sampling_nodes.UC_MiniMaxH3ClipContinuationApply.execute(
+        conditioning=pos_cond,
+        latent=target_latent,
+        tail_frames="22",
+        audio_tail_frames=24,
+        continuation_latent=previous_av,
+    )
+    guided_cond, trim_frames = mc_out.args
+    assert trim_frames == 22
+    keyframes = guided_cond[0][1]["minimax_keyframes"]
+    video_kfs = [k for k in keyframes if "latent" in k]
+    audio_kfs = [k for k in keyframes if "audio_latent" in k]
+    assert [k["resolved_frame_index"] for k in video_kfs] == [0, 1, 5, 9, 13, 17, 18, 123]
+    assert len(audio_kfs) == 1
+    assert audio_kfs[0]["audio_latent"].shape == (1, 32, 2, 40)
+    assert audio_kfs[0]["resolved_frame_index"] < 0.0
+
+    # 2. UC_MiniMaxH3ClipContinuationSampler: single-run list execution across 3 segments
+    seen_conds = []
+
+    def fake_run_chunk_sampling(noise, guider, sampler, sigmas, latent_dict, **_kwargs):
+        pos = guider.raw_conds[0]
+        seen_conds.append(pos)
+        idx = len(seen_conds)
+        v, a = sampling_helpers.h3_unpack_av(latent_dict)
+        return sampling_helpers.h3_pack_av(
+            latent_dict,
+            torch.full_like(v, float(idx)),
+            torch.full_like(a, float(idx * 10)),
+        )
+
+    monkeypatch.setattr(sampling_helpers, "run_chunk_sampling", fake_run_chunk_sampling)
+
+    class DummyGuider:
+        def __init__(self, pos):
+            import comfy.sampler_helpers
+            self.original_conds = {"positive": comfy.sampler_helpers.convert_cond(pos)}
+            self.model_options = {}
+
+        def inner_set_conds(self, conds):
+            import comfy.sampler_helpers
+            for k in conds:
+                self.original_conds[k] = comfy.sampler_helpers.convert_cond(conds[k])
+
+    cond_seg0 = [[torch.zeros(1, 10, 16), {}]]
+    cond_seg1 = [[torch.ones(1, 10, 16), {}]]
+    cond_seg2 = [[torch.full((1, 10, 16), 2.0), {}]]
+    guider_list = [DummyGuider(cond_seg0), DummyGuider(cond_seg1), DummyGuider(cond_seg2)]
+    lat_seg2 = {**target_latent, "uc_padded_frames": 9}
+    lat_list = [target_latent, target_latent, lat_seg2]
+
+    sampler_out = sampling_nodes.UC_MiniMaxH3ClipContinuationSampler.execute(
+        noise=[types.SimpleNamespace(seed=42)],
+        guider=[guider_list],
+        sampler=[object()],
+        sigmas=[torch.tensor([1.0, 0.0])],
+        latent_image=[lat_list],
+        tail_frames=["22"],
+        audio_tail_frames=[24],
+    )
+    segment_latents, trim_leading, trim_trailing = sampler_out.args
+    assert len(segment_latents) == 3
+    assert trim_leading == [0, 22, 22]
+    assert trim_trailing == [0, 0, 9]
+
+    # Segment 0 had no continuation keyframes; Segment 1 got Segment 0's tail (value 1.0); Segment 2 got Segment 1's tail (value 2.0)
+    assert "minimax_keyframes" not in seen_conds[0][0][1]
+    seg1_kfs = [k for k in seen_conds[1][0][1]["minimax_keyframes"] if "latent" in k]
+    seg2_kfs = [k for k in seen_conds[2][0][1]["minimax_keyframes"] if "latent" in k]
+    assert [k["resolved_frame_index"] for k in seg1_kfs] == [0, 1, 5, 9, 13, 17, 18]
+    assert float(seg1_kfs[0]["latent"].mean()) == pytest.approx(1.0)
+    assert float(seg2_kfs[0]["latent"].mean()) == pytest.approx(2.0)
 

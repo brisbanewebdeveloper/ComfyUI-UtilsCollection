@@ -4,17 +4,14 @@ import torch
 import comfy.samplers
 from comfy_api.latest import io
 from ..helpers.model_helpers import (
-    validate_h3_av_latent,
-    calculate_guided_continuation_layout,
-    assemble_guided_target,
-    apply_latent_tail_guide_to_conditioning,
-    assemble_appended_continuation,
+    apply_minimax_h3_clip_continuation,
 )
 from ..helpers.sampling_helpers import (
     H3_CHUNK_SECONDS_OPTIONS,
     H3_OVERLAP_SECONDS_OPTIONS,
     parse_h3_seconds_option,
     sample_dmad_renoise,
+    sample_minimax_h3_clip_continuation_chain,
     split_h3_video_components_into_segments,
     start_sampling_loop,
 )
@@ -365,8 +362,8 @@ class UC_H3RefVideoSegments(io.ComfyNode):
                     "duration_seconds",
                     default=0.0,
                     min=0.0,
-                    step=0.1,
-                    tooltip="Segment duration in seconds when segment_count is 0. 0 uses default 5.17s H3 segment chunks.",
+                    step=0.70833,
+                    tooltip="Segment duration in seconds when segment_count is 0. 0.0 uses default 5.17s (124-frame) H3 segment chunks. Positive values step by 17 frames (~0.708s) on the H3 5+17k grid.",
                 ),
                 io.Float.Input(
                     "start_at_timestamp",
@@ -525,182 +522,218 @@ class UC_SamplerDMADReNoise(io.ComfyNode):
     get_sampler = execute
 
 
-class UC_MiniMaxH3GuidedContinuationWindow(io.ComfyNode):
+class UC_MiniMaxH3ClipContinuationApply(io.ComfyNode):
+    """Pin previous-clip video and audio tail at the head of a MiniMax H3 clip."""
+
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="UC_MiniMaxH3GuidedContinuationWindow",
-            display_name="MiniMax H3 Guided Continuation Window",
-            category="utils/sampling",
+            node_id="UC_MiniMaxH3ClipContinuationApply",
+            display_name="MiniMax H3 Clip Continuation Apply",
+            category="advanced/conditioning",
             description=(
-                "Prepares a blank canvas for the next clip with a hidden overlapping seam "
-                "so motion and sound continue smoothly from the previous clip."
+                "Pins the ending frames and sound of your previous clip onto the start of the new clip "
+                "so motion, characters, and music continue seamlessly across the cut without re-encoding."
             ),
             inputs=[
+                io.Conditioning.Input(
+                    "conditioning",
+                    tooltip="Positive conditioning from your MiniMax H3 encoder.",
+                ),
                 io.Latent.Input(
-                    "previous_av_latent",
-                    tooltip="The completed latent from your previous clip.",
+                    "latent",
+                    tooltip="Target clip latent from your MiniMax H3 encoder.",
+                ),
+                io.Combo.Input(
+                    "tail_frames",
+                    options=["22", "5", "39", "56"],
+                    default="22",
+                    tooltip="Keep at 22 (recommended ~0.9s sweet spot). Controls how many ending video frames of the previous clip are pinned onto the start of the next clip to lock in motion, then removed by Trim. 5 is barely fluid; 39 or 56 spend more of each render on overlap frames that get trimmed away.",
                 ),
                 io.Int.Input(
-                    "overlap_frames",
-                    default=22,
-                    min=5,
-                    max=3600,
-                    step=17,
-                    tooltip="Hidden seam duration in frames to match motion and sound (default 22 frames = ~0.9s).",
+                    "audio_tail_frames",
+                    default=24,
+                    min=0,
+                    max=240,
+                    step=1,
+                    tooltip="Keep at 24 (1 full second of sound) or 48 (2 seconds for musical beats). Controls how much ending audio is carried over across the cut without costing any extra video frames. Multiples of 24 are whole seconds; 0 matches tail_frames.",
+                ),
+                io.Latent.Input(
+                    "continuation_latent",
+                    optional=True,
+                    tooltip="Previous clip's sampler output latent (recommended). Slices both picture and sound directly in latent space without any decode or re-encode.",
+                ),
+                io.Custom("MINIMAX_H3_CLIP_CONTINUATION_MEDIA").Input(
+                    "continuation_media",
+                    optional=True,
+                    tooltip="Optional output from MiniMax H3 Clip Continuation Load.",
+                ),
+                io.Image.Input(
+                    "continuation_frames",
+                    optional=True,
+                    tooltip="Optional decoded frames from the previous clip (used only when continuation_latent and continuation_media are not connected).",
+                ),
+                io.Audio.Input(
+                    "continuation_audio",
+                    optional=True,
+                    tooltip="Optional decoded audio from the previous clip (used only when continuation_latent is not connected).",
+                ),
+                io.Vae.Input(
+                    "vae",
+                    optional=True,
+                    tooltip="MiniMax H3 video VAE (required only when encoding decoded continuation_frames instead of a latent).",
+                ),
+                io.Vae.Input(
+                    "audio_vae",
+                    optional=True,
+                    tooltip="MiniMax H3 audio VAE (required only when encoding decoded continuation_audio instead of a latent).",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(
+                    "conditioning",
+                    display_name="conditioning",
+                    tooltip="Conditioning with seamless motion and audio continuation attached.",
+                ),
+                io.Int.Output(
+                    "trim_frames",
+                    display_name="trim_frames",
+                    tooltip="Number of leading pinned frames to remove with MiniMax H3 Clip Continuation Trim after decoding (0 on the first clip).",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        conditioning,
+        latent,
+        tail_frames: str = "22",
+        audio_tail_frames: int = 24,
+        continuation_latent=None,
+        continuation_media=None,
+        continuation_frames=None,
+        continuation_audio=None,
+        vae=None,
+        audio_vae=None,
+    ) -> io.NodeOutput:
+        out_cond, trim_frames = apply_minimax_h3_clip_continuation(
+            conditioning,
+            latent,
+            tail_frames=int(tail_frames),
+            audio_tail_frames=int(audio_tail_frames),
+            continuation_latent=continuation_latent,
+            continuation_media=continuation_media,
+            continuation_frames=continuation_frames,
+            continuation_audio=continuation_audio,
+            vae=vae,
+            audio_vae=audio_vae,
+        )
+        return io.NodeOutput(out_cond, trim_frames)
+
+
+class UC_MiniMaxH3ClipContinuationSampler(io.ComfyNode):
+    """Drop-in SamplerCustomAdvanced replacement that chains MiniMax H3 segment lists in a single run."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MiniMaxH3ClipContinuationSampler",
+            display_name="MiniMax H3 Clip Continuation Sampler",
+            category="utils/sampling",
+            is_input_list=True,
+            description=(
+                "Drop-in replacement for SamplerCustomAdvanced that samples a list of MiniMax H3 segments in one run, "
+                "automatically chaining each finished segment's video and audio tail into the next segment without re-encoding."
+            ),
+            inputs=[
+                io.Noise.Input(
+                    "noise",
+                    tooltip="Noise generator (such as RandomNoise) used to seed each segment.",
+                ),
+                io.Guider.Input(
+                    "guider",
+                    tooltip="Guider (from CFGGuider or BasicGuider). Accepts a single guider or a list of guiders produced from your segment list.",
+                ),
+                io.Sampler.Input(
+                    "sampler",
+                    tooltip="Sampling method used to denoise each segment.",
+                ),
+                io.Sigmas.Input(
+                    "sigmas",
+                    tooltip="Step schedule controlling denoising speed and total step count.",
+                ),
+                io.Latent.Input(
+                    "latent_image",
+                    tooltip="Target latent (or list of segment latents) from your MiniMax H3 encoder.",
+                ),
+                io.Combo.Input(
+                    "tail_frames",
+                    options=["22", "5", "39", "56"],
+                    default="22",
+                    tooltip="Keep at 22 (recommended ~0.9s sweet spot). Controls how many ending video frames of the previous segment are pinned onto the start of the next segment to lock in motion, then removed by Trim. 5 is barely fluid; 39 or 56 spend more of each render on overlap frames that get trimmed away.",
                 ),
                 io.Int.Input(
-                    "extension_frames",
-                    default=119,
-                    min=17,
-                    max=3570,
-                    step=17,
-                    tooltip="How many new visible frames to generate (default 119 frames = ~5s).",
+                    "audio_tail_frames",
+                    default=24,
+                    min=0,
+                    max=240,
+                    step=1,
+                    tooltip="Keep at 24 (1 full second of sound) or 48 (2 seconds for musical beats). Controls how much ending audio is carried over across the cut without costing any extra video frames. Multiples of 24 are whole seconds; 0 matches tail_frames.",
                 ),
             ],
             outputs=[
                 io.Latent.Output(
                     "latent",
-                    tooltip="Fresh canvas ready to connect to your sampler.",
+                    display_name="latent",
+                    is_output_list=True,
+                    tooltip="Sampled segment latents (as a list). Connect to VAEDecode and VAEDecodeAudio.",
                 ),
                 io.Int.Output(
-                    "window_length",
-                    tooltip="Total frames in this window. Connect to the length input of your prompt encoder.",
+                    "trim_leading_frames",
+                    display_name="trim_leading_frames",
+                    is_output_list=True,
+                    tooltip="Leading overlap frames to remove for each segment. Connect directly to trim_leading_frames on MiniMax H3 Clip Continuation Trim.",
                 ),
-                io.Int.Output("overlap_video_tokens", tooltip="Seam measurement for video. Connect to Latent Tail Guide and Append Continuation."),
-                io.Int.Output("overlap_audio_tokens", tooltip="Seam measurement for audio. Connect to Latent Tail Guide and Append Continuation."),
+                io.Int.Output(
+                    "trim_trailing_frames",
+                    display_name="trim_trailing_frames",
+                    is_output_list=True,
+                    tooltip="Trailing padded frames to remove on the final segment. Connect directly to trim_trailing_frames on MiniMax H3 Clip Continuation Trim.",
+                ),
             ],
         )
 
     @classmethod
     def execute(
         cls,
-        previous_av_latent,
-        overlap_frames: int = 22,
-        extension_frames: int = 119,
+        noise,
+        guider,
+        sampler,
+        sigmas,
+        latent_image,
+        tail_frames="22",
+        audio_tail_frames=24,
     ) -> io.NodeOutput:
-        previous_video, previous_audio, previous_frame_count = validate_h3_av_latent(
-            previous_av_latent, name="previous_av_latent"
+        segment_latents, trim_leading_frames, trim_trailing_frames = (
+            sample_minimax_h3_clip_continuation_chain(
+                noise=noise,
+                guider=guider,
+                sampler=sampler,
+                sigmas=sigmas,
+                latent=latent_image,
+                tail_frames=tail_frames,
+                audio_tail_frames=audio_tail_frames,
+            )
         )
-        layout = calculate_guided_continuation_layout(
-            previous_frame_count, int(overlap_frames), int(extension_frames)
-        )
-        target = assemble_guided_target(previous_video, previous_audio, layout)
-        return io.NodeOutput(
-            target,
-            layout.window_frame_count,
-            layout.overlap_video_t,
-            layout.overlap_audio_t,
-        )
-
-
-class UC_MiniMaxH3LatentTailGuide(io.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="UC_MiniMaxH3LatentTailGuide",
-            display_name="MiniMax H3 Latent Tail Guide",
-            category="utils/sampling",
-            description=(
-                "Guides the beginning of the new clip using the ending of the previous clip "
-                "so characters, scene, and sound flow naturally without any VAE round trip."
-            ),
-            inputs=[
-                io.Conditioning.Input(
-                    "positive",
-                    tooltip="Positive prompt conditioning.",
-                ),
-                io.Latent.Input(
-                    "previous_av_latent",
-                    tooltip="The completed latent from your previous clip.",
-                ),
-                io.Latent.Input(
-                    "target_av_latent",
-                    tooltip="The fresh canvas from Guided Continuation Window.",
-                ),
-                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
-                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
-            ],
-            outputs=[io.Conditioning.Output(display_name="positive", tooltip="Conditioning with seamless motion guidance attached.")],
-        )
-
-    @classmethod
-    def execute(
-        cls,
-        positive,
-        previous_av_latent,
-        target_av_latent,
-        overlap_video_tokens: int,
-        overlap_audio_tokens: int,
-    ) -> io.NodeOutput:
-        guided = apply_latent_tail_guide_to_conditioning(
-            positive,
-            previous_av_latent,
-            target_av_latent,
-            int(overlap_video_tokens),
-            int(overlap_audio_tokens),
-        )
-        return io.NodeOutput(guided)
-
-
-class UC_MiniMaxH3AppendContinuation(io.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="UC_MiniMaxH3AppendContinuation",
-            display_name="MiniMax H3 Append Continuation",
-            category="utils/sampling",
-            description=(
-                "Cuts away the hidden seam from the newly sampled clip and joins the new "
-                "video and audio onto your growing video latent."
-            ),
-            inputs=[
-                io.Latent.Input(
-                    "previous_av_latent",
-                    tooltip="The completed latent before this clip was added.",
-                ),
-                io.Latent.Input(
-                    "sampled_window",
-                    tooltip="The output from your sampler.",
-                ),
-                io.Int.Input("overlap_video_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
-                io.Int.Input("overlap_audio_tokens", min=1, force_input=True, tooltip="Connect from Guided Continuation Window."),
-                io.Int.Input("transition_video_tokens", default=0, min=0, tooltip="Optional re-blended transition video tokens (0 discards the hidden seam completely)."),
-                io.Int.Input("transition_audio_tokens", default=0, min=0, tooltip="Optional re-blended transition audio tokens (0 discards the hidden seam completely)."),
-            ],
-            outputs=[
-                io.Latent.Output("latent", tooltip="The combined full-length video and audio latent."),
-                io.Int.Output("total_length", tooltip="Total frame count of the assembled video so far."),
-            ],
-        )
-
-    @classmethod
-    def execute(
-        cls,
-        previous_av_latent,
-        sampled_window,
-        overlap_video_tokens: int,
-        overlap_audio_tokens: int,
-        transition_video_tokens: int = 0,
-        transition_audio_tokens: int = 0,
-    ) -> io.NodeOutput:
-        extended_latent, total_length = assemble_appended_continuation(
-            previous_av_latent,
-            sampled_window,
-            int(overlap_video_tokens),
-            int(overlap_audio_tokens),
-            int(transition_video_tokens),
-            int(transition_audio_tokens),
-        )
-        return io.NodeOutput(extended_latent, total_length)
+        return io.NodeOutput(segment_latents, trim_leading_frames, trim_trailing_frames)
 
 
 SAMPLING_NODES = [
     UC_H3LoopSampler,
     UC_H3RefVideoSegments,
     UC_SamplerDMADReNoise,
-    UC_MiniMaxH3GuidedContinuationWindow,
-    UC_MiniMaxH3LatentTailGuide,
-    UC_MiniMaxH3AppendContinuation,
+    UC_MiniMaxH3ClipContinuationApply,
+    UC_MiniMaxH3ClipContinuationSampler,
 ]
 

@@ -3796,6 +3796,11 @@ def execute_advanced_minimax_h3_image_to_video(
     clip = cache.prepare_clip(clip)
 
     latent, frame_count = minimax_h3_empty_av_latent(width, height, length)
+    if video is not None:
+        if hasattr(video, "_uc_overlap_frames"):
+            latent["uc_overlap_frames"] = int(getattr(video, "_uc_overlap_frames"))
+        if hasattr(video, "_uc_padded_frames"):
+            latent["uc_padded_frames"] = int(getattr(video, "_uc_padded_frames"))
     picture_timestamps = []
     media_timestamp_format = None
     picture_structure = None
@@ -3878,9 +3883,13 @@ def execute_advanced_minimax_h3_image_to_video(
                 video_latent_keyframes,
                 cache=cache,
             )
+    continuation_has_latent = (
+        isinstance(continuation_media, Mapping)
+        and continuation_media.get("latent") is not None
+    )
     continuation_frames = (
         prepare_minimax_h3_clip_continuation_frames(continuation_media, frame_count)
-        if continuation_media is not None
+        if continuation_media is not None and not continuation_has_latent
         else None
     )
     if continuation_frames is not None and vae is None:
@@ -3903,10 +3912,14 @@ def execute_advanced_minimax_h3_image_to_video(
             else:
                 active_audio = None
     audio_reference = _encode_minimax_h3_audio_reference(active_audio, audio_vae, cache=cache)
-    continuation_audio_reference = _encode_minimax_h3_audio_reference(
-        continuation_media.get("audio") if continuation_media is not None else None,
-        audio_vae,
-        cache=cache,
+    continuation_audio_reference = (
+        _encode_minimax_h3_audio_reference(
+            continuation_media.get("audio") if continuation_media is not None else None,
+            audio_vae,
+            cache=cache,
+        )
+        if not continuation_has_latent
+        else None
     )
     prepared_first = (
         prepare_minimax_h3_frame(first_frame, width, height, "disabled")
@@ -3918,13 +3931,10 @@ def execute_advanced_minimax_h3_image_to_video(
         if last_frame is not None and frame_vae_enabled
         else None
     )
-    prepared_continuation_first = (
-        prepare_minimax_h3_frame(continuation_frames[:1], width, height, "disabled")
-        if continuation_frames is not None
-        else None
-    )
-    prepared_continuation_last = (
-        prepare_minimax_h3_frame(continuation_frames[-1:], width, height, "center")
+    prepared_continuation_tail = (
+        comfy.utils.common_upscale(
+            continuation_frames[..., :3].movedim(-1, 1), int(width), int(height), "lanczos", "disabled"
+        ).movedim(1, -1)
         if continuation_frames is not None
         else None
     )
@@ -4367,10 +4377,22 @@ def execute_advanced_minimax_h3_image_to_video(
         conditioning = scaled
 
     keyframes = []
-    if prepared_continuation_first is not None:
-        keyframes.append(
-            {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_continuation_first)}
-        )
+    if prepared_continuation_tail is not None:
+        from .model_helpers import h3_step_offsets, h3_pixel_frames_for_latent_steps
+        enc_tail = cache.encode_vae(vae, prepared_continuation_tail)
+        steps = int(enc_tail.shape[2])
+        if h3_pixel_frames_for_latent_steps(steps) == continuation_frames.shape[0]:
+            offsets = h3_step_offsets(steps)
+            for p, k in zip(offsets, range(steps)):
+                keyframes.append({"resolved_frame_index": p, "latent": enc_tail[:, :, k : k + 1]})
+        else:
+            first_enc = cache.encode_vae(vae, prepared_continuation_tail[:1])
+            last_enc = cache.encode_vae(
+                vae,
+                prepare_minimax_h3_frame(continuation_frames[-1:], width, height, "center"),
+            )
+            keyframes.append({"resolved_frame_index": 0, "latent": first_enc})
+            keyframes.append({"resolved_frame_index": continuation_frames.shape[0] - 1, "latent": last_enc})
     if prepared_first is not None:
         keyframes.append(
             {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_first)}
@@ -4380,13 +4402,6 @@ def execute_advanced_minimax_h3_image_to_video(
             {
                 "resolved_frame_index": frame_count - 1,
                 "latent": cache.encode_vae(vae, prepared_last),
-            }
-        )
-    if prepared_continuation_last is not None:
-        keyframes.append(
-            {
-                "resolved_frame_index": continuation_frames.shape[0] - 1,
-                "latent": cache.encode_vae(vae, prepared_continuation_last),
             }
         )
     references = [
@@ -4412,8 +4427,12 @@ def execute_advanced_minimax_h3_image_to_video(
         keyframes.extend(positioned_video_keyframes)
         keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
     if continuation_audio_reference is not None:
+        span_frames = continuation_frames.shape[0] if continuation_frames is not None else int(continuation_media.get("tail_frames", 22))
+        end_coord = round((5.0 / 3.0) * float(span_frames))
+        end_frame = end_coord / (5.0 / 3.0)
+        rt = int(continuation_audio_reference["audio_latent"].shape[-1])
         keyframes.append({
-            "resolved_frame_index": 0,
+            "resolved_frame_index": end_frame - rt / (5.0 / 3.0),
             "audio_latent": continuation_audio_reference["audio_latent"],
         })
     keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
@@ -4421,10 +4440,24 @@ def execute_advanced_minimax_h3_image_to_video(
     if keyframes:
         metadata["minimax_keyframes"] = keyframes
         metadata["minimax_frame_count"] = frame_count
+    if continuation_frames is not None:
+        metadata["minimax_trim_frames"] = int(continuation_frames.shape[0])
     if references:
         metadata["minimax_refs"] = references
     if metadata:
         conditioning = node_helpers.conditioning_set_values(conditioning, metadata)
+    if continuation_has_latent:
+        from .model_helpers import apply_minimax_h3_clip_continuation
+        conditioning, _ = apply_minimax_h3_clip_continuation(
+            conditioning,
+            latent,
+            tail_frames=int(continuation_media.get("tail_frames", 22)),
+            audio_tail_frames=24,
+            continuation_media=continuation_media,
+            vae=vae,
+            audio_vae=audio_vae,
+            cache=cache,
+        )
     return conditioning, latent
 
 

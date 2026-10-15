@@ -162,6 +162,20 @@ DESCRIPTIONS = {
     "Ideogram4SchedulerPreset": "Provides scheduler and sampling parameters tuned for Ideogram 4 workflows.",
     "UC_SamplerDMADReNoise": "Few-step re-noise sampler for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
     "UC_DMADSchedule": "Shifted linear sigma schedule for DMAD/DMD2 distilled models (e.g. 4-step MiniMax H3).",
+    "UC_SaveVideo": "Saves video with clean seekable keyframes at scene cuts so players and video editors scrub and edit smoothly without black frames or visual glitching.",
+    "UC_ConcatenateVideoList": "Stitches multiple video clips together back-to-back into one continuous video with automatic audio stitching.",
+    "UC_ConcatenateAudioList": "Joins multiple audio clips together back-to-back into one continuous audio track.",
+    "UC_ListToAudioBatch": "Combines a list of separate audio clips into one synchronized audio batch.",
+    "UC_AudioBatchToList": "Splits a batched audio input into a list of individual audio tracks.",
+    "UC_MiniMaxH3ClipContinuationSave": "Saves the ending of a generated clip (latent or decoded frames/audio) so the next clip in your sequence can pick up seamlessly where it left off.",
+    "UC_MiniMaxH3ClipContinuationLoad": "Loads a saved clip ending so your next clip continues characters, motion, and sound seamlessly.",
+    "UC_MiniMaxH3ClipContinuationUnpack": "Extracts raw images and audio directly from continuation_media, or loads them from a saved file.",
+    "UC_MiniMaxH3ClipContinuationTrim": "Removes repeated beginning or ending frames and aligns sound to exact frame duration before joining clips.",
+    "UC_MiniMaxH3ClipContinuationAccumulate": "Collects generated continuation clips across queue runs, trims overlapping seam frames, and joins them into one continuous video and audio output.",
+    "UC_MiniMaxH3ClipContinuationAccumulateList": "Joins a list of continuation video and audio clips into one seamless sequence in a single run, automatically removing duplicate overlapping frames at each cut.",
+    "UC_MiniMaxH3ClipContinuationEncoder": "Encodes MiniMax H3 prompts and reference media while pinning a saved clip's ending so motion and sound continue seamlessly across clips.",
+    "UC_MiniMaxH3ClipContinuationApply": "Pins the ending frames and sound of your previous clip onto the start of the new clip so motion, characters, and music continue seamlessly across the cut without re-encoding.",
+    "UC_MiniMaxH3ClipContinuationSampler": "Samples a list of MiniMax H3 video segments in a single run, automatically slicing each finished segment's latent video and audio tail into the next segment without re-encoding media.",
 }
 
 
@@ -205,6 +219,17 @@ EXTRA_ALIASES = {
     "UC_LoraStackLoaderModelOnly": ["lora stack", "stack loader", "model lora", "load lora", "lora loader"],
     "UC_LoraStack": ["lora stack", "stack", "dynamic group", "lora template", "load lora"],
     "UC_Krea2NAG": ["nag", "normalized attention guidance", "krea2 negative prompt", "negative guidance"],
+    "UC_SaveVideo": ["save video", "export video", "video combine", "keyframe video", "mp4 export"],
+    "UC_ConcatenateVideoList": ["join videos", "merge videos", "stitch videos", "video concat", "video list"],
+    "UC_ConcatenateAudioList": ["join audio", "merge audio", "stitch audio", "audio concat", "audio list"],
+    "UC_ListToAudioBatch": ["audio list to batch", "batch audio", "combine audio list"],
+    "UC_AudioBatchToList": ["audio batch to list", "unbatch audio", "split audio batch"],
+    "UC_MiniMaxH3ClipContinuationSave": ["save continuation", "h3 chain save", "save clip tail", "save continuation latent"],
+    "UC_MiniMaxH3ClipContinuationLoad": ["load continuation", "h3 chain load", "load clip tail", "load continuation latent"],
+    "UC_MiniMaxH3ClipContinuationTrim": ["trim continuation", "remove seam frames", "trim clip head"],
+    "UC_MiniMaxH3ClipContinuationEncoder": ["continuation encoder", "h3 chain encoder", "seamless clip continuation"],
+    "UC_MiniMaxH3ClipContinuationApply": ["apply continuation", "motion context", "pin clip tail", "h3 chain conditioning"],
+    "UC_MiniMaxH3ClipContinuationSampler": ["continuation sampler", "chain sampler", "segment list sampler", "h3 list sampler"],
 }
 
 
