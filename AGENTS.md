@@ -67,6 +67,23 @@ rules and must remain local only; do not stage or commit it.
   are not a demand to create tests or run `--final`. Existing untracked test
   files may be selected explicitly without staging unrelated artifacts.
 
+## User-facing copy and node documentation
+
+- Write node `description`s, input/output `tooltip`s, `node_metadata.py`
+  (`DESCRIPTIONS` and `EXTRA_ALIASES`), `README.md`, and guide-node prose in
+  plain, practical, jargon-free language for workflow users.
+- Explain what a node or control does to the generation or workflow, when to
+  connect optional inputs, what the default value provides, and the practical
+  effect of raising, lowering, or disabling a setting.
+- Avoid internal implementation terms ("cloned model", hook/wrapper names),
+  tensor/shape notation (`[B, C, N]`, "variable-length"), and raw paper or math
+  jargon (`1 + phi`, `tau`, `alpha`, `theta`, "L1-norm ratio clipping threshold")
+  in user-facing text.
+- Provide `tooltip`s on every user-facing input and output when adding or
+  updating a node, and update `node_metadata.py`, `README.md`
+  (`## Available nodes`), and any relevant guide node (`UC_*Guide`) in the same
+  change so separate documentation-audit passes are unnecessary.
+
 ## Managed VLM presets
 
 - Treat serialized runtime presets as generated data. Edit the matching readable
