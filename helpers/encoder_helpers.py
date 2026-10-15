@@ -251,6 +251,31 @@ def is_klein_vl_text_encoder(clip) -> bool:
     )
 
 
+def is_flux3_text_encoder(clip) -> bool:
+    tokenizer = getattr(clip, "tokenizer", None)
+    stage = getattr(clip, "cond_stage_model", None)
+    return any(
+        cls.__module__ == "comfy.text_encoders.flux"
+        and cls.__name__ in {"Flux3Tokenizer", "Flux3TEModel", "Flux3Qwen3VLModel"}
+        for owner in (tokenizer, stage, getattr(stage, "clip_model", None))
+        if owner is not None
+        for cls in type(owner).__mro__
+    )
+
+
+def format_flux3_prompt(prompt, system_prompt=""):
+    if system_prompt:
+        return (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{prompt}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+    return (
+        f"<|im_start|>user\n{prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
 def is_qwen_image21_text_encoder(clip) -> bool:
     return any(
         cls.__module__ == "comfy.text_encoders.qwen_image21"
@@ -1931,6 +1956,10 @@ def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata, em
             else:
                 metadata["attention_mask"] = attention_mask
         return conditioning, metadata
+    if is_flux3_text_encoder(clip) or is_klein_vl_text_encoder(clip):
+        if conditioning.ndim == 4:
+            conditioning = conditioning.movedim(1, 2).flatten(2)
+        return conditioning, metadata
     if key != "qwen3vl_4b" or conditioning.ndim != 4:
         return conditioning, metadata
 
@@ -2333,6 +2362,8 @@ def execute_token_fusion_visual_conditioning(
     minimax_h3 = is_minimax_h3_text_encoder(clip)
     if is_qwen_image21_text_encoder(clip):
         full_prompt = format_qwen_image21_prompt(prepared_prompt, system_prompt)
+    elif is_flux3_text_encoder(clip):
+        full_prompt = format_flux3_prompt(prepared_prompt, system_prompt)
     elif system_prompt is None:
         full_prompt = prepared_prompt
     elif minimax_h3:
@@ -3501,9 +3532,11 @@ def batch_complete_conditionings(conditionings):
     return batched
 
 
-def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False):
+def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False, flux3=False):
     if qwen_image21:
         return format_qwen_image21_prompt(prompt, system_prompt)
+    if flux3:
+        return format_flux3_prompt(prompt, system_prompt)
     if system_prompt:
         return (
             "<|im_start|>user\n<|im_end|>\n"
@@ -4511,6 +4544,7 @@ def execute_advanced_visual_consensus(
         raise ValueError("Connect a Visual Consensus Configuration.")
 
     qwen_image21 = is_qwen_image21_text_encoder(clip)
+    flux3 = is_flux3_text_encoder(clip)
     if qwen_image21 and ref_latent_mode != "off":
         raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
     minimax_h3 = is_minimax_h3_text_encoder(clip)
@@ -4528,7 +4562,7 @@ def execute_advanced_visual_consensus(
             format_minimax_h3_prompt(clean_prompt, system_prompt)
             if minimax_h3
             else _format_advanced_visual_consensus_prompt(
-                clean_prompt, system_prompt, qwen_image21
+                clean_prompt, system_prompt, qwen_image21, flux3
             )
         )
         conditioning = encode_embedding_classical_scaled_bias(
@@ -4578,7 +4612,7 @@ def execute_advanced_visual_consensus(
     full_prompt = (
         format_minimax_h3_prompt(prepared_prompt, system_prompt)
         if minimax_h3
-        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21)
+        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21, flux3)
     )
 
     if consensus_enabled:

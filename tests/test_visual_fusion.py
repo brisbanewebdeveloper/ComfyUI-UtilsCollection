@@ -1345,3 +1345,28 @@ def test_missing_and_malformed_grids_rejected():
         encoder_helpers.fuse_visual_token_sources(sources, _config(), "cpu")
     with pytest.raises(ValueError, match="inconsistent"):
         encoder_helpers.fuse_visual_token_sources(sources, _config(), "cpu", source_grids=[(1, 3)])
+
+
+def test_flux3_text_encoder_prompt_formatting_and_token_fusion_normalization(monkeypatch):
+    flux3_tok_type = type(
+        "Flux3Tokenizer", (), {"__module__": "comfy.text_encoders.flux"}
+    )
+    clip = types.SimpleNamespace(
+        tokenizer=flux3_tok_type(),
+        cond_stage_model=types.SimpleNamespace(clip_name="qwen3vl_4b"),
+    )
+    assert encoder_helpers.is_flux3_text_encoder(clip)
+    assert encoder_helpers.format_flux3_prompt("a blue car", "") == (
+        "<|im_start|>user\na blue car<|im_end|>\n<|im_start|>assistant\n"
+    )
+    assert encoder_helpers.format_flux3_prompt("a blue car", "Focus on reflections.") == (
+        "<|im_start|>system\nFocus on reflections.<|im_end|>\n"
+        "<|im_start|>user\na blue car<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+    tokens = {"qwen3vl_4b": [[(151644, 1.0), (872, 1.0), (198, 1.0), (100, 1.0)]]}
+    raw_cond = torch.ones((1, 8, 4, 2560))
+    normalized, _ = encoder_helpers._normalize_token_fused_conditioning(
+        clip, tokens, raw_cond, {}
+    )
+    assert normalized.shape == (1, 4, 20480)

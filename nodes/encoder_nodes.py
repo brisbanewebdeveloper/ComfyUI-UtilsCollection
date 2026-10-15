@@ -42,6 +42,8 @@ from ..helpers.encoder_helpers import(
     prepare_vae_reference_image,
     qwen3vl_visual_encoder_path,
     is_klein_vl_text_encoder,
+    is_flux3_text_encoder,
+    format_flux3_prompt,
     is_qwen_image21_text_encoder,
     format_qwen_image21_prompt,
     is_minimax_h3_text_encoder,
@@ -2218,6 +2220,7 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
         _, active_images, _ = extract_and_flatten_images(image_inputs)
         minimax_h3 = is_minimax_h3_text_encoder(clip)
         klein_vl = is_klein_vl_text_encoder(clip)
+        flux3 = is_flux3_text_encoder(clip)
         qwen_image21 = is_qwen_image21_text_encoder(clip)
         if minimax_h3 and ref_latent_mode != "off":
             raise ValueError(
@@ -2229,6 +2232,8 @@ class UC_AdvancedVisualConditioningEncode(io.ComfyNode):
                 return format_qwen_image21_prompt(user_prompt, system_prompt)
             if minimax_h3:
                 return format_minimax_h3_prompt(user_prompt, system_prompt)
+            if flux3:
+                return format_flux3_prompt(user_prompt, system_prompt)
             if klein_vl and not system_prompt:
                 return user_prompt
             if system_prompt or active_images:
