@@ -1,10 +1,11 @@
 import logging
 import math
 import numbers
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 
 import torch
 
+import comfy.ops
 from comfy import model_management
 from comfy.text_encoders.minimax import process_video_block
 
@@ -130,6 +131,8 @@ def _load_qwen_generation_model(clip):
     model = _qwen_clip_model(clip)
     if model is None:
         raise ValueError("Qwen multimodal generation requires a supported Core Qwen model wrapper.")
+    if hasattr(model, "reset_clip_options"):
+        model.reset_clip_options()
     if hasattr(clip, "load_model"):
         clip.load_model()
     device = getattr(getattr(clip, "patcher", None), "load_device", None) or getattr(
@@ -137,10 +140,24 @@ def _load_qwen_generation_model(clip):
     )
     if device is None:
         device = model.transformer.get_input_embeddings().weight.device
-    if hasattr(model, "reset_clip_options"):
-        model.reset_clip_options()
+    if hasattr(model, "set_clip_options"):
         model.set_clip_options({"layer": None, "execution_device": device})
     return model, device
+
+
+def _qwen_execution_context(clip, device):
+    stack = ExitStack()
+    if hasattr(model_management, "cuda_device_context"):
+        stack.enter_context(model_management.cuda_device_context(device))
+    stage = getattr(clip, "cond_stage_model", None)
+    if (
+        stage is not None
+        and hasattr(stage, "modules")
+        and getattr(device, "type", None) == "cuda"
+        and hasattr(comfy.ops, "use_quantized_matmul")
+    ):
+        stack.enter_context(comfy.ops.use_quantized_matmul(stage, device))
+    return stack
 
 
 def _preprocess_qwen3vl_image(model, device, image):
@@ -235,12 +252,7 @@ def generate_qwen3vl_video(
     if not hasattr(model.transformer, "build_image_inputs"):
         raise ValueError("Video input requires a Core Qwen3-VL 4B, 8B, or 32B model wrapper.")
 
-    context = (
-        model_management.cuda_device_context(device)
-        if hasattr(model_management, "cuda_device_context")
-        else nullcontext()
-    )
-    with context:
+    with _qwen_execution_context(clip, device):
         image_blocks = [
             _preprocess_qwen3vl_image(model, device, image) for image in images
         ]
@@ -307,9 +319,10 @@ def generate_qwen3vl_video(
         position_ids, visual_mask, deepstack = model.transformer.build_image_inputs(
             embeds, embeds_info
         )
+        transformer_args = {k: v for k, v in generation_args.items() if k != "mtp"}
         return model.transformer.generate(
             embeds,
-            **generation_args,
+            **transformer_args,
             position_ids=position_ids,
             visual_pos_masks=visual_mask,
             deepstack_embeds=deepstack,
