@@ -462,13 +462,17 @@ def save_keyframe_optimized_video(
     elif "nvenc" in target_codec and (out_width < 128 or out_height < 128 or not torch.cuda.is_available()):
         target_codec = "libx265" if "hevc" in target_codec else "libx264"
 
-    container = av.open(output_path, mode="w")
+    container = av.open(
+        output_path,
+        mode="w",
+        options={"movflags": "use_metadata_tags+faststart"},
+    )
     try:
         if prompt is not None:
-            container.metadata["prompt"] = json.dumps(prompt)
+            container.metadata["prompt"] = prompt if isinstance(prompt, str) else json.dumps(prompt)
         if extra_pnginfo is not None and isinstance(extra_pnginfo, dict):
             for k, v in extra_pnginfo.items():
-                container.metadata[k] = json.dumps(v)
+                container.metadata[k] = v if isinstance(v, str) else json.dumps(v)
 
         rate = Fraction(round(fps * 1000), 1000)
         stream = container.add_stream(target_codec, rate=rate)
