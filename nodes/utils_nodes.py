@@ -137,10 +137,11 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationSave",
             display_name="MiniMax H3 Clip Continuation Save",
             category="advanced/conditioning",
-            description="Saves the ending of a generated clip so the next clip in your sequence can pick up seamlessly where it left off.",
+            description="Saves the ending of a generated clip (latent or decoded frames/audio) so the next clip in your sequence can pick up seamlessly where it left off.",
             inputs=[
-                io.Image.Input("images", tooltip="Frames from the video clip you just made."),
-                io.Audio.Input("audio", optional=True, tooltip="Optional sound track from the same clip. The tail audio is saved to match the ending frames."),
+                io.Image.Input("images", optional=True, tooltip="Optional decoded frames from the video clip you just made. Can be left disconnected when latent is connected."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional sound track from the same clip. Can be left disconnected when latent is connected."),
+                io.Latent.Input("latent", optional=True, tooltip="Optional sampler output latent (recommended). Saves both video and audio streams directly in latent space so the next clip continues without decoding or re-encoding."),
                 io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="How many ending frames to keep for the next clip to follow (default 22 = ~0.9s)."),
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Name or folder for this continuation sequence. Keep this the same on both Save and Load."),
                 io.Int.Input("clip_index", default=1, min=0, max=99999, step=1, tooltip="Manual clip number. Start with 1, then increase by 1 for each new clip. Ignored when auto_index is enabled."),
@@ -152,13 +153,13 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0, auto_index=False):
+    def execute(cls, images=None, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0, auto_index=False, latent=None):
         if auto_index or int(clip_index) <= 0:
             target_index = get_latest_minimax_h3_clip_continuation_index(filename_prefix) + 1
         else:
             target_index = int(clip_index)
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, target_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0,
+            images, int(tail_frames), filename_prefix, target_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0, latent=latent,
         )
         return io.NodeOutput(path)
 

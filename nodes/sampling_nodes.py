@@ -441,6 +441,16 @@ class UC_H3RefVideoSegments(io.ComfyNode):
                     is_output_list=True,
                     tooltip="List of word-timed transcripts aligned to each individual segment.",
                 ),
+                io.Combo.Output(
+                    "tail_frames",
+                    options=["22", "5", "39", "56"],
+                    tooltip="The selected overlap frame count (e.g. '22'), ready to connect directly to tail_frames on MiniMax H3 Clip Continuation Sampler.",
+                ),
+                io.Int.Output(
+                    "trim_trailing_frames",
+                    is_output_list=True,
+                    tooltip="Number of padded frames added at the end of each segment to fit the H3 grid (0 for full segments, positive only on the final segment when padded). Connect to trim_trailing_frames on MiniMax H3 Clip Continuation Trim to cut off the padded tail.",
+                ),
             ],
         )
 
@@ -466,6 +476,8 @@ class UC_H3RefVideoSegments(io.ComfyNode):
             length_list,
             video_list,
             transcript_list,
+            tail_frames_opt,
+            trim_trailing_list,
         ) = split_h3_video_components_into_segments(
             video=video,
             megapixels=megapixels,
@@ -476,6 +488,7 @@ class UC_H3RefVideoSegments(io.ComfyNode):
             whisper_model=whisper_model,
             timestamp_format=timestamp_format,
             enable_whisper=enable_whisper,
+            return_trim_metadata=True,
         )
         return io.NodeOutput(
             frames_list,
@@ -485,6 +498,8 @@ class UC_H3RefVideoSegments(io.ComfyNode):
             length_list,
             video_list,
             transcript_list,
+            tail_frames_opt,
+            trim_trailing_list,
         )
 
 
@@ -701,6 +716,16 @@ class UC_MiniMaxH3ClipContinuationSampler(io.ComfyNode):
                     is_output_list=True,
                     tooltip="Trailing padded frames to remove on the final segment. Connect directly to trim_trailing_frames on MiniMax H3 Clip Continuation Trim.",
                 ),
+                io.Latent.Output(
+                    "combined_latent",
+                    display_name="combined_latent",
+                    tooltip="Single stitched full-length video and audio latent with overlapping seams already removed.",
+                ),
+                io.Latent.Output(
+                    "last_latent",
+                    display_name="last_latent",
+                    tooltip="Final segment's untrimmed latent, ready to connect to MiniMax H3 Clip Continuation Save to continue the chain in a later run.",
+                ),
             ],
         )
 
@@ -715,7 +740,7 @@ class UC_MiniMaxH3ClipContinuationSampler(io.ComfyNode):
         tail_frames="22",
         audio_tail_frames=24,
     ) -> io.NodeOutput:
-        segment_latents, trim_leading_frames, trim_trailing_frames = (
+        segment_latents, trim_leading_frames, trim_trailing_frames, combined_latent, last_latent = (
             sample_minimax_h3_clip_continuation_chain(
                 noise=noise,
                 guider=guider,
@@ -726,7 +751,7 @@ class UC_MiniMaxH3ClipContinuationSampler(io.ComfyNode):
                 audio_tail_frames=audio_tail_frames,
             )
         )
-        return io.NodeOutput(segment_latents, trim_leading_frames, trim_trailing_frames)
+        return io.NodeOutput(segment_latents, trim_leading_frames, trim_trailing_frames, combined_latent, last_latent)
 
 
 SAMPLING_NODES = [

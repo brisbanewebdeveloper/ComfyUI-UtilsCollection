@@ -4100,10 +4100,16 @@ class UC_MiniMaxH3ClipContinuationEncoder(UC_AdvancedMiniMaxH3ImageToVideo):
             enable_caching=enable_caching,
             token_fusion=fusion_method == "token_fusion",
         )
-        trim_frames = (
-            int(conditioning[0][1].get("minimax_trim_frames", 0))
+        cond_meta = (
+            conditioning[0][1]
             if conditioning and len(conditioning[0]) > 1 and isinstance(conditioning[0][1], dict)
-            else 0
+            else {}
+        )
+        trim_frames = int(
+            cond_meta.get(
+                "minimax_trim_frames",
+                cond_meta.get("uc_overlap_frames", latent.get("uc_overlap_frames", 0)),
+            )
         )
         return io.NodeOutput(conditioning, latent, trim_frames)
 

@@ -400,6 +400,10 @@ def test_node_schema():
     assert seg_schema.outputs[4].is_output_list is True
     assert seg_schema.outputs[5].is_output_list is True
     assert seg_schema.outputs[6].is_output_list is True
+    assert seg_schema.outputs[7].id == "tail_frames"
+    assert seg_schema.outputs[7].is_output_list is False
+    assert seg_schema.outputs[8].id == "trim_trailing_frames"
+    assert seg_schema.outputs[8].is_output_list is True
 
     # Test split_h3_video_components_into_segments with megapixels=0.0 preserves resolution
     import types
@@ -433,6 +437,8 @@ def test_node_schema():
     assert len(l_361) == 3
     assert l_361 == [141, 141, 124]
     assert trail_361 == [0, 0, 1]
+    assert [getattr(x, "_uc_overlap_frames", None) for x in l_361] == [0, 22, 22]
+    assert [getattr(x, "_uc_padded_frames", None) for x in l_361] == [0, 0, 1]
 
 
 def test_dmad_scheduler_exact_values():

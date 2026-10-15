@@ -1366,10 +1366,15 @@ def test_clip_continuation_apply_and_sampler(monkeypatch, tmp_path):
         tail_frames=["22"],
         audio_tail_frames=[24],
     )
-    segment_latents, trim_leading, trim_trailing = sampler_out.args
+    segment_latents, trim_leading, trim_trailing, combined_latent, last_latent = sampler_out.args
     assert len(segment_latents) == 3
     assert trim_leading == [0, 22, 22]
     assert trim_trailing == [0, 0, 9]
+    comb_v, comb_a = sampling_helpers.h3_unpack_av(combined_latent)
+    assert comb_v.shape == (1, 24, 37 + 30 + 30, 8, 8)
+    assert comb_a.shape == (1, 32, 2, 207 + (207 - 37) + (207 - 37))
+    last_v, _ = sampling_helpers.h3_unpack_av(last_latent)
+    assert float(last_v.mean()) == pytest.approx(3.0)
 
     # Segment 0 had no continuation keyframes; Segment 1 got Segment 0's tail (value 1.0); Segment 2 got Segment 1's tail (value 2.0)
     assert "minimax_keyframes" not in seen_conds[0][0][1]

@@ -59,8 +59,28 @@ def minimax_h3_frame_count(length: int) -> int:
     return ((length - 5 + 16) // 17) * 17 + 5
 
 
+def _extract_uc_segment_meta(*sources) -> tuple[int | None, int | None]:
+    ov = None
+    pad = None
+    for src in sources:
+        if src is None:
+            continue
+        if ov is None:
+            if hasattr(src, "_uc_overlap_frames"):
+                ov = int(getattr(src, "_uc_overlap_frames"))
+            elif isinstance(src, dict) and "_uc_overlap_frames" in src:
+                ov = int(src["_uc_overlap_frames"])
+        if pad is None:
+            if hasattr(src, "_uc_padded_frames"):
+                pad = int(getattr(src, "_uc_padded_frames"))
+            elif isinstance(src, dict) and "_uc_padded_frames" in src:
+                pad = int(src["_uc_padded_frames"])
+    return ov, pad
+
+
 def minimax_h3_empty_av_latent(width: int, height: int, length: int) -> tuple[dict, int]:
     """Create the batch-one joint video/audio latent expected by MiniMax H3."""
+    ov, pad = _extract_uc_segment_meta(length)
     width = int(width)
     height = int(height)
     if width < 32 or height < 32 or width % 32 or height % 32:
@@ -71,7 +91,12 @@ def minimax_h3_empty_av_latent(width: int, height: int, length: int) -> tuple[di
     device = comfy.model_management.intermediate_device()
     video = torch.zeros([1, 24, video_t, height // 16, width // 16], device=device)
     audio = torch.zeros([1, 32, 2, audio_t], device=device)
-    return {"samples": comfy.nested_tensor.NestedTensor((video, audio))}, frame_count
+    out = {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+    if ov is not None:
+        out["uc_overlap_frames"] = ov
+    if pad is not None:
+        out["uc_padded_frames"] = pad
+    return out, frame_count
 
 
 def prepare_vlm_image(image: torch.Tensor, vlm_resolution: int) -> torch.Tensor:
@@ -341,6 +366,15 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
     parsed_videos, parsed_audios = extract_minimax_h3_reference_media(reference_media)
     clip = cache.prepare_clip(clip)
     latent, frame_count = minimax_h3_empty_av_latent(width, height, length)
+    meta_sources = [length]
+    for vid_item, aud_item in parsed_videos:
+        meta_sources.extend((vid_item, aud_item))
+    meta_sources.extend(parsed_audios)
+    seg_ov, seg_pad = _extract_uc_segment_meta(*meta_sources)
+    if seg_ov is not None:
+        latent["uc_overlap_frames"] = seg_ov
+    if seg_pad is not None:
+        latent["uc_padded_frames"] = seg_pad
 
     video_fps = 2
     video_latent_mode = "full video"
@@ -630,6 +664,10 @@ def execute_advanced_minimax_h3_reference_media_image_to_video(
         metadata["minimax_keyframes"] = keyframes
     if references:
         metadata["minimax_refs"] = references
+    if seg_ov is not None:
+        metadata["uc_overlap_frames"] = seg_ov
+    if seg_pad is not None:
+        metadata["uc_padded_frames"] = seg_pad
     metadata["minimax_frame_count"] = frame_count
     conditioning = node_helpers.conditioning_set_values(conditioning, metadata)
 

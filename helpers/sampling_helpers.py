@@ -838,15 +838,30 @@ def _extract_positive_cond_from_guider(guider: Any) -> list[Any]:
     return out
 
 
+class _H3SegmentInt(int):
+    """Integer subclass that preserves per-segment overlap and padding metadata across ComfyUI INT wires."""
+    _uc_overlap_frames: int = 0
+    _uc_padded_frames: int = 0
+
+
+def _unwrap_scalar_or_indexed(val: Any, index: int) -> Any:
+    if isinstance(val, list) and len(val) > 0:
+        item = val[min(index, len(val) - 1)]
+        while isinstance(item, list) and len(item) > 0:
+            item = item[0]
+        return item
+    return val
+
+
 def sample_minimax_h3_clip_continuation_chain(
     noise: Any,
     guider: Any,
     sampler: Any,
     sigmas: Any,
     latent: Any,
-    tail_frames: int | str = "22",
-    audio_tail_frames: int = 24,
-) -> tuple[list[dict[str, Any]], list[int], dict[str, Any], dict[str, Any]]:
+    tail_frames: int | str | Sequence[int | str] = "22",
+    audio_tail_frames: int | Sequence[int] = 24,
+) -> tuple[list[dict[str, Any]], list[int], list[int], dict[str, Any], dict[str, Any]]:
     """Sample a list of MiniMax H3 segment guiders and latents in one run, chaining each segment's sampled AV latent tail into the next."""
     from .model_helpers import apply_minimax_h3_clip_continuation, h3_steps_for_frames
 
@@ -854,8 +869,8 @@ def sample_minimax_h3_clip_continuation_chain(
     sampler_val = _unwrap_first_scalar(sampler)
     sigmas_val = _unwrap_first_scalar(sigmas)
     guider_list = _unwrap_guider_list(guider)
-    tail_f_val = int(_unwrap_first_scalar(tail_frames) or 22)
-    aud_tail_f_val = int(_unwrap_first_scalar(audio_tail_frames) if audio_tail_frames is not None else 24)
+    default_tail_f = int(_unwrap_first_scalar(tail_frames) or 22)
+    default_aud_tail_f = int(_unwrap_first_scalar(audio_tail_frames) if audio_tail_frames is not None else 24)
 
     if not guider_list:
         raise ValueError("UC_MiniMaxH3ClipContinuationSampler requires a 'guider' input (from CFGGuider or BasicGuider).")
@@ -880,15 +895,25 @@ def sample_minimax_h3_clip_continuation_chain(
         sub_v, sub_a = h3_unpack_av(raw_lat, f"segment_{i}_latent")
         seg_latent = h3_pack_av(raw_lat, sub_v.clone(), None if sub_a is None else sub_a.clone())
 
-        seg_tail_frames = int(raw_lat.get("uc_overlap_frames", tail_f_val) or tail_f_val)
-        seg_padded_frames = int(raw_lat.get("uc_padded_frames", 0) or 0)
+        cond_meta = (
+            seg_cond[0][1]
+            if seg_cond and len(seg_cond[0]) > 1 and isinstance(seg_cond[0][1], dict)
+            else {}
+        )
+        indexed_tail_f = int(_unwrap_scalar_or_indexed(tail_frames, i) or default_tail_f)
+        indexed_aud_tail_f = int(
+            _unwrap_scalar_or_indexed(audio_tail_frames, i)
+            if audio_tail_frames is not None
+            else default_aud_tail_f
+        )
+
+        lat_ov = raw_lat.get("uc_overlap_frames", cond_meta.get("uc_overlap_frames"))
+        seg_tail_frames = int(lat_ov) if lat_ov is not None and int(lat_ov) > 0 else indexed_tail_f
+        lat_pad = raw_lat.get("uc_padded_frames", cond_meta.get("uc_padded_frames", 0))
+        seg_padded_frames = int(lat_pad or 0)
 
         if i == 0:
-            existing_trim = (
-                int(seg_cond[0][1].get("minimax_trim_frames", 0))
-                if seg_cond and len(seg_cond[0]) > 1 and isinstance(seg_cond[0][1], dict)
-                else 0
-            )
+            existing_trim = int(cond_meta.get("minimax_trim_frames", 0))
             active_cond = seg_cond
             trim_i = existing_trim
         else:
@@ -897,7 +922,7 @@ def sample_minimax_h3_clip_continuation_chain(
                 seg_cond,
                 seg_latent,
                 tail_frames=seg_tail_frames,
-                audio_tail_frames=aud_tail_f_val,
+                audio_tail_frames=indexed_aud_tail_f,
                 continuation_latent=prev_sampled,
             )
 
@@ -916,7 +941,31 @@ def sample_minimax_h3_clip_continuation_chain(
         trim_leading_list.append(int(trim_i))
         trim_trailing_list.append(seg_padded_frames)
 
-    return sampled_latents, trim_leading_list, trim_trailing_list
+    # Assemble combined full-length AV latent by removing the pinned overlap head from segments 1..N-1
+    comb_v_parts: list[torch.Tensor] = []
+    comb_a_parts: list[torch.Tensor] = []
+    for i, (seg_out, trim_f) in enumerate(zip(sampled_latents, trim_leading_list)):
+        sv, sa = h3_unpack_av(seg_out, f"sampled_segment_{i}")
+        if i == 0 or trim_f <= 0:
+            comb_v_parts.append(sv)
+            if sa is not None:
+                comb_a_parts.append(sa)
+        else:
+            ov_v = h3_steps_for_frames(trim_f) or 0
+            ov_a = int(round(float(trim_f) / float(H3_FPS) * float(H3_AUDIO_FPS)))
+            comb_v_parts.append(sv[:, :, ov_v:] if ov_v < sv.shape[2] else sv[:, :, :0])
+            if sa is not None:
+                comb_a_parts.append(sa[..., ov_a:] if ov_a < sa.shape[-1] else sa[..., :0])
+
+    combined_v = torch.cat(comb_v_parts, dim=2) if len(comb_v_parts) > 1 else comb_v_parts[0].clone()
+    combined_a = (
+        (torch.cat(comb_a_parts, dim=-1) if len(comb_a_parts) > 1 else comb_a_parts[0].clone())
+        if comb_a_parts
+        else None
+    )
+    combined_latent = h3_pack_av(sampled_latents[0], combined_v, combined_a)
+    last_latent = sampled_latents[-1]
+    return sampled_latents, trim_leading_list, trim_trailing_list, combined_latent, last_latent
 
 
 def split_h3_video_components_into_segments(
@@ -964,7 +1013,7 @@ def split_h3_video_components_into_segments(
     if ov_frames >= window_frames:
         ov_frames = max(0, window_frames - 17)
 
-    windows: list[tuple[int, int, int, int]] = []
+    windows: list[tuple[int, int, int, int, int]] = []
     curr = start_offset
     while curr < total_frames:
         if segment_count > 0 and len(windows) == int(segment_count) - 1:
@@ -972,9 +1021,11 @@ def split_h3_video_components_into_segments(
         else:
             real_end = min(total_frames, curr + window_frames)
         real_len = max(1, real_end - curr)
-        seg_length = h3_snap_frame_count(real_len)
+        seg_overlap = 0 if not windows else max(0, windows[-1][1] - curr)
+        min_needed_len = max(real_len, seg_overlap + 1) if seg_overlap > 0 else real_len
+        seg_length = h3_snap_frame_count(min_needed_len)
         padded_frames = max(0, seg_length - real_len)
-        windows.append((curr, real_end, seg_length, padded_frames))
+        windows.append((curr, real_end, seg_length, seg_overlap, padded_frames))
         if real_end >= total_frames or (segment_count > 0 and len(windows) >= int(segment_count)):
             break
         next_curr = real_end - ov_frames
@@ -990,7 +1041,7 @@ def split_h3_video_components_into_segments(
     trim_trailing_list = []
     soundtrack = components.audio
 
-    for f_start, real_end, seg_length, padded_frames in windows:
+    for f_start, real_end, seg_length, seg_overlap, padded_frames in windows:
         frame_positions = [min(pos, max(f_start, real_end - 1)) for pos in range(f_start, f_start + seg_length)]
         frame_indices = [min(max(0, round(pos * source_rate / 24)), source_count - 1) for pos in frame_positions]
         frames = source_frames[frame_indices]
@@ -1010,19 +1061,27 @@ def split_h3_video_components_into_segments(
         else:
             audio_samples = torch.zeros(1, 2, aligned_samples)
 
-        audio = {"waveform": audio_samples, "sample_rate": 32000}
+        audio = {
+            "waveform": audio_samples,
+            "sample_rate": 32000,
+            "_uc_overlap_frames": int(seg_overlap),
+            "_uc_padded_frames": int(padded_frames),
+        }
         t_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, seg_length) if enable_whisper else ""
         prep_video = InputImpl.VideoFromComponents(Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)))
-        frames._uc_overlap_frames = int(ov_frames)
+        frames._uc_overlap_frames = int(seg_overlap)
         frames._uc_padded_frames = int(padded_frames)
+        seg_len_obj = _H3SegmentInt(seg_length)
+        seg_len_obj._uc_overlap_frames = int(seg_overlap)
+        seg_len_obj._uc_padded_frames = int(padded_frames)
         try:
-            prep_video._uc_overlap_frames = int(ov_frames)
+            prep_video._uc_overlap_frames = int(seg_overlap)
             prep_video._uc_padded_frames = int(padded_frames)
         except Exception:
             pass
         frames_list.append(frames)
         audio_list.append(audio)
-        length_list.append(seg_length)
+        length_list.append(seg_len_obj)
         video_list.append(prep_video)
         transcript_list.append(t_audio)
         trim_trailing_list.append(int(padded_frames))
