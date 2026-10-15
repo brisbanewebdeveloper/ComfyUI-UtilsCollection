@@ -34,6 +34,7 @@ EXPECTED_TOPICS = [
     "placement_editor",
     "paint_layer",
     "mediapipe_face_composite",
+    "create_bounding_boxes",
 ]
 
 

@@ -103,6 +103,7 @@ class SamplingUtils(ComfyExtension):
             UC_LayeredBackgroundComposite,
             UC_MediaPipeFaceCompositeOptions,
             UC_MediaPipeFaceComposite,
+            UC_CreateBoundingBoxes,
             UC_SystemMessagePresets,
             UC_SystemMessageVideoPresets,
             UC_InstructPromptPresets,

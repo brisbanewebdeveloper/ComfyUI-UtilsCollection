@@ -725,3 +725,234 @@ def crop_staged_layers_by_indices(image, layer_masks, layer_indices):
             raise ValueError(f"Layer mask index {index} is empty.") from error
         crops.append(image[:, y : y + height, x : x + width])
     return crops
+
+
+_BBOX_DEFAULT_COLORS = (
+    "#ff6b6b",
+    "#4ecdc4",
+    "#ffe66d",
+    "#a29bfe",
+    "#ff9f43",
+    "#54a0ff",
+    "#5f27cd",
+    "#1dd1a1",
+)
+
+
+def _clamp_unit(value, default=0.0) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(numeric):
+        return float(default)
+    return max(0.0, min(1.0, numeric))
+
+
+def _normalize_region_entry(entry: dict, width: int, height: int) -> dict | None:
+    if not isinstance(entry, dict):
+        return None
+    w_px = max(1, int(width or 1024))
+    h_px = max(1, int(height or 1024))
+
+    if "bbox" in entry and isinstance(entry.get("bbox"), (list, tuple)) and len(entry["bbox"]) == 4:
+        try:
+            ymin, xmin, ymax, xmax = (float(v) / 1000.0 for v in entry["bbox"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Bounding box element 'bbox' must contain four numeric coordinates.") from exc
+        x = _clamp_unit(min(xmin, xmax))
+        y = _clamp_unit(min(ymin, ymax))
+        w = _clamp_unit(abs(xmax - xmin))
+        h = _clamp_unit(abs(ymax - ymin))
+        meta = entry
+    elif "w" in entry and "h" in entry and ("width" not in entry or entry.get("normalized", True)):
+        raw_x = float(entry.get("x", 0.0) or 0.0)
+        raw_y = float(entry.get("y", 0.0) or 0.0)
+        raw_w = float(entry.get("w", 0.0) or 0.0)
+        raw_h = float(entry.get("h", 0.0) or 0.0)
+        if raw_w < 0.0:
+            raw_x, raw_w = raw_x + raw_w, -raw_w
+        if raw_h < 0.0:
+            raw_y, raw_h = raw_y + raw_h, -raw_h
+        x = _clamp_unit(raw_x)
+        y = _clamp_unit(raw_y)
+        w = max(0.0, min(1.0 - x, _clamp_unit(raw_w)))
+        h = max(0.0, min(1.0 - y, _clamp_unit(raw_h)))
+        meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else entry
+    elif all(k in entry for k in ("x", "y", "width", "height")):
+        try:
+            px_x = float(entry.get("x", 0.0) or 0.0)
+            px_y = float(entry.get("y", 0.0) or 0.0)
+            px_w = float(entry.get("width", 0.0) or 0.0)
+            px_h = float(entry.get("height", 0.0) or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Pixel bounding box coordinates must be numeric.") from exc
+        if px_w < 0.0:
+            px_x, px_w = px_x + px_w, -px_w
+        if px_h < 0.0:
+            px_y, px_h = px_y + px_h, -px_h
+        x = _clamp_unit(px_x / w_px)
+        y = _clamp_unit(px_y / h_px)
+        w = max(0.0, min(1.0 - x, _clamp_unit(px_w / w_px)))
+        h = max(0.0, min(1.0 - y, _clamp_unit(px_h / h_px)))
+        meta = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else entry
+    else:
+        return None
+
+    from comfy_extras.color_util import normalize_palette
+
+    raw_palette = meta.get("palette")
+    if raw_palette is None:
+        raw_palette = meta.get("color_palette")
+    if raw_palette is None and meta.get("color"):
+        raw_palette = [meta.get("color")]
+    if isinstance(raw_palette, str):
+        raw_palette = [part.strip() for part in raw_palette.split(",") if part.strip()]
+    palette = normalize_palette(raw_palette if isinstance(raw_palette, list) else [])[:5]
+
+    etype = "text" if str(meta.get("type", entry.get("type", "obj"))).lower() == "text" else "obj"
+    return {
+        "x": x,
+        "y": y,
+        "w": w,
+        "h": h,
+        "type": etype,
+        "text": str(meta.get("text", entry.get("text", "")) or "") if etype == "text" else "",
+        "desc": str(meta.get("desc", entry.get("desc", "")) or ""),
+        "palette": palette,
+        "included": bool(entry.get("included", True)),
+        "locked": bool(entry.get("locked", False)),
+    }
+
+
+def parse_bounding_box_editor_data(box_data, width: int, height: int) -> tuple[list[dict], list[dict] | None]:
+    if not box_data:
+        return [], None
+    parsed = box_data
+    if isinstance(box_data, str):
+        text = box_data.strip()
+        if not text:
+            return [], None
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return [], None
+
+    raw_boxes = []
+    raw_last_incoming = None
+    if isinstance(parsed, dict):
+        raw_boxes = parsed.get("boxes") if isinstance(parsed.get("boxes"), list) else []
+        if isinstance(parsed.get("last_incoming"), list):
+            raw_last_incoming = parsed.get("last_incoming")
+    elif isinstance(parsed, list):
+        raw_boxes = parsed
+
+    regions = []
+    for item in raw_boxes:
+        norm = _normalize_region_entry(item, width, height)
+        if norm is not None:
+            regions.append(norm)
+
+    last_incoming = None
+    if raw_last_incoming is not None:
+        last_incoming = []
+        for item in raw_last_incoming:
+            norm = _normalize_region_entry(item, width, height)
+            if norm is not None:
+                last_incoming.append({
+                    k: norm[k] for k in ("x", "y", "w", "h", "type", "text", "desc", "palette")
+                })
+    return regions, last_incoming
+
+
+def execute_create_bounding_boxes(
+    width: int,
+    height: int,
+    box_data: str = '{"version":1,"boxes":[],"last_incoming":null}',
+    background=None,
+    bboxes=None,
+):
+    from comfy_extras import nodes_bounding_boxes as core_bboxes
+
+    w_px = max(64, int(width or 1024))
+    h_px = max(64, int(height or 1024))
+    if background is not None and torch.is_tensor(background) and background.ndim == 4 and background.shape[0] > 0:
+        pass
+
+    incoming_boxes = core_bboxes.boxes_from_input(bboxes, w_px, h_px)
+    incoming_regions = core_bboxes.boxes_to_regions(incoming_boxes, w_px, h_px) if incoming_boxes else []
+    canonical_incoming = [
+        {
+            "x": round(float(r.get("x", 0.0)), 6),
+            "y": round(float(r.get("y", 0.0)), 6),
+            "w": round(float(r.get("w", 0.0)), 6),
+            "h": round(float(r.get("h", 0.0)), 6),
+            "type": "text" if r.get("type") == "text" else "obj",
+            "text": str(r.get("text", "") or ""),
+            "desc": str(r.get("desc", "") or ""),
+            "palette": list(r.get("palette") or []),
+        }
+        for r in incoming_regions
+    ]
+
+    editor_regions, last_incoming = parse_bounding_box_editor_data(box_data, w_px, h_px)
+    canonical_last = [
+        {
+            "x": round(float(r.get("x", 0.0)), 6),
+            "y": round(float(r.get("y", 0.0)), 6),
+            "w": round(float(r.get("w", 0.0)), 6),
+            "h": round(float(r.get("h", 0.0)), 6),
+            "type": "text" if r.get("type") == "text" else "obj",
+            "text": str(r.get("text", "") or ""),
+            "desc": str(r.get("desc", "") or ""),
+            "palette": list(r.get("palette") or []),
+        }
+        for r in (last_incoming or [])
+    ]
+
+    upstream_changed = bool(canonical_incoming) and canonical_incoming != canonical_last
+    if upstream_changed or (canonical_incoming and not editor_regions):
+        active_regions = [
+            {**region, "included": True, "locked": False}
+            for region in incoming_regions
+        ]
+    else:
+        active_regions = [
+            region for region in editor_regions if region.get("included", True)
+        ]
+
+    preview_regions = []
+    for index, region in enumerate(active_regions):
+        palette = list(region.get("palette") or [])
+        if not palette:
+            palette = [_BBOX_DEFAULT_COLORS[index % len(_BBOX_DEFAULT_COLORS)]]
+        preview_regions.append({**region, "palette": palette})
+
+    preview = core_bboxes.render_preview(
+        preview_regions,
+        w_px,
+        h_px,
+        core_bboxes._bg_from_image(background),
+    )
+    pixel_bboxes = core_bboxes.fractions_to_bbox_frame(active_regions, w_px, h_px)
+    elements = core_bboxes.build_elements(active_regions)
+
+    bg_descriptor = None
+    if background is not None and torch.is_tensor(background) and background.ndim == 4 and background.shape[0] > 0:
+        bg_descriptor = _save_editor_preview(background[:1, :, :, :3], "uc_bboxes_bg")
+
+    ui_payload = {
+        "version": 1,
+        "dims": [w_px, h_px],
+        "background": bg_descriptor,
+    }
+    if canonical_incoming:
+        ui_payload["input_regions"] = canonical_incoming
+        ui_payload["upstream_changed"] = upstream_changed
+
+    return io.NodeOutput(
+        preview,
+        pixel_bboxes,
+        elements,
+        ui={"uc_bounding_boxes_editor": (ui_payload,)},
+    )

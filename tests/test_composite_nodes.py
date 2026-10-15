@@ -3696,3 +3696,90 @@ def test_face_run_staged_loads_no_models(monkeypatch):
         placement_data='{"version":3,"layers":{}}',
     )
     assert output.result[0].sum() > 0
+
+
+def test_create_bounding_boxes_nodes1_elements_and_flux3_layout_compatibility(monkeypatch):
+    monkeypatch.setattr(
+        composite_helpers, "_save_editor_preview", lambda *args: {"filename": "bg.png"}
+    )
+    node = composite_nodes.UC_CreateBoundingBoxes
+    schema = node.define_schema()
+    assert schema.node_id == "UC_CreateBoundingBoxes"
+    assert schema.display_name == "Create Bounding Boxes (Nodes 1.0)"
+    assert [out.display_name for out in schema.outputs] == ["preview", "bboxes", "elements"]
+
+    box_data = json.dumps({
+        "version": 1,
+        "boxes": [
+            {
+                "x": 0.1,
+                "y": 0.2,
+                "w": 0.4,
+                "h": 0.3,
+                "type": "obj",
+                "desc": "a red sports car",
+                "palette": ["#ff0000"],
+                "included": True,
+            },
+            {
+                "x": 0.5,
+                "y": 0.6,
+                "w": 0.25,
+                "h": 0.2,
+                "type": "text",
+                "text": "FAST",
+                "desc": "neon sign",
+                "palette": ["#00ffff"],
+                "included": True,
+            },
+            {
+                "x": 0.0,
+                "y": 0.0,
+                "w": 0.5,
+                "h": 0.5,
+                "type": "obj",
+                "desc": "excluded box",
+                "included": False,
+            },
+        ],
+        "last_incoming": None,
+    })
+
+    out = node.execute(
+        width=1000,
+        height=500,
+        box_data=box_data,
+        background=torch.zeros(1, 500, 1000, 3),
+    )
+    preview, bboxes, elements = out.args
+    assert preview.shape == (1, 500, 1000, 3)
+    assert bboxes == [[
+        {"x": 100, "y": 100, "width": 400, "height": 150},
+        {"x": 500, "y": 300, "width": 250, "height": 100},
+    ]]
+    assert elements == [
+        {
+            "type": "obj",
+            "bbox": [200, 100, 500, 500],
+            "desc": "a red sports car",
+            "color_palette": ["#FF0000"],
+        },
+        {
+            "type": "text",
+            "bbox": [600, 500, 800, 750],
+            "text": "FAST",
+            "desc": "neon sign",
+            "color_palette": ["#00FFFF"],
+        },
+    ]
+
+    from comfy_extras.nodes_flux import Flux3LayoutPrompt
+
+    layout_prompt = Flux3LayoutPrompt.execute(
+        prompt="A street scene with <obj_1> under <obj_2>.",
+        element=elements,
+    ).args[0]
+    assert '"id": "obj_1"' in layout_prompt
+    assert '"bbox": [200, 100, 500, 500]' in layout_prompt
+    assert '"id": "obj_2"' in layout_prompt
+    assert '"desc": "neon sign \\"FAST\\""' in layout_prompt

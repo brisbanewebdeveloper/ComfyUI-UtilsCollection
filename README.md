@@ -198,6 +198,7 @@ the base-resolution conditioning fusion.
 - `UC_LayeredBackgroundComposite`
 - `UC_MediaPipeFaceCompositeOptions`
 - `UC_MediaPipeFaceComposite`
+- `UC_CreateBoundingBoxes`
 - `UC_ListToImageBatch`
 - `UC_ImageBatchToList`
 - `UC_ImageBatchToBatchList`
@@ -251,6 +252,8 @@ For further models, use `MODEL_MIGRATION.md` and the shared `models/migrations.j
 `UC_StagedLayeredBackgroundComposite` builds a scene from a background and ordered foreground sockets. Use `run_staging` to retain cutouts and populate the placement editor. Use `run_staged` to composite retained cutouts without loading models or evaluating foreground branches. Use `full_run` to restage and composite in one queue. `foreground_0` is the backmost layer. Retained cutouts are held in server memory and must be recreated after restarting ComfyUI.
 
 `UC_StagedMediaPipeFaceBackgroundComposite` detects faces in each foreground and adds them as independently placeable layers. The background and face options nodes contain removal, extraction, feathering, and blend settings. `UC_StagedIndividualComposites` provides the same ordinary foreground staging editor but returns one full-background image, placement mask, and box per included foreground without stacking them. `UC_BackgroundRemovalPreserveAlpha` directly returns source-resolution RGBA images and their soft alpha masks; existing RGBA inputs keep their supplied alpha without model execution. `UC_FaceRemovalPreserveAlpha` returns expanded face crops as RGBA images with matching alpha masks and transparent padding for differently sized batched crops.
+
+`UC_CreateBoundingBoxes` (**Create Bounding Boxes (Nodes 1.0)**) provides a Nodes 1.0 interactive bounding-box canvas editor with the same `preview`, `bboxes`, and `elements` outputs as ComfyUI Core's `Create Bounding Boxes`. Drag on the canvas (or press `+ Object Box` / `+ Text Box`) to create boxes, drag inside a box to move it, drag its 8 handles to resize it, reorder boxes from background to foreground, and assign descriptions, rendered text, and swatch colors. Connect `elements` directly to `FLUX.3 Layout Prompt` (referencing boxes in your prompt as `<obj_1>`, `<obj_2>`, etc.) or `Build JSON Prompt (Ideogram)`.
 
 `UC_LoadLaMaModel` loads Big LaMa `.safetensors` files from `ComfyUI/models/lama` through Unified Efficient Loader. Connect its `LAMA_MODEL` output to `UC_LaMaInpaint`. Device choices include ComfyUI's default device, CPU, and every visible GPU. Models are never downloaded automatically. Download [Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/big-lama.safetensors) or [Anime/Manga Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/anime-manga-big-lama.safetensors), then place the selected file in `ComfyUI/models/lama`.
 

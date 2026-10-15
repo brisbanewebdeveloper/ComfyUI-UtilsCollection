@@ -39,6 +39,7 @@ from ..helpers.composite_helpers import (
     _visible_placement_slices,
     background_removal_with_alpha,
     crop_staged_layers_by_indices,
+    execute_create_bounding_boxes,
 )
 from ..helpers.background_replace_helpers import (
     _apply_face_mask_options,
@@ -2122,3 +2123,103 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         result = target.clone()
         result[0, ty1:ty2, tx1:tx2] = completed_crop
         return io.NodeOutput(result, completed_crop.unsqueeze(0))
+
+
+class UC_CreateBoundingBoxes(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_CreateBoundingBoxes",
+            display_name="Create Bounding Boxes (Nodes 1.0)",
+            category="utils/image",
+            description=(
+                "Draw, move, resize, and label bounding boxes directly on an interactive Nodes 1.0 canvas. "
+                "Outputs layout prompt elements for FLUX.3 Layout Prompt and Ideogram JSON prompts, "
+                "pixel-space bounding boxes, and a rendered preview image."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "background",
+                    optional=True,
+                    tooltip=(
+                        "Optional reference image displayed behind the bounding-box canvas and dimmed in the "
+                        "rendered preview output."
+                    ),
+                ),
+                io.MultiType.Input(
+                    "bboxes",
+                    [io.BoundingBox, io.Array, io.String],
+                    optional=True,
+                    tooltip=(
+                        "Optional upstream bounding boxes, prompt layout elements, or JSON string to seed the canvas. "
+                        "When the upstream value changes, it initializes the canvas; manual canvas edits stay active "
+                        "until a new upstream value arrives."
+                    ),
+                ),
+                io.Int.Input(
+                    "width",
+                    default=1024,
+                    min=64,
+                    max=16384,
+                    step=16,
+                    tooltip="Width of the canvas and pixel grid used for the output bounding boxes and preview.",
+                ),
+                io.Int.Input(
+                    "height",
+                    default=1024,
+                    min=64,
+                    max=16384,
+                    step=16,
+                    tooltip="Height of the canvas and pixel grid used for the output bounding boxes and preview.",
+                ),
+                io.String.Input(
+                    "box_data",
+                    default='{"version":1,"boxes":[],"last_incoming":null}',
+                    advanced=True,
+                    tooltip=(
+                        "Serialized bounding-box list and metadata managed by the Nodes 1.0 interactive canvas editor."
+                    ),
+                ),
+            ],
+            outputs=[
+                io.Image.Output(
+                    "preview",
+                    display_name="preview",
+                    tooltip="Preview image showing the dimmed background or canvas with numbered boxes, labels, and swatches.",
+                ),
+                io.BoundingBox.Output(
+                    "bboxes",
+                    display_name="bboxes",
+                    tooltip="Pixel-space bounding boxes [{x, y, width, height}, ...] aligned to the configured width and height.",
+                ),
+                io.Array.Output(
+                    "elements",
+                    display_name="elements",
+                    tooltip=(
+                        "Prompt layout elements [{type, bbox, desc, text?, color_palette?}, ...] ready to connect to "
+                        "FLUX.3 Layout Prompt (referenced as <obj_1>, <obj_2>, ...) or Build JSON Prompt (Ideogram)."
+                    ),
+                ),
+            ],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        width: int = 1024,
+        height: int = 1024,
+        box_data: str = '{"version":1,"boxes":[],"last_incoming":null}',
+        background=None,
+        bboxes=None,
+    ) -> io.NodeOutput:
+        return execute_create_bounding_boxes(
+            width=width,
+            height=height,
+            box_data=box_data,
+            background=background,
+            bboxes=bboxes,
+        )
+
+
+CreateBoundingBoxesNodes1 = UC_CreateBoundingBoxes

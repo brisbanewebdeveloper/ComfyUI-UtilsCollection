@@ -1965,6 +1965,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                         "placement_editor",
                         "paint_layer",
                         "mediapipe_face_composite",
+                        "create_bounding_boxes",
                     ],
                     default="node_catalog",
                     tooltip="Select the composite documentation topic.",
@@ -1987,7 +1988,8 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `UC_StagedMediaPipeFaceOptions`: supplies detection, extraction, face feather, initial scale, and face-blend settings.\n"
                 "- `UC_StagedMediaPipeFaceBackgroundComposite`: stages ordinary foreground layers and independently placeable detected face layers.\n"
                 "- `UC_MediaPipeFaceCompositeOptions`: supplies options for direct source-to-target face compositing.\n"
-                "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face."
+                "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face.\n"
+                "- `UC_CreateBoundingBoxes`: interactive Nodes 1.0 bounding-box canvas editor outputting `preview`, pixel `bboxes`, and layout `elements` for `FLUX.3 Layout Prompt` and `Build JSON Prompt (Ideogram)`."
             ),
             "model_inputs": (
                 "## Model inputs and defaults\n\n"
@@ -2092,6 +2094,14 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `warp_decay_radius`: warp falloff radius. Default `64`.\n"
                 "- `score_thresh`: detector score threshold. Default `0.25`.\n\n"
                 "The source face mask is intersected with the source background-removal mask. Outputs are the composited target IMAGE and the extracted Face Crop."
+            ),
+            "create_bounding_boxes": (
+                "## Create Bounding Boxes (Nodes 1.0)\n\n"
+                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, and normalized `elements`.\n\n"
+                "- Click and drag on empty canvas space (or Shift+drag over existing boxes) to draw a new bounding box, or use `+ Object Box` and `+ Text Box`.\n"
+                "- Click a box to select it, drag inside to move it, or drag its eight handles to resize it.\n"
+                "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, pick a swatch color, and lock or exclude individual boxes.\n"
+                "- Connect `elements` directly to `FLUX.3 Layout Prompt` (citing `<obj_1>`, `<obj_2>`, etc. in the prompt) or `Build JSON Prompt (Ideogram)`."
             ),
         }
         return io.NodeOutput(topics.get(topic, "Unknown topic selected."))
