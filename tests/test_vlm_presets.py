@@ -139,6 +139,9 @@ REAL_WORLD_PHYSICAL_PRESETS = (
     "ideogram_4_json_instruction_short",
     "ideogram_4_json_instruction_style",
     "ideogram_4_json_instruction_color",
+    "moss_image_json_instruction",
+    "moss_image_json_instruction_short",
+    "moss_image_json_instruction_color",
 )
 REAL_LIFE_VIDEO_PRESETS = (
     "video_basic_system_instruction",
@@ -383,6 +386,7 @@ def test_raw_query_presets_preserve_instructions_without_request_carriers():
         "character_transfer_gemma": "current edit request",
         "character_transfer_qwen": "current edit request",
         "ideogram_4": "current request",
+        "moss_image": "current request",
         "image2image": "current edit request",
         "text2image": "current request",
         "video_basic": "current video request",
@@ -2065,4 +2069,63 @@ def test_minimax_h3_attr_transfer_multi_subject_contracts():
             or "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned <Subject N> aliases under `subject_definitions:`"
             in instruction
         )
+
+
+def test_moss_image_json_preset_contract():
+    basic_schema = vlm_nodes.UC_VLMSysInstrPresets.define_schema()
+    adv_schema = vlm_nodes.UC_VLMSysInstrAdvPresets.define_schema()
+    assert [out.display_name for out in basic_schema.outputs] == [
+        "system_instruction",
+        "response_schema",
+    ]
+    assert [out.display_name for out in adv_schema.outputs] == [
+        "system_instruction",
+        "response_schema",
+    ]
+    options = basic_schema.inputs[0].options
+    for key in (
+        "moss_image_json_instruction",
+        "moss_image_json_instruction_short",
+        "moss_image_json_instruction_color",
+    ):
+        instruction = vlm_presets.system_instructions_vlm[key]
+        assert '"summary":{"caption":"..."}' in instruction
+        assert '"bbox_coord_space":"abs_centralized"' in instruction
+        assert '"bbox_format":"yxyx"' in instruction
+        assert '"label":"character"' in instruction
+        assert key in options
+        sys_text, resp_schema = vlm_nodes.UC_VLMSysInstrPresets.execute(key).args
+        assert sys_text == instruction
+        assert isinstance(resp_schema, dict)
+        assert resp_schema["required"] == [
+            "summary",
+            "items",
+            "bbox_coord_space",
+            "bbox_format",
+        ]
+        adv_text, adv_resp_schema = vlm_nodes.UC_VLMSysInstrAdvPresets.execute(
+            key, False, "", ""
+        ).args
+        assert adv_text == instruction
+        assert adv_resp_schema == resp_schema
+
+    for ig_key in (
+        "ideogram_4_json_instruction",
+        "ideogram_4_json_instruction_short",
+        "ideogram_4_json_instruction_style",
+        "ideogram_4_json_instruction_color",
+    ):
+        _, ig_schema = vlm_nodes.UC_VLMSysInstrPresets.execute(ig_key).args
+        assert isinstance(ig_schema, dict)
+        assert "compositional_deconstruction" in ig_schema["properties"]
+
+    _, plain_schema = vlm_nodes.UC_VLMSysInstrPresets.execute(
+        "neutral_system_instruction"
+    ).args
+    assert plain_schema is None
+    assert '"palette"' not in vlm_presets.system_instructions_vlm["moss_image_json_instruction_short"]
+    assert '"palette":["#000000","#FFFFFF"]' in vlm_presets.system_instructions_vlm["moss_image_json_instruction_color"]
+    assert "moss_image" in vlm_nodes.UC_VLMSysQueryAddPresets.define_schema().inputs[0].options
+    assert "moss_image" in vlm_nodes.UC_VLMSysQueryRawPresets.define_schema().inputs[0].options
+
 
