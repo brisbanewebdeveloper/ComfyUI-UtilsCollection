@@ -2501,13 +2501,24 @@ class BoundingBoxesEditor {
     this.stage = element("div", {
       position: "relative",
       minHeight: "0",
-      flex: "1 0 auto",
+      flex: "1 1 auto",
+      width: "auto",
       aspectRatio: "16 / 9",
       overflow: "hidden",
       border: "1px solid rgba(255,255,255,.18)",
       borderRadius: "5px",
       background: "#17191d",
     });
+    this.previewRow = element("div", {
+      display: "flex",
+      flexDirection: "row",
+      alignItems: "stretch",
+      gap: "6px",
+      minWidth: "0",
+      minHeight: "0",
+      flex: "1 1 auto",
+    });
+    this.previewRow.append(this.stage);
     this.canvas = element("canvas", {
       display: "block",
       width: "100%",
@@ -2533,6 +2544,7 @@ class BoundingBoxesEditor {
 
     this.toolbar = element("div", {
       display: "flex",
+      flex: "0 0 auto",
       flexDirection: "row",
       flexWrap: "nowrap",
       alignItems: "center",
@@ -2578,7 +2590,7 @@ class BoundingBoxesEditor {
       background: "rgba(0,0,0,.18)",
     });
     this.boxListGroup.append(caption, this.boxList);
-    this.root.append(this.stage, this.toolbar, this.boxListGroup);
+    this.root.append(this.previewRow, this.toolbar, this.boxListGroup);
 
     for (const eventName of ["pointerdown", "pointermove", "pointerup", "click", "dblclick"]) {
       this.root.addEventListener(eventName, (event) => event.stopPropagation());
@@ -2693,29 +2705,30 @@ class BoundingBoxesEditor {
 
   updateLayout() {
     if (this.disposed || !this.root.isConnected) return;
-    const rows = [...this.boxList.children];
+    const allRows = [...this.boxList.children];
     const listStyle = getComputedStyle(this.boxList);
     const rowGap = Number.parseFloat(listStyle.rowGap || listStyle.gap) || 0;
     const listChrome = this.stylePixels(this.boxList, ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]);
-    this.boxList.style.maxHeight = `${visibleLayerListHeight(rows.map((row) => row.offsetHeight || 40), rowGap, listChrome)}px`;
+    this.boxList.style.maxHeight = `${visibleLayerListHeight(allRows.map((row) => row.offsetHeight || 40), rowGap, listChrome)}px`;
 
+    const measuredRows = this.data.boxes.length ? allRows : [];
     const rootHorizontalChrome = this.stylePixels(this.root, ["paddingLeft", "paddingRight", "borderLeftWidth", "borderRightWidth"]);
     const widgetMargins = (this.editorWidget?.margin || 0) * 2;
     const computed = this.baseComputeSize?.() || this.node.computeSize?.() || this.node.size || [0, 0];
     const requiredWidth = naturalEditorWidth({
-      coreWidth: Math.max(computed[0], 540),
+      coreWidth: Math.max(computed[0], 560),
       toolbarWidth: this.measuredFlexWidth(this.toolbar),
-      rowWidths: rows.map((row) => this.measuredFlexWidth(row)),
+      rowWidths: measuredRows.map((row) => this.measuredFlexWidth(row)),
       overlayWidths: [340],
       chromeWidth: rootHorizontalChrome + widgetMargins,
     });
     this.layoutMinWidth = requiredWidth;
     const nodeWidth = Math.max(requiredWidth, this.manualNodeSize[0] || 0);
-    const stageWidth = Math.max(240, nodeWidth - rootHorizontalChrome - widgetMargins);
+    const stageWidth = Math.max(0, nodeWidth - rootHorizontalChrome - widgetMargins);
     const dims = this.dimensions();
     const stageHeight = previewHeight(stageWidth, dims.width, dims.height);
-    this.stage.style.minHeight = `${stageHeight}px`;
-    this.stage.style.height = `${stageHeight}px`;
+    this.previewRow.style.minHeight = `${stageHeight}px`;
+    this.stage.style.height = "auto";
     this.stage.style.aspectRatio = "auto";
 
     const rootStyle = getComputedStyle(this.root);
@@ -3005,7 +3018,9 @@ class BoundingBoxesEditor {
       const selected = index === this.selectedIndex;
       const primaryColor = box.palette?.[0] || BBOX_DEFAULT_COLORS[index % BBOX_DEFAULT_COLORS.length];
       const row = element("div", {
+        boxSizing: "border-box",
         display: "flex",
+        flex: "0 0 auto",
         flexWrap: "nowrap",
         alignItems: "center",
         gap: "4px",
@@ -3087,8 +3102,10 @@ class BoundingBoxesEditor {
       });
 
       const descInput = element("input", {
-        flex: "1 1 160px",
-        minWidth: "120px",
+        boxSizing: "border-box",
+        flex: "0 0 140px",
+        width: "140px",
+        minWidth: "140px",
         height: "28px",
         padding: "2px 6px",
         border: "1px solid rgba(255,255,255,.2)",
@@ -3116,8 +3133,10 @@ class BoundingBoxesEditor {
       let textInput = null;
       if (box.type === "text") {
         textInput = element("input", {
-          flex: "1 1 120px",
-          minWidth: "96px",
+          boxSizing: "border-box",
+          flex: "0 0 100px",
+          width: "100px",
+          minWidth: "100px",
           height: "28px",
           padding: "2px 6px",
           border: "1px solid rgba(101,201,255,.45)",
@@ -3431,7 +3450,6 @@ class BoundingBoxesEditor {
         h: drawn.h,
       };
     }
-    this.persistState();
     this.requestDraw();
   }
 
