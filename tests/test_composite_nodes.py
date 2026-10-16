@@ -3706,7 +3706,16 @@ def test_create_bounding_boxes_nodes1_elements_and_flux3_layout_compatibility(mo
     schema = node.define_schema()
     assert schema.node_id == "UC_CreateBoundingBoxes"
     assert schema.display_name == "Create Bounding Boxes (Nodes 1.0)"
-    assert [out.display_name for out in schema.outputs] == ["preview", "bboxes", "elements"]
+    assert [out.display_name for out in schema.outputs] == [
+        "preview",
+        "bboxes",
+        "elements",
+        "moss_prompt",
+    ]
+    inputs_by_id = {inp.id: inp for inp in schema.inputs}
+    assert inputs_by_id["width"].default == 0
+    assert inputs_by_id["height"].default == 0
+    assert inputs_by_id["input_coord_space"].default == "normalized_1000"
 
     box_data = json.dumps({
         "version": 1,
@@ -3746,13 +3755,14 @@ def test_create_bounding_boxes_nodes1_elements_and_flux3_layout_compatibility(mo
     })
 
     out = node.execute(
-        width=1000,
-        height=500,
+        width=0,
+        height=0,
         box_data=box_data,
         background=torch.zeros(1, 500, 1000, 3),
     )
-    preview, bboxes, elements = out.args
+    preview, bboxes, elements, moss_prompt = out.args
     assert preview.shape == (1, 500, 1000, 3)
+    assert '"bbox":[-150,-400,0,0]' in moss_prompt
     assert bboxes == [[
         {"x": 100, "y": 100, "width": 400, "height": 150},
         {"x": 500, "y": 300, "width": 250, "height": 100},
@@ -3783,3 +3793,51 @@ def test_create_bounding_boxes_nodes1_elements_and_flux3_layout_compatibility(mo
     assert '"bbox": [200, 100, 500, 500]' in layout_prompt
     assert '"id": "obj_2"' in layout_prompt
     assert '"desc": "neon sign \\"FAST\\""' in layout_prompt
+
+    from comfy_extras.nodes_moss_image import MOSSImageLayoutPrompt
+
+    moss_json = MOSSImageLayoutPrompt.execute(
+        prompt="A nighttime street scene.",
+        element=elements,
+        width=1000,
+        height=500,
+        character_boxes="1",
+    ).args[0]
+    coerced_out = node.execute(
+        width=1000,
+        height=500,
+        input_coord_space="abs_centralized",
+        box_data='{"version":1,"boxes":[],"last_incoming":null}',
+        bboxes=moss_json,
+    )
+    _, coerced_bboxes, coerced_elements, coerced_moss_prompt = coerced_out.args
+    assert coerced_bboxes == bboxes
+    assert coerced_elements == elements
+    assert coerced_moss_prompt == moss_json
+
+    gemini_native_json = json.dumps({
+        "summary": {"caption": "A nighttime street scene."},
+        "items": [
+            {
+                "label": "character",
+                "caption": "a red sports car",
+                "palette": ["#FF0000"],
+                "bbox": [200, 100, 500, 500],
+            },
+            {
+                "label": "text",
+                "caption": "neon sign",
+                "text": "FAST",
+                "palette": ["#00FFFF"],
+                "bbox": [600, 500, 800, 750],
+            },
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx",
+    })
+    converted_moss_json = composite_nodes.UC_MOSSImageBBoxConvert.execute(
+        prompt=gemini_native_json,
+        image=torch.zeros(1, 500, 1000, 3),
+        input_coord_space="normalized_1000",
+    ).args[0]
+    assert converted_moss_json == moss_json

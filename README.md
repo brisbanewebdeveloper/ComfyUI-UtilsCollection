@@ -199,6 +199,7 @@ the base-resolution conditioning fusion.
 - `UC_MediaPipeFaceCompositeOptions`
 - `UC_MediaPipeFaceComposite`
 - `UC_CreateBoundingBoxes`
+- `UC_MOSSImageBBoxConvert`
 - `UC_ListToImageBatch`
 - `UC_ImageBatchToList`
 - `UC_ImageBatchToBatchList`

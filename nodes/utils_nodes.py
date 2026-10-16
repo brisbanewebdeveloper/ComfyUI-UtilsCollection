@@ -1989,7 +1989,8 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `UC_StagedMediaPipeFaceBackgroundComposite`: stages ordinary foreground layers and independently placeable detected face layers.\n"
                 "- `UC_MediaPipeFaceCompositeOptions`: supplies options for direct source-to-target face compositing.\n"
                 "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face.\n"
-                "- `UC_CreateBoundingBoxes`: interactive Nodes 1.0 bounding-box canvas editor outputting `preview`, pixel `bboxes`, and layout `elements` for `FLUX.3 Layout Prompt` and `Build JSON Prompt (Ideogram)`."
+                "- `UC_CreateBoundingBoxes`: interactive Nodes 1.0 bounding-box canvas editor outputting `preview`, pixel `bboxes`, layout `elements`, and `moss_prompt` for `FLUX.3 Layout Prompt`, `Build JSON Prompt (Ideogram)`, and `MOSS-Image`.\n"
+                "- `UC_MOSSImageBBoxConvert`: passthrough converter that maps Gemini's 0 to 1000 `[ymin, xmin, ymax, xmax]` layout JSON (or `Create Bounding Boxes` elements) into `MOSS-Image`'s `abs_centralized` pixel layout JSON."
             ),
             "model_inputs": (
                 "## Model inputs and defaults\n\n"
@@ -2101,7 +2102,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- Click and drag on empty canvas space (or Shift+drag over existing boxes) to draw a new bounding box, or use `+ Object Box` and `+ Text Box`.\n"
                 "- Click a box to select it, drag inside to move it, or drag its eight handles to resize it.\n"
                 "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, pick a swatch color, and lock or exclude individual boxes.\n"
-                "- Connect `elements` directly to `FLUX.3 Layout Prompt` (citing `<obj_1>`, `<obj_2>`, etc. in the prompt) or `Build JSON Prompt (Ideogram)`."
+                "- Connect `elements` directly to `FLUX.3 Layout Prompt` (citing `<obj_1>`, `<obj_2>`, etc. in the prompt) or `Build JSON Prompt (Ideogram)`, or connect `moss_prompt` (or `UC_MOSSImageBBoxConvert`) directly to a `MOSS-Image` text encoder."
             ),
         }
         return io.NodeOutput(topics.get(topic, "Unknown topic selected."))

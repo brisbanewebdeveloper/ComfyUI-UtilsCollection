@@ -2689,8 +2689,10 @@ class BoundingBoxesEditor {
   dimensions() {
     const wWidget = Number(this.widthWidget?.value) || 0;
     const hWidget = Number(this.heightWidget?.value) || 0;
-    const width = wWidget > 0 ? wWidget : (this.backgroundImage?.naturalWidth || this.backgroundImage?.width || 1024);
-    const height = hWidget > 0 ? hWidget : (this.backgroundImage?.naturalHeight || this.backgroundImage?.height || 1024);
+    const bgWidth = this.backgroundImage?.naturalWidth || this.backgroundImage?.width || this.outputDims?.[0] || 0;
+    const bgHeight = this.backgroundImage?.naturalHeight || this.backgroundImage?.height || this.outputDims?.[1] || 0;
+    const width = wWidget > 0 ? wWidget : (bgWidth || 1024);
+    const height = hWidget > 0 ? hWidget : (bgHeight || 1024);
     return { width: Math.max(64, width), height: Math.max(64, height) };
   }
 
@@ -2778,6 +2780,10 @@ class BoundingBoxesEditor {
 
   resolveBackground(force) {
     const origin = this.inputOrigin("background");
+    if (!origin) {
+      this.outputBackground = null;
+      this.outputDims = null;
+    }
     let source = null;
     let image = null;
     if (origin?.node && ![2, 4].includes(origin.node.mode)) {
@@ -2840,6 +2846,7 @@ class BoundingBoxesEditor {
     const payload = output?.uc_bounding_boxes_editor?.[0];
     if (!payload || payload.version !== 1) return;
     this.outputBackground = payload.background || null;
+    this.outputDims = Array.isArray(payload.dims) && payload.dims.length === 2 ? payload.dims : null;
     if (Array.isArray(payload.input_regions) && (payload.upstream_changed || !this.data.boxes.length)) {
       this.data.boxes = payload.input_regions.map((item, idx) => normalizeBoxRegion(item, idx));
       this.data.last_incoming = payload.input_regions;

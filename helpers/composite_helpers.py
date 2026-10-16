@@ -865,21 +865,196 @@ def parse_bounding_box_editor_data(box_data, width: int, height: int) -> tuple[l
     return regions, last_incoming
 
 
+def _extract_incoming_summary_and_labels(data) -> tuple[str, list[str]]:
+    if data is None:
+        return "", []
+    parsed = data
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return "", []
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return "", []
+    if not isinstance(parsed, dict):
+        return "", []
+    summary = parsed.get("summary")
+    caption = ""
+    if isinstance(summary, dict):
+        caption = str(summary.get("caption", "") or "").strip()
+    elif isinstance(parsed.get("high_level_description"), str):
+        caption = parsed.get("high_level_description", "").strip()
+    items = parsed.get("items")
+    labels = []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                lbl = str(item.get("label", "object") or "object").lower()
+                labels.append(lbl if lbl in ("character", "object", "text") else "object")
+    return caption, labels
+
+
+def _coerce_incoming_bboxes_input(data, width: int, height: int, input_coord_space: str = "normalized_1000"):
+    if data is None:
+        return None
+    parsed = data
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            return data
+    if not isinstance(parsed, dict):
+        return parsed
+    comp = parsed.get("compositional_deconstruction")
+    if isinstance(comp, dict) and isinstance(comp.get("elements"), list):
+        return comp["elements"]
+    if isinstance(parsed.get("elements"), list):
+        return parsed["elements"]
+    items = parsed.get("items")
+    if not isinstance(items, list):
+        return parsed
+    mode = str(input_coord_space or "normalized_1000").lower()
+    w = max(1, int(width or 1024))
+    h = max(1, int(height or 1024))
+    elements = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        bbox = item.get("bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            continue
+        y0, x0, y1, x1 = (float(v) for v in bbox)
+        has_negative = any(v < 0 for v in (y0, x0, y1, x1))
+        use_centralized = mode == "abs_centralized" or has_negative
+        if use_centralized:
+            ymin = max(0.0, min(1000.0, (y0 + (h // 2)) * 1000.0 / h))
+            xmin = max(0.0, min(1000.0, (x0 + (w // 2)) * 1000.0 / w))
+            ymax = max(0.0, min(1000.0, (y1 + (h // 2)) * 1000.0 / h))
+            xmax = max(0.0, min(1000.0, (x1 + (w // 2)) * 1000.0 / w))
+            norm_bbox = [round(ymin), round(xmin), round(ymax), round(xmax)]
+        else:
+            norm_bbox = [
+                max(0, min(1000, round(y0))),
+                max(0, min(1000, round(x0))),
+                max(0, min(1000, round(y1))),
+                max(0, min(1000, round(x1))),
+            ]
+        label = str(item.get("label", item.get("type", "object")) or "object").lower()
+        etype = "text" if label == "text" else "obj"
+        element = {
+            "type": etype,
+            "bbox": norm_bbox,
+            "desc": str(item.get("caption", item.get("desc", "")) or ""),
+        }
+        if etype == "text":
+            element["text"] = str(item.get("text", "") or "")
+        palette = item.get("palette") or item.get("color_palette")
+        if isinstance(palette, list) and palette:
+            element["color_palette"] = list(palette)
+        elements.append(element)
+    return elements
+
+
+def build_moss_image_layout_prompt(
+    prompt: str = "",
+    elements: list | None = None,
+    width: int = 0,
+    height: int = 0,
+    image=None,
+    input_coord_space: str = "normalized_1000",
+    character_boxes: str = "",
+    item_labels: list[str] | None = None,
+) -> str:
+    bg_w, bg_h = 1024, 1024
+    if image is not None and torch.is_tensor(image) and image.ndim == 4 and image.shape[0] > 0:
+        bg_h = int(image.shape[1])
+        bg_w = int(image.shape[2])
+    raw_w = int(width or 0)
+    raw_h = int(height or 0)
+    w_px = max(16, raw_w if raw_w > 0 else bg_w)
+    h_px = max(16, raw_h if raw_h > 0 else bg_h)
+
+    summary_caption, parsed_labels = _extract_incoming_summary_and_labels(prompt)
+    resolved_elements = list(elements) if isinstance(elements, list) and elements else None
+    if resolved_elements is None:
+        coerced = _coerce_incoming_bboxes_input(prompt, w_px, h_px, input_coord_space=input_coord_space)
+        if isinstance(coerced, list):
+            resolved_elements = coerced
+        else:
+            resolved_elements = []
+
+    if not summary_caption and isinstance(prompt, str):
+        stripped = prompt.strip()
+        if not stripped.startswith("{") and not stripped.startswith("["):
+            summary_caption = stripped
+
+    labels = item_labels if item_labels is not None else parsed_labels
+    characters = {int(i) for i in re.findall(r"\d+", str(character_boxes or ""))}
+    items = []
+    for i, el in enumerate(resolved_elements):
+        if not isinstance(el, dict) or not (isinstance(el.get("bbox"), (list, tuple)) and len(el["bbox"]) == 4):
+            continue
+        if el.get("type") == "text":
+            label = "text"
+        elif i + 1 in characters:
+            label = "character"
+        elif i < len(labels) and labels[i] in ("character", "object", "text"):
+            label = labels[i]
+        else:
+            label = "object"
+        item: dict[str, Any] = {"label": label, "caption": str(el.get("desc", "") or "")}
+        if label == "text":
+            item["text"] = str(el.get("text", "") or "")
+        if el.get("color_palette"):
+            item["palette"] = list(el["color_palette"])
+        y0, x0, y1, x1 = (float(v) for v in el["bbox"])
+        item["bbox"] = [
+            math.floor(round(y0 * h_px / 1000, 9)) - h_px // 2,
+            math.floor(round(x0 * w_px / 1000, 9)) - w_px // 2,
+            math.ceil(round(y1 * h_px / 1000, 9)) - h_px // 2,
+            math.ceil(round(x1 * w_px / 1000, 9)) - w_px // 2,
+        ]
+        items.append(item)
+    if not items:
+        return summary_caption or str(prompt or "").strip()
+    layout = {
+        "summary": {"caption": summary_caption},
+        "items": items,
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx",
+    }
+    return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
+
+
 def execute_create_bounding_boxes(
-    width: int,
-    height: int,
+    width: int = 0,
+    height: int = 0,
     box_data: str = '{"version":1,"boxes":[],"last_incoming":null}',
     background=None,
     bboxes=None,
+    input_coord_space: str = "normalized_1000",
 ):
     from comfy_extras import nodes_bounding_boxes as core_bboxes
 
-    w_px = max(64, int(width or 1024))
-    h_px = max(64, int(height or 1024))
+    bg_w, bg_h = 1024, 1024
     if background is not None and torch.is_tensor(background) and background.ndim == 4 and background.shape[0] > 0:
-        pass
+        bg_h = int(background.shape[1])
+        bg_w = int(background.shape[2])
+    raw_w = int(width or 0)
+    raw_h = int(height or 0)
+    w_px = max(64, raw_w if raw_w > 0 else bg_w)
+    h_px = max(64, raw_h if raw_h > 0 else bg_h)
 
-    incoming_boxes = core_bboxes.boxes_from_input(bboxes, w_px, h_px)
+    incoming_summary, incoming_labels = _extract_incoming_summary_and_labels(bboxes)
+    incoming_boxes = core_bboxes.boxes_from_input(
+        _coerce_incoming_bboxes_input(bboxes, w_px, h_px, input_coord_space=input_coord_space),
+        w_px,
+        h_px,
+    )
     incoming_regions = core_bboxes.boxes_to_regions(incoming_boxes, w_px, h_px) if incoming_boxes else []
     canonical_incoming = [
         {
@@ -936,6 +1111,13 @@ def execute_create_bounding_boxes(
     )
     pixel_bboxes = core_bboxes.fractions_to_bbox_frame(active_regions, w_px, h_px)
     elements = core_bboxes.build_elements(active_regions)
+    moss_prompt = build_moss_image_layout_prompt(
+        prompt=incoming_summary,
+        elements=elements,
+        width=w_px,
+        height=h_px,
+        item_labels=incoming_labels if len(incoming_labels) == len(elements) else None,
+    )
 
     bg_descriptor = None
     if background is not None and torch.is_tensor(background) and background.ndim == 4 and background.shape[0] > 0:
@@ -954,5 +1136,6 @@ def execute_create_bounding_boxes(
         preview,
         pixel_bboxes,
         elements,
+        moss_prompt,
         ui={"uc_bounding_boxes_editor": (ui_payload,)},
     )
