@@ -276,6 +276,32 @@ def format_flux3_prompt(prompt, system_prompt=""):
     )
 
 
+def is_moss_image_text_encoder(clip) -> bool:
+    tokenizer = getattr(clip, "tokenizer", None)
+    stage = getattr(clip, "cond_stage_model", None)
+    return any(
+        cls.__module__ == "comfy.text_encoders.moss_image"
+        and cls.__name__ in {"MOSSImageTokenizer", "MOSSImageTEModel"}
+        for owner in (tokenizer, stage, getattr(stage, "clip_model", None))
+        if owner is not None
+        for cls in type(owner).__mro__
+    )
+
+
+def format_moss_image_prompt(prompt, system_prompt=""):
+    user_prompt = prompt.strip()
+    if system_prompt:
+        return (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n"
+        )
+    return (
+        f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n"
+    )
+
+
 def is_qwen_image21_text_encoder(clip) -> bool:
     return any(
         cls.__module__ == "comfy.text_encoders.qwen_image21"
@@ -1164,7 +1190,7 @@ def is_image_token(t):
     if isinstance(val, dict) and val.get("type") == "image":
         return True
 
-    if isinstance(val, numbers.Integral) and val in (151655, 262144): # Qwen & Gemma image pad IDs
+    if isinstance(val, numbers.Integral) and val in (151655, 248056, 262144): # Qwen & Gemma image pad IDs
         return True
 
     return False
@@ -1990,6 +2016,15 @@ def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata, em
     return conditioning, metadata
 
 
+def _extract_visual_grid(entry) -> tuple[object, tuple[int, int]]:
+    extra = entry.get("extra")
+    grid = extra.get("grid") if isinstance(extra, dict) else extra
+    values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
+    if len(values) < 3:
+        raise ValueError("TokenFusion source is missing exact visual grid metadata.")
+    return grid, (int(values[-2]) // 2, int(values[-1]) // 2)
+
+
 def _prepare_fused_visual_inputs(
     clip_model,
     token_sources,
@@ -2010,13 +2045,7 @@ def _prepare_fused_visual_inputs(
         image_entries.append(images[visual_index])
 
     if source_grids is None:
-        source_grids = []
-        for entry in image_entries:
-            grid = (entry.get("extra") or {}).get("grid")
-            values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
-            if len(values) < 3:
-                raise ValueError("TokenFusion source is missing exact visual grid metadata.")
-            source_grids.append((int(values[-2]) // 2, int(values[-1]) // 2))
+        source_grids = [_extract_visual_grid(entry)[1] for entry in image_entries]
 
     canonical_embeds, attention_mask, num_tokens, canonical_info = processed[0]
     canonical_entry = image_entries[0]
@@ -2047,20 +2076,22 @@ def _prepare_fused_visual_inputs(
         if entry.get("type") == "image" and entry.get("index") == start
     )
     fused_entry = dict(fused_info[canonical_position])
-    fused_entry["extra"] = dict(fused_entry.get("extra") or {})
-    deepstacks = {
-        index: entry.get("extra", {}).get("deepstack")
-        for index, entry in enumerate(image_entries)
-    }
-    if all(deepstacks.values()):
-        fused_entry["extra"]["deepstack"] = fuse_deepstack_layers(
-            deepstacks,
-            visual_fusion_config,
-            device,
-            mask_cache,
-            size,
-            source_grids,
-        )
+    canonical_extra = fused_entry.get("extra")
+    if isinstance(canonical_extra, dict) or canonical_extra is None:
+        fused_entry["extra"] = dict(canonical_extra or {})
+        deepstacks = {
+            index: (entry.get("extra") if isinstance(entry.get("extra"), dict) else {}).get("deepstack")
+            for index, entry in enumerate(image_entries)
+        }
+        if all(deepstacks.values()):
+            fused_entry["extra"]["deepstack"] = fuse_deepstack_layers(
+                deepstacks,
+                visual_fusion_config,
+                device,
+                mask_cache,
+                size,
+                source_grids,
+            )
     fused_info[canonical_position] = fused_entry
     return fused_embeds, attention_mask, num_tokens, fused_info, fused
 
@@ -2191,7 +2222,8 @@ def encode_token_fused_visual_slots(
             grids = []
             sources = []
             for source_embeds, entry in zip(selected_embeds, selected):
-                grid = (entry.get("extra") or {}).get("grid")
+                extra = entry.get("extra")
+                grid = extra.get("grid") if isinstance(extra, dict) else extra
                 values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
                 if len(values) < 3:
                     raise ValueError("TokenFusion MiniMax source is missing visual grid metadata.")
@@ -2206,15 +2238,17 @@ def encode_token_fused_visual_slots(
             )
             fused_embeds[0, start:start + size] = fused
             replacement = dict(canonical_entry)
-            replacement["extra"] = dict(replacement.get("extra") or {})
-            deepstacks = {
-                index: entry.get("extra", {}).get("deepstack")
-                for index, entry in enumerate(selected)
-            }
-            if all(deepstacks.values()):
-                replacement["extra"]["deepstack"] = fuse_deepstack_layers(
-                    deepstacks, visual_fusion_config, device, mask_cache, size, grids, cache=cache
-                )
+            canonical_extra = replacement.get("extra")
+            if isinstance(canonical_extra, dict) or canonical_extra is None:
+                replacement["extra"] = dict(canonical_extra or {})
+                deepstacks = {
+                    index: (entry.get("extra") if isinstance(entry.get("extra"), dict) else {}).get("deepstack")
+                    for index, entry in enumerate(selected)
+                }
+                if all(deepstacks.values()):
+                    replacement["extra"]["deepstack"] = fuse_deepstack_layers(
+                        deepstacks, visual_fusion_config, device, mask_cache, size, grids, cache=cache
+                    )
             position = next(
                 index for index, entry in enumerate(fused_info)
                 if entry is canonical_entry
@@ -2364,6 +2398,8 @@ def execute_token_fusion_visual_conditioning(
         full_prompt = format_qwen_image21_prompt(prepared_prompt, system_prompt)
     elif is_flux3_text_encoder(clip):
         full_prompt = format_flux3_prompt(prepared_prompt, system_prompt)
+    elif is_moss_image_text_encoder(clip):
+        full_prompt = format_moss_image_prompt(prepared_prompt, system_prompt)
     elif system_prompt is None:
         full_prompt = prepared_prompt
     elif minimax_h3:
@@ -2478,7 +2514,7 @@ def _visual_token_embedding_blocks(clip, tokens, device: str, cache=None) -> lis
         placeholder = image_positions[visual_index]
         if placeholder == 0 or placeholder + 1 >= len(tokens_only[0]):
             raise ValueError("Visual embedding export found an unframed image placeholder.")
-        if tokens_only[0][placeholder - 1] != 151652 or tokens_only[0][placeholder + 1] != 151653:
+        if (tokens_only[0][placeholder - 1], tokens_only[0][placeholder + 1]) not in {(151652, 151653), (248053, 248054)}:
             raise ValueError("Visual embedding export requires Qwen vision-start and vision-end tokens.")
 
         start = visual["index"]
@@ -3532,11 +3568,13 @@ def batch_complete_conditionings(conditionings):
     return batched
 
 
-def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False, flux3=False):
+def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False, flux3=False, moss_image=False):
     if qwen_image21:
         return format_qwen_image21_prompt(prompt, system_prompt)
     if flux3:
         return format_flux3_prompt(prompt, system_prompt)
+    if moss_image:
+        return format_moss_image_prompt(prompt, system_prompt)
     if system_prompt:
         return (
             "<|im_start|>user\n<|im_end|>\n"
@@ -4545,6 +4583,7 @@ def execute_advanced_visual_consensus(
 
     qwen_image21 = is_qwen_image21_text_encoder(clip)
     flux3 = is_flux3_text_encoder(clip)
+    moss_image = is_moss_image_text_encoder(clip)
     if qwen_image21 and ref_latent_mode != "off":
         raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
     minimax_h3 = is_minimax_h3_text_encoder(clip)
@@ -4562,7 +4601,7 @@ def execute_advanced_visual_consensus(
             format_minimax_h3_prompt(clean_prompt, system_prompt)
             if minimax_h3
             else _format_advanced_visual_consensus_prompt(
-                clean_prompt, system_prompt, qwen_image21, flux3
+                clean_prompt, system_prompt, qwen_image21, flux3, moss_image
             )
         )
         conditioning = encode_embedding_classical_scaled_bias(
@@ -4612,7 +4651,7 @@ def execute_advanced_visual_consensus(
     full_prompt = (
         format_minimax_h3_prompt(prepared_prompt, system_prompt)
         if minimax_h3
-        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21, flux3)
+        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21, flux3, moss_image)
     )
 
     if consensus_enabled:
