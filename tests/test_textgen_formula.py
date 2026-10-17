@@ -813,6 +813,61 @@ def test_qwen_template_families_use_exact_thinking_suppression():
     assert textgen_nodes.MODEL_TEMPLATES["qwen35"]["visual_token"] == textgen_nodes.MODEL_TEMPLATES["qwen3vl"]["visual_token"]
 
 
+def test_text_generate_response_schema_conformance_and_node_execution():
+    from utils_collection_textgen_test.helpers.text_helpers import get_vlm_preset_response_schema
+
+    schema = get_vlm_preset_response_schema("moss_image_json_instruction_color")
+    assert isinstance(schema, dict)
+
+    raw_messy = (
+        "<think>\nLet me analyze the layout.\n</think>\n"
+        "```json\n"
+        '{"summary":{"caption":"Poster scene"},"items":[{"label":"TEXT","caption":"Title","text":"HELLO","bbox":[-10,20,1200,800],"palette":["#112233"]}]}'
+        "\n```\nExtra trailing commentary."
+    )
+    conformed_str, is_valid = textgen_nodes.conform_and_validate_response_schema(raw_messy, schema)
+    assert is_valid is True
+    import json
+
+    parsed = json.loads(conformed_str)
+    assert parsed["summary"]["caption"] == "Poster scene"
+    assert parsed["bbox_coord_space"] == "abs_centralized"
+    assert parsed["bbox_format"] == "yxyx"
+    assert parsed["items"][0]["label"] == "text"
+    assert parsed["items"][0]["bbox"] == [0, 20, 1000, 800]
+    assert parsed["items"][0]["palette"] == ["#112233"]
+
+    class FakeClip:
+        tokenizer = types.SimpleNamespace(clip_name="qwen35_9b")
+
+        @staticmethod
+        def tokenize(prompt, **kwargs):
+            return {"qwen35": [[(1, 1.0)]]}
+
+        @staticmethod
+        def generate(tokens, **kwargs):
+            return [10, 11]
+
+        @staticmethod
+        def decode(ids, **kwargs):
+            return '"summary":{"caption":"Auto prefill"},"items":[{"label":"object","caption":"Box","bbox":[100,200,300,400],"palette":["#abcdef"]}],"bbox_coord_space":"normalized_1000","bbox_format":"yxyx"} trailing'
+
+    out_text, out_seed = textgen_nodes.UC_TextGenerate.execute(
+        FakeClip(),
+        "analyze",
+        "",
+        384,
+        128,
+        {"sampling_mode": "off"},
+        thinking=False,
+        response_schema=schema,
+    ).args
+    assert out_seed == 0
+    out_obj = json.loads(out_text)
+    assert out_obj["summary"]["caption"] == "Auto prefill"
+    assert out_obj["items"][0]["bbox"] == [100, 200, 300, 400]
+
+
 def test_project_source_has_no_builtin_eval_calls():
     offenders = []
     tracked = subprocess.run(
