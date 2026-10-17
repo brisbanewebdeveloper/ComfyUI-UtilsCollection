@@ -1718,3 +1718,214 @@ def test_krea2_nag_end_to_end_variable_length_and_ref_latents():
     assert recorded_conds[1] is None
     assert recorded_opts["transformer_options"][patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] is neg_context
 
+
+def test_moss_image_temporal_clip_patcher_end_to_end():
+    from comfy.ldm.moss_image import model as moss_model
+    import comfy.ops
+
+    torch.manual_seed(7)
+    raw_noise = torch.randn(4, 16, 8, 8)
+    for mode in ("flow_warp", "cosine_arc", "slerp", "ar1", "shared", "independent"):
+        corr = patcher_helpers.correlate_moss_temporal_noise(
+            raw_noise,
+            frames_per_clip=4,
+            noise_mode=mode,
+            noise_correlation=0.85,
+            loop=True,
+        )
+        assert corr.shape == raw_noise.shape
+        for f in range(4):
+            assert 0.6 < float(corr[f].std()) < 1.4
+        if mode == "shared":
+            assert torch.allclose(corr[0], corr[3])
+        elif mode == "independent":
+            assert torch.allclose(corr, raw_noise)
+        elif mode != "flow_warp":
+            dot_01 = float((corr[0].flatten() * corr[1].flatten()).mean())
+            assert dot_01 > 0.3
+
+    ids_single = patcher_helpers.build_moss_temporal_rope_ids(1, 2, 3, 5)
+    assert ids_single.shape == (2 * 3 + 5, 4)
+    assert torch.all(ids_single[:6, 0] == 0.0)
+    assert torch.all(ids_single[:6, 1] == 5.0)
+    assert torch.allclose(ids_single[6:, 1], torch.arange(5, dtype=torch.float32))
+
+    ids_multi = patcher_helpers.build_moss_temporal_rope_ids(
+        frames=3,
+        h=2,
+        w=2,
+        text_len=4,
+        temporal_stride=1.5,
+        reference_stride=0.5,
+        loop=False,
+    )
+    assert ids_multi.shape == (3 * 4 + 4, 4)
+    assert torch.allclose(ids_multi[0:4, 0], torch.full((4,), 0.0))
+    assert torch.allclose(ids_multi[4:8, 0], torch.full((4,), 0.5))
+    assert torch.allclose(ids_multi[8:12, 0], torch.full((4,), 1.0))
+    assert torch.allclose(ids_multi[0:4, 1], torch.full((4,), 4.0))
+    assert torch.allclose(ids_multi[4:8, 1], torch.full((4,), 5.5))
+    assert torch.allclose(ids_multi[8:12, 1], torch.full((4,), 7.0))
+    assert torch.allclose(ids_multi[0:4, 2], ids_multi[4:8, 2])
+    assert torch.allclose(ids_multi[0:4, 3], ids_multi[4:8, 3])
+
+    dit = moss_model.MOSSImage(
+        dim=64,
+        ffn_dim=128,
+        num_heads=2,
+        num_layers=2,
+        text_dim=32,
+        latent_channels=16,
+        dtype=torch.float32,
+        device="cpu",
+        operations=torch.nn,
+    ).eval()
+
+    class FakeModelSampling:
+        def percent_to_sigma(self, percent: float) -> float:
+            return 1.0 - float(percent)
+
+    class FakeMOSSPatcher:
+        def __init__(self, diffusion, sampling):
+            self.diffusion = diffusion
+            self.sampling = sampling
+            self.model_options = {"transformer_options": {}}
+
+        def clone(self):
+            cloned = FakeMOSSPatcher(self.diffusion, self.sampling)
+            cloned.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
+            return cloned
+
+        def get_model_object(self, name: str):
+            if name == "diffusion_model":
+                return self.diffusion
+            if name == "model_sampling":
+                return self.sampling
+            return None
+
+        def remove_wrappers_with_key(self, wrapper_type, key):
+            self.model_options.get("wrappers", {}).get(wrapper_type, {}).pop(key, None)
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            wrappers = self.model_options.setdefault("wrappers", {}).setdefault(wrapper_type, {})
+            wrappers[key] = [wrapper]
+
+    base_patcher = FakeMOSSPatcher(dit, FakeModelSampling())
+    (patched_tube,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="tube_attention",
+        temporal_strength=0.55,
+        tube_window=2,
+        temporal_smoothing=0.20,
+        noise_mode="flow_warp",
+        noise_correlation=0.85,
+        loop=True,
+        temporal_stride=1.0,
+        reference_stride=0.25,
+        uncond_skip_layer=1,
+        attention_scale=1.1,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+    (patched_zero,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="tube_attention",
+        temporal_strength=0.0,
+        tube_window=2,
+        temporal_smoothing=0.0,
+        noise_mode="flow_warp",
+        noise_correlation=0.85,
+        loop=False,
+        uncond_skip_layer=-1,
+    )
+    (patched_packed,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="packed_sequence",
+        temporal_stride=1.0,
+        reference_stride=0.25,
+        noise_mode="cosine_arc",
+        noise_correlation=0.85,
+        loop=False,
+        uncond_skip_layer=1,
+        attention_scale=1.1,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+
+    x = torch.randn(3, 16, 3, 3)
+    timesteps = torch.tensor([0.5, 0.5, 0.5])
+    context = torch.randn(1, 5, 32).expand(3, -1, -1).contiguous()
+
+    old_training = comfy.model_management.in_training
+    comfy.model_management.in_training = True
+    try:
+        baseline_out = dit(x, timesteps, context, transformer_options={"cond_or_uncond": [0]})
+
+        # With temporal_strength=0.0 and temporal_smoothing=0.0, tube_attention matches baseline exactly
+        zero_opts = {
+            "wrappers": patched_zero.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        zero_out = dit(x, timesteps, context, transformer_options=zero_opts)
+        assert torch.allclose(zero_out, baseline_out, atol=1e-5)
+
+        outer_wrapper = patched_tube.model_options["wrappers"][comfy.patcher_extension.WrappersMP.OUTER_SAMPLE][
+            patcher_helpers.MOSS_IMAGE_TEMPORAL_OUTER_SAMPLE_WRAPPER_KEY
+        ][0]
+        captured_noise = []
+        outer_wrapper(
+            lambda n, *_a, **_kw: captured_noise.append(n),
+            x.clone(),
+            None,
+            None,
+            None,
+        )
+        assert len(captured_noise) == 1
+        assert captured_noise[0].shape == x.shape
+        assert not torch.allclose(captured_noise[0], x)
+
+        cond_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        tube_out = dit(x, timesteps, context, transformer_options=cond_opts)
+        assert tube_out.shape == baseline_out.shape
+        assert not torch.allclose(tube_out, baseline_out, atol=1e-4)
+
+        # Uncond pass skips layer 1 via uncond_skip_layer=1
+        uncond_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [1],
+            "sigmas": torch.tensor([0.5]),
+        }
+        uncond_out = dit(x, timesteps, context, transformer_options=uncond_opts)
+        assert uncond_out.shape == baseline_out.shape
+        assert not torch.allclose(uncond_out, tube_out, atol=1e-4)
+
+        # Outside sigma window (sigma=0.1 < 0.2 for end_percent=0.8), tube attention is bypassed
+        late_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.1]),
+        }
+        late_out = dit(x, timesteps, context, transformer_options=late_opts)
+        assert torch.allclose(late_out, baseline_out, atol=1e-5)
+
+        # packed_sequence mode also runs cleanly
+        packed_opts = {
+            "wrappers": patched_packed.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        packed_out = dit(x, timesteps, context, transformer_options=packed_opts)
+        assert packed_out.shape == baseline_out.shape
+        assert not torch.allclose(packed_out, baseline_out, atol=1e-4)
+    finally:
+        comfy.model_management.in_training = old_training
+
+
