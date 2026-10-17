@@ -2098,10 +2098,10 @@ class UC_CompositeNodesGuide(io.ComfyNode):
             ),
             "create_bounding_boxes": (
                 "## Create Bounding Boxes (Nodes 1.0)\n\n"
-                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, and normalized `elements`.\n\n"
+                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements`, and `moss_prompt` (`MOSS-Image` `abs_centralized` pixel layout JSON). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected).\n\n"
                 "- Click and drag on empty canvas space (or Shift+drag over existing boxes) to draw a new bounding box, or use `+ Object Box` and `+ Text Box`.\n"
                 "- Click a box to select it, drag inside to move it, or drag its eight handles to resize it.\n"
-                "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, pick a swatch color, and lock or exclude individual boxes.\n"
+                "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, open the docked `PaintColorPicker` swatch to assign an optional prompt color (boxes default to outline-only so no color is sent to the prompt unless set; right-click, Shift+click, or press `Clear color (outline only)` to clear), and lock or exclude individual boxes.\n"
                 "- Connect `elements` directly to `FLUX.3 Layout Prompt` (citing `<obj_1>`, `<obj_2>`, etc. in the prompt) or `Build JSON Prompt (Ideogram)`, or connect `moss_prompt` (or `UC_MOSSImageBBoxConvert`) directly to a `MOSS-Image` text encoder."
             ),
         }

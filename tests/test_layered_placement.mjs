@@ -385,5 +385,11 @@ test("bounding box editor state round-trips and clamps move/resize/draw geometry
   assert.equal(parsed.boxes[0].text, "OPEN");
   assert.equal(parsed.boxes[0].included, false);
   assert.equal(parsed.boxes[0].locked, true);
+  assert.deepEqual(parsed.boxes[0].palette, []);
+  assert.equal(parsed.boxes[0].outline_color, "#ff6b6b");
+  const secondBox = normalizeBoxRegion({ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, 1);
+  assert.equal(secondBox.outline_color, "#4ecdc4");
+  assert.equal(normalizeBoxRegion(secondBox, 0).outline_color, "#4ecdc4");
+  assert.deepEqual(normalizeBoxRegion({ palette: ["#FF6B6B"] }).palette, ["#ff6b6b"]);
   assert.ok(normalizeBoxRegion({ x: -1, y: -1, w: 2, h: 2 }).w <= 1);
 });

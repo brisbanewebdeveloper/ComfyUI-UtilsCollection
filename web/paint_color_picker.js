@@ -55,11 +55,12 @@ function assignStyle(element, values) {
 function make(tag, style = {}) { return assignStyle(document.createElement(tag), style); }
 
 export class PaintColorPicker {
-  constructor({ color = "#ff0000", onChange, onEyedropper, panelHost, onOpenChange }) {
+  constructor({ color = "#ff0000", onChange, onEyedropper, onClear, panelHost, onOpenChange }) {
     this.color = normalizeHex(color) || "#ff0000";
     this.previous = this.color;
     this.onChange = onChange;
     this.onEyedropper = onEyedropper;
+    this.onClear = onClear;
     this.onOpenChange = onOpenChange;
     this.recent = this.loadRecent();
     this.root = make("div", { position: "relative", display: "inline-flex" });
@@ -183,6 +184,13 @@ export class PaintColorPicker {
     eyedropper.type = "button"; eyedropper.textContent = "Pick from composition";
     eyedropper.addEventListener("click", () => { this.setOpen(false); this.onEyedropper?.(); });
     panel.append(title, this.sl, this.hue, comparisons, fields, this.recentRoot, eyedropper);
+    if (this.onClear) {
+      const clearBtn = make("button", { height: "28px" });
+      clearBtn.type = "button";
+      clearBtn.textContent = "Clear color (outline only)";
+      clearBtn.addEventListener("click", () => { this.setOpen(false); this.onClear?.(); });
+      panel.append(clearBtn);
+    }
     return panel;
   }
 

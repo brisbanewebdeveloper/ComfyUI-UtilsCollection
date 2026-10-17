@@ -810,6 +810,10 @@ def _normalize_region_entry(entry: dict, width: int, height: int) -> dict | None
         raw_palette = [part.strip() for part in raw_palette.split(",") if part.strip()]
     palette = normalize_palette(raw_palette if isinstance(raw_palette, list) else [])[:5]
 
+    raw_outline = meta.get("outline_color")
+    outline_list = normalize_palette([raw_outline] if isinstance(raw_outline, str) and raw_outline.strip() else [])
+    outline_color = outline_list[0] if outline_list else (palette[0] if palette else "")
+
     etype = "text" if str(meta.get("type", entry.get("type", "obj"))).lower() == "text" else "obj"
     return {
         "x": x,
@@ -817,11 +821,12 @@ def _normalize_region_entry(entry: dict, width: int, height: int) -> dict | None
         "w": w,
         "h": h,
         "type": etype,
-        "text": str(meta.get("text", entry.get("text", "")) or "") if etype == "text" else "",
-        "desc": str(meta.get("desc", entry.get("desc", "")) or ""),
+        "text": str(meta.get("text", "") or "") if etype == "text" else "",
+        "desc": str(meta.get("desc", "") or ""),
         "palette": palette,
-        "included": bool(entry.get("included", True)),
-        "locked": bool(entry.get("locked", False)),
+        "outline_color": outline_color,
+        "included": bool(meta.get("included", entry.get("included", True))),
+        "locked": bool(meta.get("locked", entry.get("locked", False))),
     }
 
 
@@ -1100,7 +1105,8 @@ def execute_create_bounding_boxes(
     for index, region in enumerate(active_regions):
         palette = list(region.get("palette") or [])
         if not palette:
-            palette = [_BBOX_DEFAULT_COLORS[index % len(_BBOX_DEFAULT_COLORS)]]
+            outline = str(region.get("outline_color", "") or "").strip()
+            palette = [outline] if outline else [_BBOX_DEFAULT_COLORS[index % len(_BBOX_DEFAULT_COLORS)]]
         preview_regions.append({**region, "palette": palette})
 
     preview = core_bboxes.render_preview(

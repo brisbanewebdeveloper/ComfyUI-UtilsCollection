@@ -536,7 +536,7 @@ export const BBOX_DEFAULT_COLORS = Object.freeze([
   "#1dd1a1",
 ]);
 
-export function normalizeHexPalette(raw, fallbackColor = "#ff6b6b") {
+export function normalizeHexPalette(raw, fallbackColor = "") {
   const source = Array.isArray(raw)
     ? raw
     : typeof raw === "string"
@@ -574,7 +574,9 @@ export function normalizeBoxRegion(entry = {}, index = 0) {
   const w = clamp(rawW, 0.01, 1 - x);
   const h = clamp(rawH, 0.01, 1 - y);
   const type = String(source.type || "obj").toLowerCase() === "text" ? "text" : "obj";
+  const palette = normalizeHexPalette(source.palette ?? source.color_palette, "");
   const defaultColor = BBOX_DEFAULT_COLORS[index % BBOX_DEFAULT_COLORS.length];
+  const outlineColor = normalizeHexPalette(source.outline_color, "")[0] || palette[0] || defaultColor;
   return {
     x: Math.round(x * 1e6) / 1e6,
     y: Math.round(y * 1e6) / 1e6,
@@ -583,7 +585,8 @@ export function normalizeBoxRegion(entry = {}, index = 0) {
     type,
     desc: typeof source.desc === "string" ? source.desc : "",
     text: type === "text" && typeof source.text === "string" ? source.text : "",
-    palette: normalizeHexPalette(source.palette ?? source.color_palette, defaultColor),
+    palette,
+    outline_color: outlineColor,
     included: source.included !== false,
     locked: source.locked === true,
   };
