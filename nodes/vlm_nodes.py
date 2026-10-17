@@ -1,4 +1,5 @@
 from comfy_api.latest import io
+from ..helpers.text_helpers import get_vlm_preset_response_schema
 from ..vlm_presets import (
     additional_instructions_vlm,
     system_instructions_vlm,
@@ -8,6 +9,8 @@ from ..vlm_presets import (
 from ..vlm_legacy_presets import legacy_system_instructions_vlm
 from ..vlm_experimental_presets import system_instructions_vlm_experimental
 from ..vlm_motion_presets import motion_system_instructions_vlm
+
+ResponseSchema = io.Custom("GEMINI_RESPONSE_SCHEMA")
 
 
 class UC_VLMSysInstrPresets(io.ComfyNode):
@@ -30,10 +33,19 @@ class UC_VLMSysInstrPresets(io.ComfyNode):
                     display_name="vlm_system_instruction_preset",
                     options=options,
                     default=default,
+                    tooltip="Select the system instruction preset. JSON layout presets also output a paired Gemini response_schema.",
                 ),
             ],
             outputs=[
-                io.String.Output(display_name="system_instruction"),
+                io.String.Output(
+                    display_name="system_instruction",
+                    tooltip="Selected VLM system instruction text.",
+                ),
+                ResponseSchema.Output(
+                    "response_schema",
+                    display_name="response_schema",
+                    tooltip="Paired Gemini response schema for JSON presets (moss_image_json_instruction* and ideogram_4_json_instruction*). Connect to the Gemini node's Response format input.",
+                ),
             ],
         )
 
@@ -41,7 +53,7 @@ class UC_VLMSysInstrPresets(io.ComfyNode):
     def execute(cls, preset) -> io.NodeOutput:
         presets_dict = cls.get_presets()
         system_instruction = presets_dict.get(preset, "")
-        return io.NodeOutput(system_instruction)
+        return io.NodeOutput(system_instruction, get_vlm_preset_response_schema(preset))
 
 
 class UC_VLMSysInstrPresetsExperimental(UC_VLMSysInstrPresets):
@@ -71,6 +83,11 @@ class UC_VLMSysInstrPresetsExperimental(UC_VLMSysInstrPresets):
             ],
         )
 
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        return io.NodeOutput(presets_dict.get(preset, ""))
+
 
 class UC_VLMSysInstrLegacyPresets(UC_VLMSysInstrPresets):
     @classmethod
@@ -99,6 +116,11 @@ class UC_VLMSysInstrLegacyPresets(UC_VLMSysInstrPresets):
             ],
         )
 
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        return io.NodeOutput(presets_dict.get(preset, ""))
+
 
 class UC_VLMSysInstrMotionPresets(UC_VLMSysInstrPresets):
     @classmethod
@@ -126,6 +148,11 @@ class UC_VLMSysInstrMotionPresets(UC_VLMSysInstrPresets):
                 io.String.Output(display_name="system_instruction"),
             ],
         )
+
+    @classmethod
+    def execute(cls, preset) -> io.NodeOutput:
+        presets_dict = cls.get_presets()
+        return io.NodeOutput(presets_dict.get(preset, ""))
 
 
 class UC_VLMSysQueryAddPresets(io.ComfyNode):
@@ -218,18 +245,27 @@ class UC_VLMSysInstrAdvPresets(io.ComfyNode):
                     display_name="vlm_system_instruction_advanced_preset",
                     options=options,
                     default=default,
+                    tooltip="Select the system instruction preset. JSON layout presets also output a paired Gemini response_schema.",
                 ),
-                io.Boolean.Input("jailbreak", default=False),
-                io.String.Input("system_query", multiline=True, default=""),
-                io.String.Input("user_query", multiline=True, default=""),
+                io.Boolean.Input("jailbreak", default=False, tooltip="Wrap the system instruction with the configured jailbreak prefix and suffix."),
+                io.String.Input("system_query", multiline=True, default="", tooltip="Optional high-priority system query instructions appended to the preset."),
+                io.String.Input("user_query", multiline=True, default="", tooltip="Optional user query instructions appended to the preset."),
             ],
             outputs=[
-                io.String.Output(display_name="system_instruction"),
+                io.String.Output(
+                    display_name="system_instruction",
+                    tooltip="Assembled VLM system instruction text.",
+                ),
+                ResponseSchema.Output(
+                    "response_schema",
+                    display_name="response_schema",
+                    tooltip="Paired Gemini response schema for JSON presets (moss_image_json_instruction* and ideogram_4_json_instruction*). Connect to the Gemini node's Response format input.",
+                ),
             ],
         )
 
     @classmethod
-    def execute(cls, preset, jailbreak, system_query, user_query) -> io.NodeOutput:
+    def _assemble_instruction(cls, preset, jailbreak, system_query, user_query) -> str:
         presets_dict = cls.get_presets()
         additional = cls.get_additional_instructions()
 
@@ -265,7 +301,12 @@ class UC_VLMSysInstrAdvPresets(io.ComfyNode):
             jb_suffix = additional.get("jailbreak_suffix", "")
             result = jb_prefix + result + jb_suffix
 
-        return io.NodeOutput(result)
+        return result
+
+    @classmethod
+    def execute(cls, preset, jailbreak, system_query, user_query) -> io.NodeOutput:
+        result = cls._assemble_instruction(preset, jailbreak, system_query, user_query)
+        return io.NodeOutput(result, get_vlm_preset_response_schema(preset))
 
 
 class UC_VLMSysInstrAdvPresetsExperimental(UC_VLMSysInstrAdvPresets):
@@ -298,6 +339,10 @@ class UC_VLMSysInstrAdvPresetsExperimental(UC_VLMSysInstrAdvPresets):
             ],
         )
 
+    @classmethod
+    def execute(cls, preset, jailbreak, system_query, user_query) -> io.NodeOutput:
+        return io.NodeOutput(cls._assemble_instruction(preset, jailbreak, system_query, user_query))
+
 
 class UC_VLMSysInstrAdvMotionPresets(UC_VLMSysInstrAdvPresets):
     @classmethod
@@ -328,3 +373,7 @@ class UC_VLMSysInstrAdvMotionPresets(UC_VLMSysInstrAdvPresets):
                 io.String.Output(display_name="system_instruction"),
             ],
         )
+
+    @classmethod
+    def execute(cls, preset, jailbreak, system_query, user_query) -> io.NodeOutput:
+        return io.NodeOutput(cls._assemble_instruction(preset, jailbreak, system_query, user_query))

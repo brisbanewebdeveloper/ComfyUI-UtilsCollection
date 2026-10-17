@@ -4,15 +4,21 @@ import fs from "node:fs";
 
 import {
   DEFAULT_PLACEMENT,
+  drawNormalizedBox,
   drawRect,
+  moveNormalizedBox,
   moveRect,
   moveResolvedPlacement,
+  normalizeBoxRegion,
+  parseBoxEditorData,
   parsePlacementData,
   placementToRect,
   projectQuadPoint,
   rectToPlacement,
+  resizeNormalizedBox,
   resizeRectFromDelta,
   rotationFromPointer,
+  serializeBoxEditorData,
   serializePlacementData,
   stepPlacementValue,
   deformQuadCentroidLocked,
@@ -352,4 +358,38 @@ test("projective quad mapping reaches corners and maps finite interior coordinat
     close(actual[1], expected[1]);
   }
   assert.ok(projectQuadPoint(quad, 0.5, 0.5).every(Number.isFinite));
+});
+
+test("bounding box editor state round-trips and clamps move/resize/draw geometry", () => {
+  const drawn = drawNormalizedBox({ x: 0.7, y: 0.8 }, { x: 0.2, y: 0.3 }, 0, "text");
+  assert.deepEqual(
+    { x: drawn.x, y: drawn.y, w: drawn.w, h: drawn.h, type: drawn.type },
+    { x: 0.2, y: 0.3, w: 0.5, h: 0.5, type: "text" },
+  );
+  const moved = moveNormalizedBox(drawn, 0.4, -0.5);
+  assert.equal(moved.x, 0.5);
+  assert.equal(moved.y, 0);
+  const resized = resizeNormalizedBox(moved, "nw", -0.2, 0.1);
+  assert.equal(resized.x, 0.3);
+  assert.equal(resized.y, 0.1);
+  assert.equal(resized.w, 0.7);
+  assert.equal(resized.h, 0.4);
+
+  const serialized = serializeBoxEditorData({
+    boxes: [{ ...resized, desc: "sign", text: "OPEN", included: false, locked: true }],
+    last_incoming: null,
+  });
+  const parsed = parseBoxEditorData(serialized);
+  assert.equal(parsed.boxes.length, 1);
+  assert.equal(parsed.boxes[0].desc, "sign");
+  assert.equal(parsed.boxes[0].text, "OPEN");
+  assert.equal(parsed.boxes[0].included, false);
+  assert.equal(parsed.boxes[0].locked, true);
+  assert.deepEqual(parsed.boxes[0].palette, []);
+  assert.equal(parsed.boxes[0].outline_color, "#ff6b6b");
+  const secondBox = normalizeBoxRegion({ x: 0.1, y: 0.1, w: 0.2, h: 0.2 }, 1);
+  assert.equal(secondBox.outline_color, "#4ecdc4");
+  assert.equal(normalizeBoxRegion(secondBox, 0).outline_color, "#4ecdc4");
+  assert.deepEqual(normalizeBoxRegion({ palette: ["#FF6B6B"] }).palette, ["#ff6b6b"]);
+  assert.ok(normalizeBoxRegion({ x: -1, y: -1, w: 2, h: 2 }).w <= 1);
 });

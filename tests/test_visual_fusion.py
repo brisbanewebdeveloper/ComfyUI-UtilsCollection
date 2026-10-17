@@ -1345,3 +1345,145 @@ def test_missing_and_malformed_grids_rejected():
         encoder_helpers.fuse_visual_token_sources(sources, _config(), "cpu")
     with pytest.raises(ValueError, match="inconsistent"):
         encoder_helpers.fuse_visual_token_sources(sources, _config(), "cpu", source_grids=[(1, 3)])
+
+
+def test_flux3_text_encoder_prompt_formatting_and_token_fusion_normalization(monkeypatch):
+    flux3_tok_type = type(
+        "Flux3Tokenizer", (), {"__module__": "comfy.text_encoders.flux"}
+    )
+    clip = types.SimpleNamespace(
+        tokenizer=flux3_tok_type(),
+        cond_stage_model=types.SimpleNamespace(clip_name="qwen3vl_4b"),
+    )
+    assert encoder_helpers.is_flux3_text_encoder(clip)
+    assert encoder_helpers.format_flux3_prompt("a blue car", "") == (
+        "<|im_start|>user\na blue car<|im_end|>\n<|im_start|>assistant\n"
+    )
+    assert encoder_helpers.format_flux3_prompt("a blue car", "Focus on reflections.") == (
+        "<|im_start|>system\nFocus on reflections.<|im_end|>\n"
+        "<|im_start|>user\na blue car<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+    tokens = {"qwen3vl_4b": [[(151644, 1.0), (872, 1.0), (198, 1.0), (100, 1.0)]]}
+    raw_cond = torch.ones((1, 8, 4, 2560))
+    normalized, _ = encoder_helpers._normalize_token_fused_conditioning(
+        clip, tokens, raw_cond, {}
+    )
+    assert normalized.shape == (1, 4, 20480)
+
+
+def test_moss_image_text_encoder_prompt_formatting_and_token_fusion():
+    moss_tok_type = type(
+        "MOSSImageTokenizer", (), {"__module__": "comfy.text_encoders.moss_image"}
+    )
+    moss_te_type = type(
+        "MOSSImageTEModel", (), {"__module__": "comfy.text_encoders.moss_image"}
+    )
+
+    class ClipModel:
+        enable_attention_masks = True
+        layer = "last"
+        layer_idx = None
+        layer_norm_hidden_state = False
+        zero_out_masked = False
+        return_projected_pooled = False
+        return_attention_masks = False
+        received_embeds_info = None
+
+        def transformer(self, _tokens, _mask, embeds=None, embeds_info=None, **_kwargs):
+            self.received_embeds_info = embeds_info
+            return (embeds.clone(), embeds.clone(), None)
+
+        def process_tokens(self, rows, device):
+            image = next(value for value in rows[0] if isinstance(value, dict))
+            source = float(image["data"].flatten()[0])
+            embeds = torch.zeros((1, 6, 4), device=device)
+            embeds[0, 1:5] = source
+            mask = torch.ones((1, 6), device=device, dtype=torch.long)
+            info = [
+                {
+                    "type": "image",
+                    "index": 1,
+                    "size": 4,
+                    "extra": torch.tensor([[1, 4, 4]]),
+                }
+            ]
+            return embeds, mask, [6], info
+
+    clip_model = ClipModel()
+    stage = moss_te_type()
+    stage.clip = "qwen35_9b"
+    stage.clip_name = "qwen35_9b"
+    stage.qwen35_9b = clip_model
+    stage.reset_clip_options = lambda: None
+    stage.set_clip_options = lambda _opts: None
+
+    tokenized_prompts = []
+
+    class Clip:
+        tokenizer = moss_tok_type()
+        cond_stage_model = stage
+        layer_idx = None
+        use_clip_schedule = False
+        patcher = types.SimpleNamespace(
+            load_device=torch.device("cpu"), forced_hooks=None
+        )
+
+        @staticmethod
+        def load_model(_tokens=None):
+            pass
+
+        @staticmethod
+        def add_hooks_to_dict(_metadata):
+            pass
+
+        @staticmethod
+        def tokenize(text, images=None, **_kwargs):
+            tokenized_prompts.append(text)
+            return {
+                "qwen35_9b": [
+                    [
+                        (248053, 1.0),
+                        ({"type": "image", "data": images[0]}, 1.0),
+                        (248054, 1.0),
+                    ]
+                ]
+            }
+
+    clip = Clip()
+    assert encoder_helpers.is_moss_image_text_encoder(clip)
+    assert encoder_helpers.format_moss_image_prompt("  a moss covered monolith  ", "") == (
+        "<|im_start|>user\na moss covered monolith<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    )
+    assert encoder_helpers.format_moss_image_prompt(
+        "  a moss covered monolith  ", "Use cinematic lighting."
+    ) == (
+        "<|im_start|>system\nUse cinematic lighting.<|im_end|>\n"
+        "<|im_start|>user\na moss covered monolith<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n"
+    )
+    assert encoder_helpers.is_image_token((248056, 1.0))
+
+    images = [torch.zeros((1, 64, 64, 3)), torch.ones((1, 64, 64, 3))]
+    conditioning, _ = encoder_helpers.execute_token_fusion_visual_conditioning(
+        clip,
+        "a moss covered monolith",
+        images,
+        {"visual_fusion_method": "spatial-checkerboard"},
+        "Original",
+        system_prompt="",
+    )
+    assert tokenized_prompts[0] == (
+        "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>a moss covered monolith<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n"
+    )
+    assert conditioning[0][0][0, 1:5, 0].tolist() == [0.0, 1.0, 1.0, 0.0]
+    assert torch.is_tensor(clip_model.received_embeds_info[0]["extra"])
+    assert clip_model.received_embeds_info[0]["extra"].tolist() == [[1, 4, 4]]
+
+    blocks = encoder_helpers._visual_token_embedding_blocks(
+        clip, clip.tokenize("prompt", images=[images[0]]), "cpu"
+    )
+    assert len(blocks) == 1
+    assert blocks[0]["interior"].shape == (1, 4, 4)
+    assert blocks[0]["block"].shape == (1, 6, 4)

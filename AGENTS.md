@@ -67,6 +67,32 @@ rules and must remain local only; do not stage or commit it.
   are not a demand to create tests or run `--final`. Existing untracked test
   files may be selected explicitly without staging unrelated artifacts.
 
+## User-facing copy and node documentation
+
+- Match the repository's established node-family, display-name, and parameter
+  naming conventions (e.g., `UC_MiniMaxH3ClipContinuation*`, `tail_frames`)
+  when porting or adapting external reference implementations; never copy
+  external node or widget names verbatim if they clash with existing workflow
+  naming.
+- Write node `description`s, input/output `tooltip`s, `node_metadata.py`
+  (`DESCRIPTIONS` and `EXTRA_ALIASES`), `README.md`, and guide-node prose in
+  plain, practical, jargon-free language for workflow users.
+- Explain what a node or control does to the generation or workflow, when to
+  connect optional inputs, what the default value provides, and the practical
+  effect of raising, lowering, or disabling a setting.
+- Avoid internal implementation terms ("cloned model", hook/wrapper names),
+  tensor/shape notation (`[B, C, N]`, "variable-length"), and raw paper or math
+  jargon (`1 + phi`, `tau`, `alpha`, `theta`, "L1-norm ratio clipping threshold")
+  in user-facing text.
+- Provide explicit `tooltip`s on every user-facing input and output—including
+  inputs or outputs inherited from a parent node class when subclassing.
+- When adding, renaming, or updating a node, always add or update both
+  `DESCRIPTIONS` and `EXTRA_ALIASES` in `node_metadata.py` (do not rely on
+  inline `schema.description` fallback alone), `README.md`
+  (`## Available nodes`), and any relevant guide node (`UC_*Guide`) in the same
+  change before committing so separate documentation-audit passes are
+  unnecessary.
+
 ## Managed VLM presets
 
 - Treat serialized runtime presets as generated data. Edit the matching readable

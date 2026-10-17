@@ -251,6 +251,57 @@ def is_klein_vl_text_encoder(clip) -> bool:
     )
 
 
+def is_flux3_text_encoder(clip) -> bool:
+    tokenizer = getattr(clip, "tokenizer", None)
+    stage = getattr(clip, "cond_stage_model", None)
+    return any(
+        cls.__module__ == "comfy.text_encoders.flux"
+        and cls.__name__ in {"Flux3Tokenizer", "Flux3TEModel", "Flux3Qwen3VLModel"}
+        for owner in (tokenizer, stage, getattr(stage, "clip_model", None))
+        if owner is not None
+        for cls in type(owner).__mro__
+    )
+
+
+def format_flux3_prompt(prompt, system_prompt=""):
+    if system_prompt:
+        return (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{prompt}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+    return (
+        f"<|im_start|>user\n{prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
+def is_moss_image_text_encoder(clip) -> bool:
+    tokenizer = getattr(clip, "tokenizer", None)
+    stage = getattr(clip, "cond_stage_model", None)
+    return any(
+        cls.__module__ == "comfy.text_encoders.moss_image"
+        and cls.__name__ in {"MOSSImageTokenizer", "MOSSImageTEModel"}
+        for owner in (tokenizer, stage, getattr(stage, "clip_model", None))
+        if owner is not None
+        for cls in type(owner).__mro__
+    )
+
+
+def format_moss_image_prompt(prompt, system_prompt=""):
+    user_prompt = prompt.strip()
+    if system_prompt:
+        return (
+            f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+            f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n"
+        )
+    return (
+        f"<|im_start|>user\n{user_prompt}<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n"
+    )
+
+
 def is_qwen_image21_text_encoder(clip) -> bool:
     return any(
         cls.__module__ == "comfy.text_encoders.qwen_image21"
@@ -795,8 +846,28 @@ def minimax_h3_frame_count(length: int) -> int:
     return frame_count
 
 
+def _extract_uc_segment_meta(*sources) -> tuple[int | None, int | None]:
+    ov = None
+    pad = None
+    for src in sources:
+        if src is None:
+            continue
+        if ov is None:
+            if hasattr(src, "_uc_overlap_frames"):
+                ov = int(getattr(src, "_uc_overlap_frames"))
+            elif isinstance(src, Mapping) and "_uc_overlap_frames" in src:
+                ov = int(src["_uc_overlap_frames"])
+        if pad is None:
+            if hasattr(src, "_uc_padded_frames"):
+                pad = int(getattr(src, "_uc_padded_frames"))
+            elif isinstance(src, Mapping) and "_uc_padded_frames" in src:
+                pad = int(src["_uc_padded_frames"])
+    return ov, pad
+
+
 def minimax_h3_empty_av_latent(width: int, height: int, length: int) -> tuple[dict, int]:
     """Create the batch-one joint video/audio latent expected by MiniMax H3."""
+    ov, pad = _extract_uc_segment_meta(length)
     width = int(width)
     height = int(height)
     if width < 32 or height < 32 or width % 32 or height % 32:
@@ -807,7 +878,12 @@ def minimax_h3_empty_av_latent(width: int, height: int, length: int) -> tuple[di
     device = comfy.model_management.intermediate_device()
     video = torch.zeros([1, 24, video_t, height // 16, width // 16], device=device)
     audio = torch.zeros([1, 32, 2, audio_t], device=device)
-    return {"samples": comfy.nested_tensor.NestedTensor((video, audio))}, frame_count
+    out = {"samples": comfy.nested_tensor.NestedTensor((video, audio))}
+    if ov is not None:
+        out["uc_overlap_frames"] = ov
+    if pad is not None:
+        out["uc_padded_frames"] = pad
+    return out, frame_count
 
 
 def prepare_minimax_h3_frame(image: torch.Tensor, width: int, height: int, crop: str) -> torch.Tensor:
@@ -1114,7 +1190,7 @@ def is_image_token(t):
     if isinstance(val, dict) and val.get("type") == "image":
         return True
 
-    if isinstance(val, numbers.Integral) and val in (151655, 262144): # Qwen & Gemma image pad IDs
+    if isinstance(val, numbers.Integral) and val in (151655, 248056, 262144): # Qwen & Gemma image pad IDs
         return True
 
     return False
@@ -1906,6 +1982,10 @@ def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata, em
             else:
                 metadata["attention_mask"] = attention_mask
         return conditioning, metadata
+    if is_flux3_text_encoder(clip) or is_klein_vl_text_encoder(clip):
+        if conditioning.ndim == 4:
+            conditioning = conditioning.movedim(1, 2).flatten(2)
+        return conditioning, metadata
     if key != "qwen3vl_4b" or conditioning.ndim != 4:
         return conditioning, metadata
 
@@ -1936,6 +2016,15 @@ def _normalize_token_fused_conditioning(clip, tokens, conditioning, metadata, em
     return conditioning, metadata
 
 
+def _extract_visual_grid(entry) -> tuple[object, tuple[int, int]]:
+    extra = entry.get("extra")
+    grid = extra.get("grid") if isinstance(extra, dict) else extra
+    values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
+    if len(values) < 3:
+        raise ValueError("TokenFusion source is missing exact visual grid metadata.")
+    return grid, (int(values[-2]) // 2, int(values[-1]) // 2)
+
+
 def _prepare_fused_visual_inputs(
     clip_model,
     token_sources,
@@ -1956,13 +2045,7 @@ def _prepare_fused_visual_inputs(
         image_entries.append(images[visual_index])
 
     if source_grids is None:
-        source_grids = []
-        for entry in image_entries:
-            grid = (entry.get("extra") or {}).get("grid")
-            values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
-            if len(values) < 3:
-                raise ValueError("TokenFusion source is missing exact visual grid metadata.")
-            source_grids.append((int(values[-2]) // 2, int(values[-1]) // 2))
+        source_grids = [_extract_visual_grid(entry)[1] for entry in image_entries]
 
     canonical_embeds, attention_mask, num_tokens, canonical_info = processed[0]
     canonical_entry = image_entries[0]
@@ -1993,20 +2076,22 @@ def _prepare_fused_visual_inputs(
         if entry.get("type") == "image" and entry.get("index") == start
     )
     fused_entry = dict(fused_info[canonical_position])
-    fused_entry["extra"] = dict(fused_entry.get("extra") or {})
-    deepstacks = {
-        index: entry.get("extra", {}).get("deepstack")
-        for index, entry in enumerate(image_entries)
-    }
-    if all(deepstacks.values()):
-        fused_entry["extra"]["deepstack"] = fuse_deepstack_layers(
-            deepstacks,
-            visual_fusion_config,
-            device,
-            mask_cache,
-            size,
-            source_grids,
-        )
+    canonical_extra = fused_entry.get("extra")
+    if isinstance(canonical_extra, dict) or canonical_extra is None:
+        fused_entry["extra"] = dict(canonical_extra or {})
+        deepstacks = {
+            index: (entry.get("extra") if isinstance(entry.get("extra"), dict) else {}).get("deepstack")
+            for index, entry in enumerate(image_entries)
+        }
+        if all(deepstacks.values()):
+            fused_entry["extra"]["deepstack"] = fuse_deepstack_layers(
+                deepstacks,
+                visual_fusion_config,
+                device,
+                mask_cache,
+                size,
+                source_grids,
+            )
     fused_info[canonical_position] = fused_entry
     return fused_embeds, attention_mask, num_tokens, fused_info, fused
 
@@ -2137,7 +2222,8 @@ def encode_token_fused_visual_slots(
             grids = []
             sources = []
             for source_embeds, entry in zip(selected_embeds, selected):
-                grid = (entry.get("extra") or {}).get("grid")
+                extra = entry.get("extra")
+                grid = extra.get("grid") if isinstance(extra, dict) else extra
                 values = grid.reshape(-1).tolist() if torch.is_tensor(grid) else list(grid or [])
                 if len(values) < 3:
                     raise ValueError("TokenFusion MiniMax source is missing visual grid metadata.")
@@ -2152,15 +2238,17 @@ def encode_token_fused_visual_slots(
             )
             fused_embeds[0, start:start + size] = fused
             replacement = dict(canonical_entry)
-            replacement["extra"] = dict(replacement.get("extra") or {})
-            deepstacks = {
-                index: entry.get("extra", {}).get("deepstack")
-                for index, entry in enumerate(selected)
-            }
-            if all(deepstacks.values()):
-                replacement["extra"]["deepstack"] = fuse_deepstack_layers(
-                    deepstacks, visual_fusion_config, device, mask_cache, size, grids, cache=cache
-                )
+            canonical_extra = replacement.get("extra")
+            if isinstance(canonical_extra, dict) or canonical_extra is None:
+                replacement["extra"] = dict(canonical_extra or {})
+                deepstacks = {
+                    index: (entry.get("extra") if isinstance(entry.get("extra"), dict) else {}).get("deepstack")
+                    for index, entry in enumerate(selected)
+                }
+                if all(deepstacks.values()):
+                    replacement["extra"]["deepstack"] = fuse_deepstack_layers(
+                        deepstacks, visual_fusion_config, device, mask_cache, size, grids, cache=cache
+                    )
             position = next(
                 index for index, entry in enumerate(fused_info)
                 if entry is canonical_entry
@@ -2308,6 +2396,10 @@ def execute_token_fusion_visual_conditioning(
     minimax_h3 = is_minimax_h3_text_encoder(clip)
     if is_qwen_image21_text_encoder(clip):
         full_prompt = format_qwen_image21_prompt(prepared_prompt, system_prompt)
+    elif is_flux3_text_encoder(clip):
+        full_prompt = format_flux3_prompt(prepared_prompt, system_prompt)
+    elif is_moss_image_text_encoder(clip):
+        full_prompt = format_moss_image_prompt(prepared_prompt, system_prompt)
     elif system_prompt is None:
         full_prompt = prepared_prompt
     elif minimax_h3:
@@ -2422,7 +2514,7 @@ def _visual_token_embedding_blocks(clip, tokens, device: str, cache=None) -> lis
         placeholder = image_positions[visual_index]
         if placeholder == 0 or placeholder + 1 >= len(tokens_only[0]):
             raise ValueError("Visual embedding export found an unframed image placeholder.")
-        if tokens_only[0][placeholder - 1] != 151652 or tokens_only[0][placeholder + 1] != 151653:
+        if (tokens_only[0][placeholder - 1], tokens_only[0][placeholder + 1]) not in {(151652, 151653), (248053, 248054)}:
             raise ValueError("Visual embedding export requires Qwen vision-start and vision-end tokens.")
 
         start = visual["index"]
@@ -3476,9 +3568,13 @@ def batch_complete_conditionings(conditionings):
     return batched
 
 
-def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False):
+def _format_advanced_visual_consensus_prompt(prompt, system_prompt, qwen_image21=False, flux3=False, moss_image=False):
     if qwen_image21:
         return format_qwen_image21_prompt(prompt, system_prompt)
+    if flux3:
+        return format_flux3_prompt(prompt, system_prompt)
+    if moss_image:
+        return format_moss_image_prompt(prompt, system_prompt)
     if system_prompt:
         return (
             "<|im_start|>user\n<|im_end|>\n"
@@ -3796,6 +3892,11 @@ def execute_advanced_minimax_h3_image_to_video(
     clip = cache.prepare_clip(clip)
 
     latent, frame_count = minimax_h3_empty_av_latent(width, height, length)
+    seg_ov, seg_pad = _extract_uc_segment_meta(length, video, audio)
+    if seg_ov is not None:
+        latent["uc_overlap_frames"] = seg_ov
+    if seg_pad is not None:
+        latent["uc_padded_frames"] = seg_pad
     picture_timestamps = []
     media_timestamp_format = None
     picture_structure = None
@@ -3878,9 +3979,13 @@ def execute_advanced_minimax_h3_image_to_video(
                 video_latent_keyframes,
                 cache=cache,
             )
+    continuation_has_latent = (
+        isinstance(continuation_media, Mapping)
+        and continuation_media.get("latent") is not None
+    )
     continuation_frames = (
         prepare_minimax_h3_clip_continuation_frames(continuation_media, frame_count)
-        if continuation_media is not None
+        if continuation_media is not None and not continuation_has_latent
         else None
     )
     if continuation_frames is not None and vae is None:
@@ -3903,10 +4008,14 @@ def execute_advanced_minimax_h3_image_to_video(
             else:
                 active_audio = None
     audio_reference = _encode_minimax_h3_audio_reference(active_audio, audio_vae, cache=cache)
-    continuation_audio_reference = _encode_minimax_h3_audio_reference(
-        continuation_media.get("audio") if continuation_media is not None else None,
-        audio_vae,
-        cache=cache,
+    continuation_audio_reference = (
+        _encode_minimax_h3_audio_reference(
+            continuation_media.get("audio") if continuation_media is not None else None,
+            audio_vae,
+            cache=cache,
+        )
+        if not continuation_has_latent
+        else None
     )
     prepared_first = (
         prepare_minimax_h3_frame(first_frame, width, height, "disabled")
@@ -3918,13 +4027,10 @@ def execute_advanced_minimax_h3_image_to_video(
         if last_frame is not None and frame_vae_enabled
         else None
     )
-    prepared_continuation_first = (
-        prepare_minimax_h3_frame(continuation_frames[:1], width, height, "disabled")
-        if continuation_frames is not None
-        else None
-    )
-    prepared_continuation_last = (
-        prepare_minimax_h3_frame(continuation_frames[-1:], width, height, "center")
+    prepared_continuation_tail = (
+        comfy.utils.common_upscale(
+            continuation_frames[..., :3].movedim(-1, 1), int(width), int(height), "lanczos", "disabled"
+        ).movedim(1, -1)
         if continuation_frames is not None
         else None
     )
@@ -4367,10 +4473,22 @@ def execute_advanced_minimax_h3_image_to_video(
         conditioning = scaled
 
     keyframes = []
-    if prepared_continuation_first is not None:
-        keyframes.append(
-            {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_continuation_first)}
-        )
+    if prepared_continuation_tail is not None:
+        from .model_helpers import h3_step_offsets, h3_pixel_frames_for_latent_steps
+        enc_tail = cache.encode_vae(vae, prepared_continuation_tail)
+        steps = int(enc_tail.shape[2])
+        if h3_pixel_frames_for_latent_steps(steps) == continuation_frames.shape[0]:
+            offsets = h3_step_offsets(steps)
+            for p, k in zip(offsets, range(steps)):
+                keyframes.append({"resolved_frame_index": p, "latent": enc_tail[:, :, k : k + 1]})
+        else:
+            first_enc = cache.encode_vae(vae, prepared_continuation_tail[:1])
+            last_enc = cache.encode_vae(
+                vae,
+                prepare_minimax_h3_frame(continuation_frames[-1:], width, height, "center"),
+            )
+            keyframes.append({"resolved_frame_index": 0, "latent": first_enc})
+            keyframes.append({"resolved_frame_index": continuation_frames.shape[0] - 1, "latent": last_enc})
     if prepared_first is not None:
         keyframes.append(
             {"resolved_frame_index": 0, "latent": cache.encode_vae(vae, prepared_first)}
@@ -4380,13 +4498,6 @@ def execute_advanced_minimax_h3_image_to_video(
             {
                 "resolved_frame_index": frame_count - 1,
                 "latent": cache.encode_vae(vae, prepared_last),
-            }
-        )
-    if prepared_continuation_last is not None:
-        keyframes.append(
-            {
-                "resolved_frame_index": continuation_frames.shape[0] - 1,
-                "latent": cache.encode_vae(vae, prepared_continuation_last),
             }
         )
     references = [
@@ -4412,8 +4523,12 @@ def execute_advanced_minimax_h3_image_to_video(
         keyframes.extend(positioned_video_keyframes)
         keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
     if continuation_audio_reference is not None:
+        span_frames = continuation_frames.shape[0] if continuation_frames is not None else int(continuation_media.get("tail_frames", 22))
+        end_coord = round((5.0 / 3.0) * float(span_frames))
+        end_frame = end_coord / (5.0 / 3.0)
+        rt = int(continuation_audio_reference["audio_latent"].shape[-1])
         keyframes.append({
-            "resolved_frame_index": 0,
+            "resolved_frame_index": end_frame - rt / (5.0 / 3.0),
             "audio_latent": continuation_audio_reference["audio_latent"],
         })
     keyframes.sort(key=lambda keyframe: keyframe["resolved_frame_index"])
@@ -4421,10 +4536,28 @@ def execute_advanced_minimax_h3_image_to_video(
     if keyframes:
         metadata["minimax_keyframes"] = keyframes
         metadata["minimax_frame_count"] = frame_count
+    if continuation_frames is not None:
+        metadata["minimax_trim_frames"] = int(continuation_frames.shape[0])
+    if seg_ov is not None:
+        metadata["uc_overlap_frames"] = seg_ov
+    if seg_pad is not None:
+        metadata["uc_padded_frames"] = seg_pad
     if references:
         metadata["minimax_refs"] = references
     if metadata:
         conditioning = node_helpers.conditioning_set_values(conditioning, metadata)
+    if continuation_has_latent:
+        from .model_helpers import apply_minimax_h3_clip_continuation
+        conditioning, _ = apply_minimax_h3_clip_continuation(
+            conditioning,
+            latent,
+            tail_frames=int(continuation_media.get("tail_frames", 22)),
+            audio_tail_frames=24,
+            continuation_media=continuation_media,
+            vae=vae,
+            audio_vae=audio_vae,
+            cache=cache,
+        )
     return conditioning, latent
 
 
@@ -4449,6 +4582,8 @@ def execute_advanced_visual_consensus(
         raise ValueError("Connect a Visual Consensus Configuration.")
 
     qwen_image21 = is_qwen_image21_text_encoder(clip)
+    flux3 = is_flux3_text_encoder(clip)
+    moss_image = is_moss_image_text_encoder(clip)
     if qwen_image21 and ref_latent_mode != "off":
         raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
     minimax_h3 = is_minimax_h3_text_encoder(clip)
@@ -4466,7 +4601,7 @@ def execute_advanced_visual_consensus(
             format_minimax_h3_prompt(clean_prompt, system_prompt)
             if minimax_h3
             else _format_advanced_visual_consensus_prompt(
-                clean_prompt, system_prompt, qwen_image21
+                clean_prompt, system_prompt, qwen_image21, flux3, moss_image
             )
         )
         conditioning = encode_embedding_classical_scaled_bias(
@@ -4516,7 +4651,7 @@ def execute_advanced_visual_consensus(
     full_prompt = (
         format_minimax_h3_prompt(prepared_prompt, system_prompt)
         if minimax_h3
-        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21)
+        else _format_advanced_visual_consensus_prompt(prepared_prompt, system_prompt, qwen_image21, flux3, moss_image)
     )
 
     if consensus_enabled:

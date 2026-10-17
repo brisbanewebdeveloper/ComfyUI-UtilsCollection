@@ -524,3 +524,155 @@ export function resizeRectFromDelta(rect, handle, deltaX, deltaY, aspect, minimu
     height,
   };
 }
+
+export const BBOX_DEFAULT_COLORS = Object.freeze([
+  "#ff6b6b",
+  "#4ecdc4",
+  "#ffe66d",
+  "#a29bfe",
+  "#ff9f43",
+  "#54a0ff",
+  "#5f27cd",
+  "#1dd1a1",
+]);
+
+export function normalizeHexPalette(raw, fallbackColor = "") {
+  const source = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+    ? raw.split(",")
+    : [];
+  const out = [];
+  for (const item of source) {
+    const text = String(item || "").trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(text)) {
+      out.push(text.toLowerCase());
+    } else if (/^[0-9a-fA-F]{6}$/.test(text)) {
+      out.push(`#${text.toLowerCase()}`);
+    }
+    if (out.length >= 5) break;
+  }
+  return out.length ? out : (fallbackColor ? [fallbackColor] : []);
+}
+
+export function normalizeBoxRegion(entry = {}, index = 0) {
+  const source = entry && typeof entry === "object" ? entry : {};
+  let rawX = finite(source.x, 0.25);
+  let rawY = finite(source.y, 0.25);
+  let rawW = finite(source.w, 0.5);
+  let rawH = finite(source.h, 0.5);
+  if (rawW < 0) {
+    rawX += rawW;
+    rawW = -rawW;
+  }
+  if (rawH < 0) {
+    rawY += rawH;
+    rawH = -rawH;
+  }
+  const x = clamp(rawX, 0, 0.99);
+  const y = clamp(rawY, 0, 0.99);
+  const w = clamp(rawW, 0.01, 1 - x);
+  const h = clamp(rawH, 0.01, 1 - y);
+  const type = String(source.type || "obj").toLowerCase() === "text" ? "text" : "obj";
+  const palette = normalizeHexPalette(source.palette ?? source.color_palette, "");
+  const defaultColor = BBOX_DEFAULT_COLORS[index % BBOX_DEFAULT_COLORS.length];
+  const outlineColor = normalizeHexPalette(source.outline_color, "")[0] || palette[0] || defaultColor;
+  return {
+    x: Math.round(x * 1e6) / 1e6,
+    y: Math.round(y * 1e6) / 1e6,
+    w: Math.round(w * 1e6) / 1e6,
+    h: Math.round(h * 1e6) / 1e6,
+    type,
+    desc: typeof source.desc === "string" ? source.desc : "",
+    text: type === "text" && typeof source.text === "string" ? source.text : "",
+    palette,
+    outline_color: outlineColor,
+    included: source.included !== false,
+    locked: source.locked === true,
+  };
+}
+
+export function parseBoxEditorData(raw) {
+  let parsed = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+  }
+  const boxesSource = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.boxes)
+    ? parsed.boxes
+    : [];
+  const boxes = boxesSource.map((item, idx) => normalizeBoxRegion(item, idx));
+  const lastIncoming = Array.isArray(parsed?.last_incoming) ? parsed.last_incoming : null;
+  return {
+    version: 1,
+    boxes,
+    last_incoming: lastIncoming,
+  };
+}
+
+export function serializeBoxEditorData(data) {
+  const boxes = Array.isArray(data?.boxes)
+    ? data.boxes.map((item, idx) => normalizeBoxRegion(item, idx))
+    : [];
+  return JSON.stringify({
+    version: 1,
+    boxes,
+    last_incoming: Array.isArray(data?.last_incoming) ? data.last_incoming : null,
+  });
+}
+
+export function moveNormalizedBox(box, deltaX, deltaY) {
+  const normalized = normalizeBoxRegion(box);
+  const x = clamp(normalized.x + finite(deltaX, 0), 0, 1 - normalized.w);
+  const y = clamp(normalized.y + finite(deltaY, 0), 0, 1 - normalized.h);
+  return {
+    ...normalized,
+    x: Math.round(x * 1e6) / 1e6,
+    y: Math.round(y * 1e6) / 1e6,
+  };
+}
+
+export function resizeNormalizedBox(box, handle, deltaX, deltaY, minSize = 0.02) {
+  const normalized = normalizeBoxRegion(box);
+  let left = normalized.x;
+  let top = normalized.y;
+  let right = normalized.x + normalized.w;
+  let bottom = normalized.y + normalized.h;
+  const dx = finite(deltaX, 0);
+  const dy = finite(deltaY, 0);
+
+  if (handle.includes("w")) {
+    left = clamp(left + dx, 0, right - minSize);
+  }
+  if (handle.includes("e")) {
+    right = clamp(right + dx, left + minSize, 1);
+  }
+  if (handle.includes("n")) {
+    top = clamp(top + dy, 0, bottom - minSize);
+  }
+  if (handle.includes("s")) {
+    bottom = clamp(bottom + dy, top + minSize, 1);
+  }
+  return {
+    ...normalized,
+    x: Math.round(left * 1e6) / 1e6,
+    y: Math.round(top * 1e6) / 1e6,
+    w: Math.round((right - left) * 1e6) / 1e6,
+    h: Math.round((bottom - top) * 1e6) / 1e6,
+  };
+}
+
+export function drawNormalizedBox(startPoint, endPoint, index = 0, type = "obj", minSize = 0.02) {
+  const x1 = clamp(Math.min(finite(startPoint?.x, 0), finite(endPoint?.x, 0)), 0, 1);
+  const y1 = clamp(Math.min(finite(startPoint?.y, 0), finite(endPoint?.y, 0)), 0, 1);
+  const x2 = clamp(Math.max(finite(startPoint?.x, 0), finite(endPoint?.x, 0)), 0, 1);
+  const y2 = clamp(Math.max(finite(startPoint?.y, 0), finite(endPoint?.y, 0)), 0, 1);
+  const w = Math.max(minSize, Math.min(1 - x1, x2 - x1));
+  const h = Math.max(minSize, Math.min(1 - y1, y2 - y1));
+  return normalizeBoxRegion({ x: x1, y: y1, w, h, type }, index);
+}

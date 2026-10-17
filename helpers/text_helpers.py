@@ -559,3 +559,294 @@ def load_text_file_as_list(
         trim_entries=trim_entries,
         skip_empty=skip_empty,
     )
+
+
+_MOSS_IMAGE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "object",
+            "properties": {
+                "caption": {
+                    "type": "string",
+                    "description": "Whole-scene description combining subject overview, camera viewpoint, background environment, lighting, medium, and aesthetics.",
+                },
+            },
+            "required": ["caption"],
+        },
+        "items": {
+            "type": "array",
+            "description": "Localized subjects, objects, and rendered text ordered from background to foreground.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "enum": ["character", "object", "text"],
+                        "description": "Item category: character for subjects/creatures, object for props/clothing/body-part sub-boxes, text for rendered text.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Detailed visual description of this item (30 to 60 words).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Verbatim rendered characters when label is text.",
+                    },
+                    "palette": {
+                        "type": "array",
+                        "description": "2 to 5 dominant colors of this item as uppercase #RRGGBB hex codes.",
+                        "items": {"type": "string"},
+                    },
+                    "bbox": {
+                        "type": "array",
+                        "description": "Four integers [ymin, xmin, ymax, xmax] on a 0..1000 normalized top-left grid.",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+                    },
+                },
+                "required": ["label", "caption", "palette", "bbox"],
+            },
+        },
+        "bbox_coord_space": {
+            "type": "string",
+            "enum": ["abs_centralized"],
+        },
+        "bbox_format": {
+            "type": "string",
+            "enum": ["yxyx"],
+        },
+    },
+    "required": ["summary", "items", "bbox_coord_space", "bbox_format"],
+}
+
+_MOSS_IMAGE_SHORT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "object",
+            "properties": {
+                "caption": {
+                    "type": "string",
+                    "description": "Concise whole-scene description combining subject overview, camera viewpoint, background environment, lighting, medium, and aesthetics.",
+                },
+            },
+            "required": ["caption"],
+        },
+        "items": {
+            "type": "array",
+            "description": "Localized subjects, objects, and rendered text ordered from background to foreground.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "enum": ["character", "object", "text"],
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Detailed visual description of this item (30 to 60 words).",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Verbatim rendered characters when label is text.",
+                    },
+                    "bbox": {
+                        "type": "array",
+                        "description": "Four integers [ymin, xmin, ymax, xmax] on a 0..1000 normalized top-left grid.",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+                    },
+                },
+                "required": ["label", "caption", "bbox"],
+            },
+        },
+        "bbox_coord_space": {
+            "type": "string",
+            "enum": ["abs_centralized"],
+        },
+        "bbox_format": {
+            "type": "string",
+            "enum": ["yxyx"],
+        },
+    },
+    "required": ["summary", "items", "bbox_coord_space", "bbox_format"],
+}
+
+_IDEOGRAM_4_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "high_level_description": {"type": "string"},
+        "style_description": {
+            "type": "object",
+            "properties": {
+                "aesthetics": {"type": "string"},
+                "lighting": {"type": "string"},
+                "photo": {"type": "string"},
+                "medium": {"type": "string"},
+                "color_palette": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["aesthetics", "lighting", "photo", "medium", "color_palette"],
+        },
+        "compositional_deconstruction": {
+            "type": "object",
+            "properties": {
+                "background": {"type": "string"},
+                "elements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["obj", "text"]},
+                            "bbox": {"type": "array", "items": {"type": "integer"}},
+                            "desc": {"type": "string"},
+                            "text": {"type": "string"},
+                            "color_palette": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["type", "bbox", "desc", "color_palette"],
+                    },
+                },
+            },
+            "required": ["background", "elements"],
+        },
+    },
+    "required": ["high_level_description", "style_description", "compositional_deconstruction"],
+}
+
+_IDEOGRAM_4_SHORT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "aspect_ratio": {"type": "string"},
+        "high_level_description": {"type": "string"},
+        "compositional_deconstruction": {
+            "type": "object",
+            "properties": {
+                "background": {"type": "string"},
+                "elements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["obj", "text"]},
+                            "bbox": {"type": "array", "items": {"type": "integer"}},
+                            "text": {"type": "string"},
+                            "desc": {"type": "string"},
+                        },
+                        "required": ["type", "bbox", "desc"],
+                    },
+                },
+            },
+            "required": ["background", "elements"],
+        },
+    },
+    "required": ["aspect_ratio", "high_level_description", "compositional_deconstruction"],
+}
+
+_IDEOGRAM_4_STYLE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "aspect_ratio": {"type": "string"},
+        "high_level_description": {"type": "string"},
+        "style_description": {
+            "type": "object",
+            "properties": {
+                "aesthetics": {"type": "string"},
+                "lighting": {"type": "string"},
+                "photo": {"type": "string"},
+                "medium": {"type": "string"},
+                "art_style": {"type": "string"},
+            },
+            "required": ["aesthetics", "lighting", "medium"],
+        },
+        "compositional_deconstruction": {
+            "type": "object",
+            "properties": {
+                "background": {"type": "string"},
+                "elements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["obj", "text"]},
+                            "bbox": {"type": "array", "items": {"type": "integer"}},
+                            "text": {"type": "string"},
+                            "desc": {"type": "string"},
+                        },
+                        "required": ["type", "bbox", "desc"],
+                    },
+                },
+            },
+            "required": ["background", "elements"],
+        },
+    },
+    "required": ["aspect_ratio", "high_level_description", "compositional_deconstruction"],
+}
+
+_IDEOGRAM_4_COLOR_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "aspect_ratio": {"type": "string"},
+        "high_level_description": {"type": "string"},
+        "style_description": {
+            "type": "object",
+            "properties": {
+                "aesthetics": {"type": "string"},
+                "lighting": {"type": "string"},
+                "photo": {"type": "string"},
+                "medium": {"type": "string"},
+                "art_style": {"type": "string"},
+                "color_palette": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["aesthetics", "lighting", "medium"],
+        },
+        "compositional_deconstruction": {
+            "type": "object",
+            "properties": {
+                "background": {"type": "string"},
+                "elements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["obj", "text"]},
+                            "bbox": {"type": "array", "items": {"type": "integer"}},
+                            "text": {"type": "string"},
+                            "desc": {"type": "string"},
+                            "color_palette": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["type", "bbox", "desc"],
+                    },
+                },
+            },
+            "required": ["background", "elements"],
+        },
+    },
+    "required": ["aspect_ratio", "high_level_description", "compositional_deconstruction"],
+}
+
+VLM_PRESET_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "moss_image_json_instruction": _MOSS_IMAGE_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_short": _MOSS_IMAGE_SHORT_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_color": _MOSS_IMAGE_RESPONSE_SCHEMA,
+    "ideogram_4_json_instruction": _IDEOGRAM_4_RESPONSE_SCHEMA,
+    "ideogram_4_json_instruction_short": _IDEOGRAM_4_SHORT_RESPONSE_SCHEMA,
+    "ideogram_4_json_instruction_style": _IDEOGRAM_4_STYLE_RESPONSE_SCHEMA,
+    "ideogram_4_json_instruction_color": _IDEOGRAM_4_COLOR_RESPONSE_SCHEMA,
+}
+
+
+def get_vlm_preset_response_schema(preset: str) -> dict[str, Any] | None:
+    schema = VLM_PRESET_RESPONSE_SCHEMAS.get(preset)
+    if schema is None:
+        return None
+    return json.loads(json.dumps(schema))

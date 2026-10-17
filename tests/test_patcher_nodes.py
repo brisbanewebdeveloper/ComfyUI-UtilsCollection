@@ -1599,3 +1599,411 @@ def test_minimax_h3_pdd_head_bank_projects_from_offload_device():
     assert audio.device.type == "cuda"
     assert torch.equal(video.cpu(), torch.full((1, 3), 4.0))
     assert torch.equal(audio.cpu(), torch.full((1, 2), 4.0))
+
+
+def test_krea2_nag_schema_and_formula_contract(monkeypatch):
+    schema = patcher_nodes.UC_Krea2NAG.define_schema()
+    inputs = {value.id: value for value in schema.inputs}
+    model = object()
+
+    assert schema.node_id == "UC_Krea2NAG"
+    assert inputs["nag_scale"].default == 5.0
+    assert inputs["nag_tau"].default == 2.5
+    assert inputs["nag_alpha"].default == 0.25
+    assert inputs["start_percent"].default == 0.0
+    assert inputs["end_percent"].default == 1.0
+    assert inputs["nag_negative"].optional is True
+    assert all(value.tooltip for value in schema.inputs)
+    assert all(value.tooltip for value in schema.outputs)
+
+    monkeypatch.setattr(patcher_nodes, "patch_krea2_nag_model", lambda **_kwargs: pytest.fail("noop must not patch"))
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.0).result == (model,)
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=1.0, nag_tau=2.5, nag_alpha=0.25).result == (model,)
+    assert patcher_nodes.UC_Krea2NAG.execute(model, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25, start_percent=0.5, end_percent=0.5).result == (model,)
+
+    z_pos = torch.tensor([[[1.0, 2.0, -1.0, 2.0]]])
+    z_neg = torch.tensor([[[-1.0, 0.0, 1.0, -2.0]]])
+    # guided = 5*z_pos - 4*z_neg = [9, 10, -9, 18], L1(guided)=46, L1(z_pos)=6 -> ratio=46/6 > tau=2.5
+    # guided_norm = guided * (2.5 / (46/6)) = guided * (15/46)
+    # z_final = 0.25 * guided_norm + 0.75 * z_pos
+    expected = 0.25 * (z_pos * 5.0 - z_neg * 4.0) * (15.0 / 46.0) + 0.75 * z_pos
+    actual = patcher_helpers.apply_nag_guidance(z_pos, z_neg, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25)
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(
+        patcher_helpers.apply_nag_guidance(z_pos, z_pos, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.25),
+        z_pos,
+        atol=1e-6,
+    )
+
+    # Per-head L1 normalization preserves spatial RoPE heads (head 0: z_pos == z_neg)
+    # when semantic text heads (head 1: z_neg == -z_pos) exceed nag_tau.
+    two_head_pos = torch.cat((torch.ones(1, 4, 4), torch.ones(1, 4, 4)), dim=-1)
+    two_head_neg = torch.cat((torch.ones(1, 4, 4), -torch.ones(1, 4, 4)), dim=-1)
+    guided_two_head = patcher_helpers.apply_nag_guidance(
+        two_head_pos, two_head_neg, nag_scale=5.0, nag_tau=2.5, nag_alpha=0.5, heads=2
+    )
+    assert torch.allclose(guided_two_head[..., :4], torch.ones(1, 4, 4), atol=1e-6)
+    assert not torch.allclose(guided_two_head[..., 4:], torch.ones(1, 4, 4), atol=1e-6)
+
+
+def test_krea2_nag_end_to_end_variable_length_and_ref_latents():
+    import comfy.ops
+    from comfy.ldm.krea2.model import SingleStreamDiT
+
+    torch.manual_seed(42)
+    dit = SingleStreamDiT(
+        features=32,
+        tdim=16,
+        txtdim=16,
+        heads=2,
+        kvheads=1,
+        multiplier=1,
+        layers=2,
+        patch=2,
+        channels=4,
+        txtlayers=2,
+        txtheads=2,
+        txtkvheads=1,
+        default_ref_method="index_timestep_zero",
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        operations=comfy.ops.manual_cast,
+    )
+    with torch.no_grad():
+        for name, param in dit.named_parameters():
+            if "scale" in name or "lin" in name:
+                param.normal_(0.0, 0.05)
+            else:
+                param.normal_(0.0, 0.1)
+
+    class FakeModelSampling:
+        def percent_to_sigma(self, percent: float) -> float:
+            return 1.0 - float(percent)
+
+    class FakeKrea2Patcher:
+        def __init__(self, diffusion_model, model_sampling):
+            self.diffusion_model = diffusion_model
+            self.model_sampling = model_sampling
+            self.model_options = {"transformer_options": {}}
+            self.object_patches = {}
+
+        def clone(self):
+            cloned = FakeKrea2Patcher(self.diffusion_model, self.model_sampling)
+            cloned.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
+            cloned.object_patches = dict(self.object_patches)
+            return cloned
+
+        def get_model_object(self, name):
+            if name == "diffusion_model":
+                return self.diffusion_model
+            if name == "model_sampling":
+                return self.model_sampling
+            raise KeyError(name)
+
+        def set_model_patch(self, patch, name):
+            patches = self.model_options.setdefault("transformer_options", {}).setdefault("patches", {})
+            patches[name] = patches.get(name, []) + [patch]
+
+        def set_model_post_input_patch(self, patch):
+            self.set_model_patch(patch, "post_input")
+
+        def set_model_attn1_patch(self, patch):
+            self.set_model_patch(patch, "attn1_patch")
+
+        def set_model_attn1_output_patch(self, patch):
+            self.set_model_patch(patch, "attn1_output_patch")
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            wrappers = self.model_options.setdefault("wrappers", {}).setdefault(wrapper_type, {})
+            wrappers[key] = [wrapper]
+
+        def add_object_patch(self, path, value):
+            self.object_patches[path] = value
+
+        def disable_model_cfg1_optimization(self):
+            self.model_options["disable_cfg1_optimization"] = True
+
+    base_patcher = FakeKrea2Patcher(dit, FakeModelSampling())
+    x = torch.randn(1, 4, 4, 8)
+    timesteps = torch.tensor([0.5])
+    pos_context = torch.randn(1, 7, 32)
+    neg_context = torch.randn(1, 3, 32)
+    ref_latent = torch.randn(1, 4, 4, 8)
+
+    baseline_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options={})
+
+    patched = patcher_helpers.patch_krea2_nag_model(
+        base_patcher,
+        nag_scale=5.0,
+        nag_tau=2.5,
+        nag_alpha=0.25,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+    assert patched.model_options.get("disable_cfg1_optimization") is True
+
+    for index, block in enumerate(dit.blocks):
+        block.forward = patched.object_patches[f"diffusion_model.blocks.{index}.forward"]
+
+    # When positive and negative conditioning are identical, NAG output must equal baseline
+    same_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    same_opts["wrappers"] = patched.model_options["wrappers"]
+    same_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = pos_context
+    same_opts["sigmas"] = torch.tensor([0.5])
+    same_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=same_opts)
+    assert torch.allclose(same_out, baseline_out, atol=1e-5)
+
+    # With variable-length negative prompt (L_pos=7 vs L_neg=3), NAG actively steers output
+    nag_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    nag_opts["wrappers"] = patched.model_options["wrappers"]
+    nag_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+    nag_opts["sigmas"] = torch.tensor([0.5])
+    nag_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=nag_opts)
+    assert nag_out.shape == baseline_out.shape
+    assert not torch.allclose(nag_out, baseline_out, atol=1e-4)
+
+    # Outside sigma window (sigma=0.1 < sigma_end=0.2 for end_percent=0.8), NAG is bypassed
+    late_opts = comfy.model_patcher.create_model_options_clone(patched.model_options)["transformer_options"]
+    late_opts["wrappers"] = patched.model_options["wrappers"]
+    late_opts[patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+    late_opts["sigmas"] = torch.tensor([0.1])
+    late_out = dit(x, timesteps, pos_context, ref_latents=[ref_latent], transformer_options=late_opts)
+    assert torch.allclose(late_out, baseline_out, atol=1e-5)
+
+    # CALC_COND_BATCH wrapper at cfg=1.0 skips redundant uncond forward pass and injects neg_context
+    calls = []
+
+    def fake_calc_cond_batch(_model, conds, x_in, _timestep, model_options):
+        calls.append((conds, model_options))
+        return [torch.ones_like(x_in), torch.zeros_like(x_in)]
+
+    calc_wrapper = patched.model_options["wrappers"][comfy.patcher_extension.WrappersMP.CALC_COND_BATCH][
+        patcher_helpers.KREA2_NAG_CALC_COND_WRAPPER_KEY
+    ][0]
+    predict_wrapper = patched.model_options["wrappers"][comfy.patcher_extension.WrappersMP.PREDICT_NOISE][
+        patcher_helpers.KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY
+    ][0]
+
+    class FakeGuiderExec:
+        class_obj = types.SimpleNamespace(cfg=1.0)
+
+        def __call__(self, x_in, ts, opts, _seed):
+            cond_pos = [{"model_conds": {"c_crossattn": types.SimpleNamespace(cond=pos_context)}}]
+            cond_neg = [{"model_conds": {"c_crossattn": types.SimpleNamespace(cond=neg_context)}}]
+            return calc_wrapper(fake_calc_cond_batch, None, [cond_pos, cond_neg], x_in, ts, opts)
+
+    predict_wrapper(FakeGuiderExec(), x, torch.tensor([0.5]), dict(patched.model_options), None)
+    assert len(calls) == 1
+    recorded_conds, recorded_opts = calls[0]
+    assert recorded_conds[1] is None
+    assert recorded_opts["transformer_options"][patcher_helpers.KREA2_NAG_NEG_CONTEXT_KEY] is neg_context
+
+
+def test_moss_image_temporal_clip_patcher_end_to_end():
+    from comfy.ldm.moss_image import model as moss_model
+    import comfy.ops
+
+    torch.manual_seed(7)
+    raw_noise = torch.randn(4, 16, 8, 8)
+    for mode in ("flow_warp", "cosine_arc", "slerp", "ar1", "shared", "independent"):
+        corr = patcher_helpers.correlate_moss_temporal_noise(
+            raw_noise,
+            frames_per_clip=4,
+            noise_mode=mode,
+            noise_correlation=0.85,
+            loop=True,
+        )
+        assert corr.shape == raw_noise.shape
+        for f in range(4):
+            assert 0.6 < float(corr[f].std()) < 1.4
+        if mode == "shared":
+            assert torch.allclose(corr[0], corr[3])
+        elif mode == "independent":
+            assert torch.allclose(corr, raw_noise)
+        elif mode != "flow_warp":
+            dot_01 = float((corr[0].flatten() * corr[1].flatten()).mean())
+            assert dot_01 > 0.3
+
+    ids_single = patcher_helpers.build_moss_temporal_rope_ids(1, 2, 3, 5)
+    assert ids_single.shape == (2 * 3 + 5, 4)
+    assert torch.all(ids_single[:6, 0] == 0.0)
+    assert torch.all(ids_single[:6, 1] == 5.0)
+    assert torch.allclose(ids_single[6:, 1], torch.arange(5, dtype=torch.float32))
+
+    ids_multi = patcher_helpers.build_moss_temporal_rope_ids(
+        frames=3,
+        h=2,
+        w=2,
+        text_len=4,
+        temporal_stride=1.5,
+        reference_stride=0.5,
+        loop=False,
+    )
+    assert ids_multi.shape == (3 * 4 + 4, 4)
+    assert torch.allclose(ids_multi[0:4, 0], torch.full((4,), 0.0))
+    assert torch.allclose(ids_multi[4:8, 0], torch.full((4,), 0.5))
+    assert torch.allclose(ids_multi[8:12, 0], torch.full((4,), 1.0))
+    assert torch.allclose(ids_multi[0:4, 1], torch.full((4,), 4.0))
+    assert torch.allclose(ids_multi[4:8, 1], torch.full((4,), 5.5))
+    assert torch.allclose(ids_multi[8:12, 1], torch.full((4,), 7.0))
+    assert torch.allclose(ids_multi[0:4, 2], ids_multi[4:8, 2])
+    assert torch.allclose(ids_multi[0:4, 3], ids_multi[4:8, 3])
+
+    dit = moss_model.MOSSImage(
+        dim=64,
+        ffn_dim=128,
+        num_heads=2,
+        num_layers=2,
+        text_dim=32,
+        latent_channels=16,
+        dtype=torch.float32,
+        device="cpu",
+        operations=torch.nn,
+    ).eval()
+
+    class FakeModelSampling:
+        def percent_to_sigma(self, percent: float) -> float:
+            return 1.0 - float(percent)
+
+    class FakeMOSSPatcher:
+        def __init__(self, diffusion, sampling):
+            self.diffusion = diffusion
+            self.sampling = sampling
+            self.model_options = {"transformer_options": {}}
+
+        def clone(self):
+            cloned = FakeMOSSPatcher(self.diffusion, self.sampling)
+            cloned.model_options = comfy.model_patcher.create_model_options_clone(self.model_options)
+            return cloned
+
+        def get_model_object(self, name: str):
+            if name == "diffusion_model":
+                return self.diffusion
+            if name == "model_sampling":
+                return self.sampling
+            return None
+
+        def remove_wrappers_with_key(self, wrapper_type, key):
+            self.model_options.get("wrappers", {}).get(wrapper_type, {}).pop(key, None)
+
+        def add_wrapper_with_key(self, wrapper_type, key, wrapper):
+            wrappers = self.model_options.setdefault("wrappers", {}).setdefault(wrapper_type, {})
+            wrappers[key] = [wrapper]
+
+    base_patcher = FakeMOSSPatcher(dit, FakeModelSampling())
+    (patched_tube,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="tube_attention",
+        temporal_strength=0.55,
+        tube_window=2,
+        temporal_smoothing=0.20,
+        noise_mode="flow_warp",
+        noise_correlation=0.85,
+        loop=True,
+        temporal_stride=1.0,
+        reference_stride=0.25,
+        uncond_skip_layer=1,
+        attention_scale=1.1,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+    (patched_zero,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="tube_attention",
+        temporal_strength=0.0,
+        tube_window=2,
+        temporal_smoothing=0.0,
+        noise_mode="flow_warp",
+        noise_correlation=0.85,
+        loop=False,
+        uncond_skip_layer=-1,
+    )
+    (patched_packed,) = patcher_nodes.UC_MOSSImageTemporalClipPatcher.execute(
+        base_patcher,
+        frames_per_clip=0,
+        attention_mode="packed_sequence",
+        temporal_stride=1.0,
+        reference_stride=0.25,
+        noise_mode="cosine_arc",
+        noise_correlation=0.85,
+        loop=False,
+        uncond_skip_layer=1,
+        attention_scale=1.1,
+        start_percent=0.0,
+        end_percent=0.8,
+    )
+
+    x = torch.randn(3, 16, 3, 3)
+    timesteps = torch.tensor([0.5, 0.5, 0.5])
+    context = torch.randn(1, 5, 32).expand(3, -1, -1).contiguous()
+
+    old_training = comfy.model_management.in_training
+    comfy.model_management.in_training = True
+    try:
+        baseline_out = dit(x, timesteps, context, transformer_options={"cond_or_uncond": [0]})
+
+        # With temporal_strength=0.0 and temporal_smoothing=0.0, tube_attention matches baseline exactly
+        zero_opts = {
+            "wrappers": patched_zero.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        zero_out = dit(x, timesteps, context, transformer_options=zero_opts)
+        assert torch.allclose(zero_out, baseline_out, atol=1e-5)
+
+        outer_wrapper = patched_tube.model_options["wrappers"][comfy.patcher_extension.WrappersMP.OUTER_SAMPLE][
+            patcher_helpers.MOSS_IMAGE_TEMPORAL_OUTER_SAMPLE_WRAPPER_KEY
+        ][0]
+        captured_noise = []
+        outer_wrapper(
+            lambda n, *_a, **_kw: captured_noise.append(n),
+            x.clone(),
+            None,
+            None,
+            None,
+        )
+        assert len(captured_noise) == 1
+        assert captured_noise[0].shape == x.shape
+        assert not torch.allclose(captured_noise[0], x)
+
+        cond_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        tube_out = dit(x, timesteps, context, transformer_options=cond_opts)
+        assert tube_out.shape == baseline_out.shape
+        assert not torch.allclose(tube_out, baseline_out, atol=1e-4)
+
+        # Uncond pass skips layer 1 via uncond_skip_layer=1
+        uncond_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [1],
+            "sigmas": torch.tensor([0.5]),
+        }
+        uncond_out = dit(x, timesteps, context, transformer_options=uncond_opts)
+        assert uncond_out.shape == baseline_out.shape
+        assert not torch.allclose(uncond_out, tube_out, atol=1e-4)
+
+        # Outside sigma window (sigma=0.1 < 0.2 for end_percent=0.8), tube attention is bypassed
+        late_opts = {
+            "wrappers": patched_tube.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.1]),
+        }
+        late_out = dit(x, timesteps, context, transformer_options=late_opts)
+        assert torch.allclose(late_out, baseline_out, atol=1e-5)
+
+        # packed_sequence mode also runs cleanly
+        packed_opts = {
+            "wrappers": patched_packed.model_options["wrappers"],
+            "cond_or_uncond": [0],
+            "sigmas": torch.tensor([0.5]),
+        }
+        packed_out = dit(x, timesteps, context, transformer_options=packed_opts)
+        assert packed_out.shape == baseline_out.shape
+        assert not torch.allclose(packed_out, baseline_out, atol=1e-4)
+    finally:
+        comfy.model_management.in_training = old_training

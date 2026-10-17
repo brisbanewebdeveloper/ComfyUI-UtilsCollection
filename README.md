@@ -198,6 +198,8 @@ the base-resolution conditioning fusion.
 - `UC_LayeredBackgroundComposite`
 - `UC_MediaPipeFaceCompositeOptions`
 - `UC_MediaPipeFaceComposite`
+- `UC_CreateBoundingBoxes`
+- `UC_MOSSImageBBoxConvert`
 - `UC_ListToImageBatch`
 - `UC_ImageBatchToList`
 - `UC_ImageBatchToBatchList`
@@ -223,9 +225,8 @@ the base-resolution conditioning fusion.
 - `UC_ListToAudioBatch`
 - `UC_AudioBatchToList`
 - `UC_MiniMaxH3ClipContinuationAccumulateList`
-- `UC_MiniMaxH3GuidedContinuationWindow`
-- `UC_MiniMaxH3LatentTailGuide`
-- `UC_MiniMaxH3AppendContinuation`
+- `UC_MiniMaxH3ClipContinuationApply`
+- `UC_MiniMaxH3ClipContinuationSampler`
 
 `UC_BatchedOpenPose` batches video frames for body inference and person crops for hand/face inference. `UC_DWPoseEstimator` batches YOLOX frames and RTMPose person crops, including partial batches without padding. Both return `IMAGE` and `POSE_KEYPOINT`, use ComfyUI's selected device/model management, and expose a batch size to control VRAM use. These are independent eager implementations loaded through UEL; `comfyui_controlnet_aux`, Ultralytics, ONNX Runtime, MMPose, and TorchScript are not runtime dependencies. Speed and prediction parity need real-model validation.
 
@@ -252,6 +253,8 @@ For further models, use `MODEL_MIGRATION.md` and the shared `models/migrations.j
 `UC_StagedLayeredBackgroundComposite` builds a scene from a background and ordered foreground sockets. Use `run_staging` to retain cutouts and populate the placement editor. Use `run_staged` to composite retained cutouts without loading models or evaluating foreground branches. Use `full_run` to restage and composite in one queue. `foreground_0` is the backmost layer. Retained cutouts are held in server memory and must be recreated after restarting ComfyUI.
 
 `UC_StagedMediaPipeFaceBackgroundComposite` detects faces in each foreground and adds them as independently placeable layers. The background and face options nodes contain removal, extraction, feathering, and blend settings. `UC_StagedIndividualComposites` provides the same ordinary foreground staging editor but returns one full-background image, placement mask, and box per included foreground without stacking them. `UC_BackgroundRemovalPreserveAlpha` directly returns source-resolution RGBA images and their soft alpha masks; existing RGBA inputs keep their supplied alpha without model execution. `UC_FaceRemovalPreserveAlpha` returns expanded face crops as RGBA images with matching alpha masks and transparent padding for differently sized batched crops.
+
+`UC_CreateBoundingBoxes` (**Create Bounding Boxes (Nodes 1.0)**) provides a Nodes 1.0 interactive bounding-box canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements` (for `FLUX.3 Layout Prompt` and `Build JSON Prompt (Ideogram)`), and `moss_prompt` (MOSS-Image `abs_centralized` pixel layout JSON). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected). Drag on the canvas (or press `+ Object Box` / `+ Text Box`) to create boxes, drag inside a box to move it, drag its 8 handles to resize it, reorder boxes from background to foreground, and assign descriptions, rendered text, and optional prompt colors via the docked `PaintColorPicker` panel (boxes default to outline-only so no unwanted colors are sent to the prompt unless explicitly set; right-click, Shift+click, or use `Clear color (outline only)` to clear). `UC_MOSSImageBBoxConvert` (**MOSS-Image BBox Coordinate Convert**) converts Gemini's `0..1000` `[ymin, xmin, ymax, xmax]` layout JSON or `Create Bounding Boxes` `elements` directly into MOSS-Image's `abs_centralized` pixel layout JSON.
 
 `UC_LoadLaMaModel` loads Big LaMa `.safetensors` files from `ComfyUI/models/lama` through Unified Efficient Loader. Connect its `LAMA_MODEL` output to `UC_LaMaInpaint`. Device choices include ComfyUI's default device, CPU, and every visible GPU. Models are never downloaded automatically. Download [Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/big-lama.safetensors) or [Anime/Manga Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/anime-manga-big-lama.safetensors), then place the selected file in `ComfyUI/models/lama`.
 
@@ -349,6 +352,8 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_MiniMaxH3SlaAttentionConfig`
 - `UC_MiniMaxH3PDDAcc`
 - `UC_UnifiedAttentionPatcher`
+- `UC_Krea2NAG`
+- `UC_MOSSImageTemporalClipPatcher`
 - `UC_MarkdownPreview`
 - `UC_BoldFrakturTextStyle`
 - `UC_UnBoldFrakturTextStyle`
@@ -438,6 +443,46 @@ reported once in the ComfyUI console for that sampling run. A sparse-kernel
 failure also disables further sparse attempts for the remainder of that run.
 This preserves a usable model path when SLA cannot apply, but it also means a
 run may receive less acceleration than its selected sparsity suggests.
+
+### Krea2 Normalized Attention Guidance
+
+`UC_Krea2NAG` enables negative prompts on Krea2 models even when sampling at
+`CFG 1.0`, steering attention away from unwanted concepts without the quality
+breakdown caused by standard CFG on distilled or few-step runs. Unlike ComfyUI
+Core's built-in `Normalized Attention Guidance` node (which is bypassed on
+Krea2 whenever the positive and negative prompts have different token lengths),
+`UC_Krea2NAG` processes positive and negative prompts at their native lengths
+and skips the redundant second model pass when `CFG` is `1.0`.
+
+Connect the Krea2 `model` through `UC_Krea2NAG` to your sampler. By default it
+uses the negative conditioning connected to your sampler; connect `nag_negative`
+only when you want a separate negative prompt specifically for NAG or are using
+a guider without a negative input.
+
+- `nag_scale`: how strongly to push away from the negative prompt (default
+  `5.0`). Higher values remove unwanted elements more aggressively; `1.0` or
+  lower turns guidance off.
+- `nag_tau`: safety limit that prevents strong guidance from causing color burn
+  or visual artifacts (default `2.5`). Lower values keep the image closer to
+  normal output; higher values allow stronger changes.
+- `nag_alpha`: how much of the guided result is blended into the original image
+  features (default `0.25`). Raising it strengthens the negative prompt effect;
+  `0.0` turns guidance off.
+- `start_percent` and `end_percent`: sampling range where guidance is active
+  (defaults `0.0` to `1.0`). Lowering `end_percent` (for example to `0.5`) stops
+  guidance halfway through sampling to save generation time while keeping most
+  of the negative prompt effect.
+
+### MOSS-Image Temporal Clip Patcher
+
+`UC_MOSSImageTemporalClipPatcher` links a batch of MOSS-Image frames across time using windowed spatio-temporal tube attention, 1D block smoothing, and motion-warped starting noise so standard `Empty Flux 2 Latent` batches (`batch_size > 1`) generate short animated clips or consistent multi-frame sequences instead of unrelated still images.
+
+Connect the MOSS-Image `model` (after `ModelSamplingAuraFlow` with `shift = 5.0`) through `UC_MOSSImageTemporalClipPatcher` to your sampler alongside an `Empty Flux 2 Latent` (`batch_size` set to the frame count, e.g. `4` to `8` at `512x512` or `768x512`) and decode with the `Flux 2` VAE.
+
+- `preset`: selects the motion and frame-linking profile (`balanced`, `subtle_motion`, `strong_motion`, or `character_consistency`).
+- `strength`: controls how strongly cross-frame tube attention is blended with each frame's spatial attention (default `0.60`; `0.0` disables cross-frame linking).
+- `loop`: wraps the motion trajectory and frame neighborhood links into a closed cycle so the last frame transitions smoothly back into the first frame for seamless looping GIFs (default `True`).
+- `uncond_skip_layer_22`: bypasses transformer block 22 on the negative prompt pass, matching OpenMOSS's recommended two-pass guidance setting without adding a third sampling pass (default `True`).
 
 ### Scheduler presets
 

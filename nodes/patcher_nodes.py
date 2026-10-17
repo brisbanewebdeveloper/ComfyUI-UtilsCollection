@@ -11,11 +11,14 @@ from ..helpers.patcher_helpers import (
     SLA_REFERENCE_PROTECTION_MODES,
     list_minimax_h3_projections,
     patch_ideogram4_debanner,
+    patch_krea2_nag_model,
     patch_minimax_h3_clip_projection,
     patch_minimax_h3_pdd_model,
     patch_unified_attention_model,
     patch_minimax_h3_cache_model,
     patch_minimax_h3_diffusion_cache_model,
+    MOSS_IMAGE_TEMPORAL_PRESETS,
+    patch_moss_image_temporal_model,
 )
 
 
@@ -194,6 +197,101 @@ class UC_Ideogram4DebannerPatch(io.ComfyNode):
         if strength == 0.0:
             return io.NodeOutput(model)
         return io.NodeOutput(patch_ideogram4_debanner(model, strength))
+
+
+class UC_Krea2NAG(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_Krea2NAG",
+            display_name="Krea2 Normalized Attention Guidance",
+            category="advanced/model/patches",
+            description="Enables negative prompts on Krea2 even at CFG 1.0 by steering attention away from unwanted concepts without breaking image quality.",
+            inputs=[
+                io.Model.Input(
+                    "model",
+                    tooltip="Krea2 model to guide. Connect the output to your sampler with CFG set to 1.0.",
+                ),
+                io.Float.Input(
+                    "nag_scale",
+                    default=5.0,
+                    min=0.0,
+                    max=50.0,
+                    step=0.1,
+                    tooltip="How strongly to push away from the negative prompt. Higher values remove unwanted elements more aggressively; 1.0 or lower turns guidance off.",
+                ),
+                io.Float.Input(
+                    "nag_tau",
+                    default=2.5,
+                    min=1.0,
+                    max=10.0,
+                    step=0.01,
+                    tooltip="Safety limit that prevents strong guidance from causing color burn or visual artifacts. Lower values keep the image safer; higher values allow stronger changes.",
+                ),
+                io.Float.Input(
+                    "nag_alpha",
+                    default=0.25,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    tooltip="How much of the guided result is blended into the original image features. 0.25 keeps natural Krea2 quality while applying negative guidance; 0.0 turns guidance off.",
+                ),
+                io.Float.Input(
+                    "start_percent",
+                    default=0.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    tooltip="Point in sampling where negative guidance begins (0.0 starts from the very first step).",
+                ),
+                io.Float.Input(
+                    "end_percent",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    tooltip="Point in sampling where negative guidance stops. Lowering this (for example to 0.5) speeds up generation while keeping most of the negative prompt effect.",
+                ),
+                io.Conditioning.Input(
+                    "nag_negative",
+                    optional=True,
+                    tooltip="Optional negative prompt conditioning. Leave disconnected to automatically use the negative input on your sampler.",
+                ),
+            ],
+            outputs=[
+                io.Model.Output(
+                    "model",
+                    display_name="model",
+                    tooltip="Krea2 model with Normalized Attention Guidance enabled.",
+                )
+            ],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        model,
+        nag_scale: float = 5.0,
+        nag_tau: float = 2.5,
+        nag_alpha: float = 0.25,
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        nag_negative=None,
+    ) -> io.NodeOutput:
+        if nag_alpha == 0.0 or nag_scale <= 1.0 or start_percent >= end_percent:
+            return io.NodeOutput(model)
+        return io.NodeOutput(
+            patch_krea2_nag_model(
+                model=model,
+                nag_scale=nag_scale,
+                nag_tau=nag_tau,
+                nag_alpha=nag_alpha,
+                start_percent=start_percent,
+                end_percent=end_percent,
+                nag_negative=nag_negative,
+            )
+        )
 
 
 class UC_MiniMaxH3PDDAcc(io.ComfyNode):
@@ -536,3 +634,90 @@ class UC_MiniMaxH3DiffusionCache(io.ComfyNode):
                 verbose=verbose,
             )
         )
+
+
+class UC_MOSSImageTemporalClipPatcher(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MOSSImageTemporalClipPatcher",
+            display_name="MOSS-Image Temporal Clip Patcher",
+            category="advanced/model/patches",
+            description=(
+                "Links a batch of MOSS-Image frames across time using windowed spatio-temporal tube attention and motion-warped starting noise "
+                "so standard Flux 2 latent batches generate short animated clips instead of unrelated still images."
+            ),
+            inputs=[
+                io.Model.Input(
+                    "model",
+                    tooltip="MOSS-Image diffusion model to configure for multi-frame clip generation. Connect the output to your sampler alongside an Empty Flux 2 Latent with batch_size set to the number of frames.",
+                ),
+                io.Combo.Input(
+                    "preset",
+                    options=list(MOSS_IMAGE_TEMPORAL_PRESETS.keys()),
+                    default="balanced",
+                    tooltip=(
+                        "Motion and frame-linking profile. 'balanced' combines smooth motion flow with stable subject appearance; "
+                        "'subtle_motion' keeps frames tightly locked for gentle animation; 'strong_motion' allows wider frame-to-frame movement; "
+                        "and 'character_consistency' locks subject appearance across multi-view batches."
+                    ),
+                ),
+                io.Float.Input(
+                    "strength",
+                    default=0.60,
+                    min=0.0,
+                    max=1.0,
+                    step=0.05,
+                    tooltip=(
+                        "How strongly frames are linked across time. The default 0.60 balances consistent subject appearance with visible motion; "
+                        "raising it toward 1.0 locks frames tighter together, while 0.0 disables cross-frame tube linking."
+                    ),
+                ),
+                io.Boolean.Input(
+                    "loop",
+                    default=True,
+                    tooltip=(
+                        "When enabled, wraps the motion trajectory and frame neighborhood links into a closed cycle so the last frame transitions smoothly "
+                        "back into the first frame for seamless looping GIFs. Turn off for one-way clips."
+                    ),
+                ),
+                io.Boolean.Input(
+                    "uncond_skip_layer_22",
+                    default=True,
+                    tooltip=(
+                        "Bypasses transformer block 22 on the negative prompt pass, matching OpenMOSS's recommended two-pass guidance setting "
+                        "for sharper structure without adding a third sampling pass. Turn off to run all blocks on the negative pass."
+                    ),
+                ),
+            ],
+            outputs=[
+                io.Model.Output(
+                    "model",
+                    display_name="model",
+                    tooltip="MOSS-Image model configured for multi-frame temporal clip generation.",
+                )
+            ],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        model,
+        preset: str = "balanced",
+        strength: float = 0.60,
+        loop: bool = True,
+        uncond_skip_layer_22: bool = True,
+        **kwargs,
+    ) -> io.NodeOutput:
+        return io.NodeOutput(
+            patch_moss_image_temporal_model(
+                model=model,
+                preset=preset,
+                strength=strength,
+                loop=loop,
+                uncond_skip_layer_22=uncond_skip_layer_22,
+                **kwargs,
+            )
+        )
+

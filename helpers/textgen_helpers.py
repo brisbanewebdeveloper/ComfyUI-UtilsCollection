@@ -1,10 +1,19 @@
+import json
 import logging
 import math
 import numbers
-from contextlib import nullcontext
+import re
+from contextlib import ExitStack, contextmanager, nullcontext
+from typing import Any
 
 import torch
 
+try:
+    import jsonschema
+except ImportError:
+    jsonschema = None
+
+import comfy.ops
 from comfy import model_management
 from comfy.text_encoders.minimax import process_video_block
 
@@ -130,6 +139,8 @@ def _load_qwen_generation_model(clip):
     model = _qwen_clip_model(clip)
     if model is None:
         raise ValueError("Qwen multimodal generation requires a supported Core Qwen model wrapper.")
+    if hasattr(model, "reset_clip_options"):
+        model.reset_clip_options()
     if hasattr(clip, "load_model"):
         clip.load_model()
     device = getattr(getattr(clip, "patcher", None), "load_device", None) or getattr(
@@ -137,10 +148,24 @@ def _load_qwen_generation_model(clip):
     )
     if device is None:
         device = model.transformer.get_input_embeddings().weight.device
-    if hasattr(model, "reset_clip_options"):
-        model.reset_clip_options()
+    if hasattr(model, "set_clip_options"):
         model.set_clip_options({"layer": None, "execution_device": device})
     return model, device
+
+
+def _qwen_execution_context(clip, device):
+    stack = ExitStack()
+    if hasattr(model_management, "cuda_device_context"):
+        stack.enter_context(model_management.cuda_device_context(device))
+    stage = getattr(clip, "cond_stage_model", None)
+    if (
+        stage is not None
+        and hasattr(stage, "modules")
+        and getattr(device, "type", None) == "cuda"
+        and hasattr(comfy.ops, "use_quantized_matmul")
+    ):
+        stack.enter_context(comfy.ops.use_quantized_matmul(stage, device))
+    return stack
 
 
 def _preprocess_qwen3vl_image(model, device, image):
@@ -235,12 +260,7 @@ def generate_qwen3vl_video(
     if not hasattr(model.transformer, "build_image_inputs"):
         raise ValueError("Video input requires a Core Qwen3-VL 4B, 8B, or 32B model wrapper.")
 
-    context = (
-        model_management.cuda_device_context(device)
-        if hasattr(model_management, "cuda_device_context")
-        else nullcontext()
-    )
-    with context:
+    with _qwen_execution_context(clip, device):
         image_blocks = [
             _preprocess_qwen3vl_image(model, device, image) for image in images
         ]
@@ -307,10 +327,330 @@ def generate_qwen3vl_video(
         position_ids, visual_mask, deepstack = model.transformer.build_image_inputs(
             embeds, embeds_info
         )
+        transformer_args = {k: v for k, v in generation_args.items() if k != "mtp"}
         return model.transformer.generate(
             embeds,
-            **generation_args,
+            **transformer_args,
             position_ids=position_ids,
             visual_pos_masks=visual_mask,
             deepstack_embeds=deepstack,
         )
+
+
+def _strip_thinking_and_fences(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", cleaned, flags=re.IGNORECASE).strip()
+    if "<think>" in cleaned.lower() and "</think>" not in cleaned.lower():
+        cleaned = re.split(r"<think>", cleaned, flags=re.IGNORECASE)[0].strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned, flags=re.IGNORECASE)
+    if fence:
+        cleaned = fence.group(1).strip()
+    return cleaned
+
+
+def _extract_balanced_json(text: str, expect_array: bool = False) -> Any:
+    cleaned = _strip_thinking_and_fences(text)
+    if not cleaned:
+        return [] if expect_array else {}
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    open_ch = "[" if expect_array else "{"
+    close_ch = "]" if expect_array else "}"
+    start = cleaned.find(open_ch)
+    if start < 0:
+        alt_start = cleaned.find("{" if expect_array else "[")
+        if alt_start >= 0:
+            start = alt_start
+            open_ch = cleaned[start]
+            close_ch = "}" if open_ch == "{" else "]"
+        else:
+            return [] if expect_array else {}
+
+    stack: list[str] = []
+    in_str = False
+    escape = False
+    end = -1
+    for idx in range(start, len(cleaned)):
+        ch = cleaned[idx]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack and stack[-1] == ch:
+                stack.pop()
+                if not stack:
+                    end = idx + 1
+                    break
+
+    candidate = cleaned[start:end] if end > start else cleaned[start:]
+    if end < 0 and stack:
+        if in_str:
+            candidate += '"'
+        candidate = re.sub(r",\s*$", "", candidate)
+        candidate += "".join(reversed(stack))
+
+    try:
+        return json.loads(candidate)
+    except Exception:
+        repaired = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            return json.loads(repaired)
+        except Exception:
+            return [] if expect_array else {}
+
+
+def _default_for_schema(schema: dict[str, Any]) -> Any:
+    if not isinstance(schema, dict):
+        return ""
+    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        return schema["enum"][0]
+    if "default" in schema:
+        return schema["default"]
+    stype = schema.get("type", "object")
+    if isinstance(stype, list):
+        stype = next((t for t in stype if t != "null"), stype[0] if stype else "string")
+    if stype == "object":
+        out: dict[str, Any] = {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        req = schema.get("required") if isinstance(schema.get("required"), list) else list(props.keys())
+        for key in req:
+            if key in props:
+                out[key] = _default_for_schema(props[key])
+        return out
+    if stype == "array":
+        min_items = int(schema.get("minItems", 0) or 0)
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
+        return [_default_for_schema(item_schema) for _ in range(max(0, min_items))]
+    if stype == "integer":
+        low = schema.get("minimum")
+        return int(low) if isinstance(low, (int, float)) else 0
+    if stype == "number":
+        low = schema.get("minimum")
+        return float(low) if isinstance(low, (int, float)) else 0.0
+    if stype == "boolean":
+        return False
+    return ""
+
+
+def _conform_value_to_schema(value: Any, schema: dict[str, Any]) -> Any:
+    if not isinstance(schema, dict):
+        return value
+    enum_vals = schema.get("enum")
+    if isinstance(enum_vals, list) and enum_vals:
+        if value in enum_vals:
+            return value
+        str_val = str(value or "").strip().lower()
+        for candidate in enum_vals:
+            if str(candidate).lower() == str_val:
+                return candidate
+        return enum_vals[0]
+
+    stype = schema.get("type")
+    if isinstance(stype, list):
+        if value is None and "null" in stype:
+            return None
+        stype = next((t for t in stype if t != "null"), stype[0] if stype else "string")
+
+    if stype == "object" or (stype is None and "properties" in schema):
+        source = value if isinstance(value, dict) else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        req = schema.get("required") if isinstance(schema.get("required"), list) else []
+        out: dict[str, Any] = {}
+        alias_map = {
+            "caption": ("desc", "description", "summary"),
+            "desc": ("caption", "description"),
+            "label": ("type", "category"),
+            "type": ("label", "category"),
+            "palette": ("color_palette", "colors"),
+            "color_palette": ("palette", "colors"),
+            "bbox": ("box_2d", "box"),
+        }
+        for key, prop_schema in props.items():
+            raw_val = source.get(key)
+            if raw_val is None and key in alias_map:
+                for alt in alias_map[key]:
+                    if alt in source and source[alt] is not None:
+                        raw_val = source[alt]
+                        break
+            if raw_val is not None:
+                out[key] = _conform_value_to_schema(raw_val, prop_schema)
+            elif key in req:
+                out[key] = _default_for_schema(prop_schema)
+        if not props:
+            for k, v in source.items():
+                out[str(k)] = v
+        return out
+
+    if stype == "array" or (stype is None and "items" in schema):
+        raw_list = value if isinstance(value, list) else ([value] if value is not None and value != "" else [])
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
+        items = [_conform_value_to_schema(item, item_schema) if item_schema else item for item in raw_list]
+        max_items = schema.get("maxItems")
+        if isinstance(max_items, int) and max_items >= 0:
+            items = items[:max_items]
+        min_items = int(schema.get("minItems", 0) or 0)
+        while len(items) < min_items:
+            items.append(_default_for_schema(item_schema or {}))
+        return items
+
+    if stype == "integer":
+        try:
+            num = int(round(float(value)))
+        except (TypeError, ValueError):
+            num = _default_for_schema(schema)
+        low = schema.get("minimum")
+        high = schema.get("maximum")
+        if isinstance(low, (int, float)):
+            num = max(int(math.ceil(low)), num)
+        if isinstance(high, (int, float)):
+            num = min(int(math.floor(high)), num)
+        return num
+
+    if stype == "number":
+        try:
+            num_f = float(value)
+            if not math.isfinite(num_f):
+                raise ValueError
+        except (TypeError, ValueError):
+            num_f = float(_default_for_schema(schema))
+        low = schema.get("minimum")
+        high = schema.get("maximum")
+        if isinstance(low, (int, float)):
+            num_f = max(float(low), num_f)
+        if isinstance(high, (int, float)):
+            num_f = min(float(high), num_f)
+        return num_f
+
+    if stype == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes"}
+        return bool(value)
+
+    if stype == "string":
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return str(value)
+
+    return value
+
+
+def conform_and_validate_response_schema(
+    text: str,
+    response_schema: dict[str, Any] | None,
+) -> tuple[str, bool]:
+    if not isinstance(response_schema, dict) or not response_schema:
+        return text, True
+    expect_array = response_schema.get("type") == "array"
+    extracted = _extract_balanced_json(text, expect_array=expect_array)
+    had_content = bool(extracted)
+    conformed = _conform_value_to_schema(extracted, response_schema)
+    valid = had_content
+    if jsonschema is not None:
+        try:
+            jsonschema.validate(instance=conformed, schema=response_schema)
+        except Exception:
+            valid = False
+    serialized = json.dumps(conformed, ensure_ascii=False, separators=(",", ":"))
+    return serialized, valid
+
+
+@contextmanager
+def schema_guided_generation_context(
+    clip: Any,
+    response_schema: dict[str, Any] | None,
+    prefilled_open: str = "",
+):
+    if not isinstance(response_schema, dict) or not response_schema:
+        yield
+        return
+
+    model = _qwen_clip_model(clip)
+    transformer = getattr(model, "transformer", None) if model is not None else None
+    orig_sample_token = getattr(transformer, "sample_token", None) if transformer is not None else None
+    if not callable(orig_sample_token):
+        yield
+        return
+
+    eos_token_id = 151645
+    stage_tok = getattr(clip, "tokenizer", None)
+    inner_name = getattr(stage_tok, "clip", None) if stage_tok is not None else None
+    inner_tok = getattr(stage_tok, inner_name, None) if isinstance(inner_name, str) else None
+    for candidate in (inner_tok, stage_tok):
+        if candidate is not None and hasattr(candidate, "end_token"):
+            end_tok = getattr(candidate, "end_token", None)
+            if isinstance(end_tok, int):
+                eos_token_id = end_tok
+                break
+
+    history_ids: list[int] = []
+    finished = False
+
+    def _is_json_complete(decoded_body: str) -> bool:
+        body = _strip_thinking_and_fences(decoded_body)
+        if not body:
+            return False
+        start_ch = "[" if response_schema.get("type") == "array" else "{"
+        start_idx = body.find(start_ch)
+        if start_idx < 0:
+            return False
+        stack: list[str] = []
+        in_str = False
+        esc = False
+        for idx in range(start_idx, len(body)):
+            ch = body[idx]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]":
+                if stack and stack[-1] == ch:
+                    stack.pop()
+                    if not stack:
+                        return True
+        return False
+
+    def guided_sample_token(logits, *args, **kwargs):
+        nonlocal finished
+        if finished:
+            return torch.tensor([[eos_token_id]], dtype=torch.long, device=logits.device)
+        next_tok = orig_sample_token(logits, *args, **kwargs)
+        tok_id = int(next_tok.reshape(-1)[0].item())
+        history_ids.append(tok_id)
+        try:
+            decoded = prefilled_open + clip.decode(history_ids, skip_special_tokens=True)
+            if "</think>" in decoded or "<think>" not in decoded:
+                if _is_json_complete(decoded):
+                    finished = True
+        except Exception:
+            pass
+        return next_tok
+
+    transformer.sample_token = guided_sample_token
+    try:
+        yield
+    finally:
+        transformer.sample_token = orig_sample_token

@@ -168,7 +168,16 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
     _, output_path_no_audio, video_obj3, _ = result_no_audio.args
     assert output_path_no_audio.endswith("test_save_00003.mp4")
 
-    # Default prefix creates formatted date structure
+    # Default prefix creates formatted date structure and preserves workflow/prompt metadata
+    monkeypatch.setattr(
+        video_nodes.UC_SaveVideo,
+        "hidden",
+        types.SimpleNamespace(
+            prompt={"1": {"class_type": "UC_SaveVideo"}},
+            extra_pnginfo={"workflow": {"nodes": [{"id": 1, "type": "UC_SaveVideo"}]}},
+        ),
+        raising=False,
+    )
     result_default = video_nodes.UC_SaveVideo.execute(
         images=images[:2],
         fps=24.0,
@@ -177,6 +186,10 @@ def test_save_video_schema_and_execution(tmp_path, monkeypatch):
     _, output_path_default, _, _ = result_default.args
     assert "vid_" in output_path_default
     assert "_default_00001.mp4" in output_path_default
+    with av.open(output_path_default) as container:
+        assert "prompt" in container.metadata
+        assert "workflow" in container.metadata
+        assert "UC_SaveVideo" in container.metadata["workflow"]
 
     # Test Concatenate Video (List)
     cat_result = video_nodes.UC_ConcatenateVideoList.execute([video_obj, video_obj_audio])

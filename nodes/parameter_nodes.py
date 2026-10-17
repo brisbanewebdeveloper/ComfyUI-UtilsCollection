@@ -167,10 +167,10 @@ class UC_VideoResolutionSelector(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "duration_seconds",
-                    default=5.0,
-                    min=0.0,
-                    step=0.05,
-                    tooltip="Video duration in seconds at 24 fps. Rounds up to a supported H3 length; 5 seconds gives 124 frames. The minimum is 5 frames.",
+                    default=5.16667,
+                    min=0.20833,
+                    step=0.70833,
+                    tooltip="Video duration in seconds at 24 fps. Steps by 17 frames (~0.708s) on the MiniMax H3 5+17k temporal grid. Default is 124 frames (~5.17s). Minimum is 5 frames (~0.21s).",
                 ),
             ],
             outputs=[

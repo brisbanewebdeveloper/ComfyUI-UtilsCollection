@@ -38,7 +38,9 @@ from ..helpers.composite_helpers import (
     _save_editor_preview,
     _visible_placement_slices,
     background_removal_with_alpha,
+    build_moss_image_layout_prompt,
     crop_staged_layers_by_indices,
+    execute_create_bounding_boxes,
 )
 from ..helpers.background_replace_helpers import (
     _apply_face_mask_options,
@@ -2122,3 +2124,222 @@ class UC_MediaPipeFaceComposite(io.ComfyNode):
         result = target.clone()
         result[0, ty1:ty2, tx1:tx2] = completed_crop
         return io.NodeOutput(result, completed_crop.unsqueeze(0))
+
+
+class UC_CreateBoundingBoxes(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_CreateBoundingBoxes",
+            display_name="Create Bounding Boxes (Nodes 1.0)",
+            category="utils/image",
+            description=(
+                "Draw, move, resize, and label bounding boxes directly on an interactive Nodes 1.0 canvas. "
+                "Outputs layout prompt elements for FLUX.3 Layout Prompt and Ideogram JSON prompts, "
+                "pixel-space bounding boxes, and a rendered preview image."
+            ),
+            inputs=[
+                io.Image.Input(
+                    "background",
+                    optional=True,
+                    tooltip=(
+                        "Optional reference image displayed behind the bounding-box canvas and dimmed in the "
+                        "rendered preview output."
+                    ),
+                ),
+                io.MultiType.Input(
+                    "bboxes",
+                    [io.BoundingBox, io.Array, io.String],
+                    optional=True,
+                    tooltip=(
+                        "Optional upstream bounding boxes, prompt layout elements, or JSON string to seed the canvas. "
+                        "When the upstream value changes, it initializes the canvas; manual canvas edits stay active "
+                        "until a new upstream value arrives."
+                    ),
+                ),
+                io.Int.Input(
+                    "width",
+                    default=0,
+                    min=0,
+                    max=16384,
+                    step=16,
+                    tooltip=(
+                        "Width of the canvas and pixel grid. Leave at 0 to match the connected background image width "
+                        "(or 1024 when no background is connected)."
+                    ),
+                ),
+                io.Int.Input(
+                    "height",
+                    default=0,
+                    min=0,
+                    max=16384,
+                    step=16,
+                    tooltip=(
+                        "Height of the canvas and pixel grid. Leave at 0 to match the connected background image height "
+                        "(or 1024 when no background is connected)."
+                    ),
+                ),
+                io.Combo.Input(
+                    "input_coord_space",
+                    options=["normalized_1000", "abs_centralized"],
+                    default="normalized_1000",
+                    tooltip=(
+                        "Coordinate space for incoming MOSS-Image JSON bboxes: normalized_1000 for Gemini's native "
+                        "0 to 1000 [ymin, xmin, ymax, xmax] grid, or abs_centralized for centered pixel coordinates."
+                    ),
+                ),
+                io.String.Input(
+                    "box_data",
+                    default='{"version":1,"boxes":[],"last_incoming":null}',
+                    advanced=True,
+                    tooltip=(
+                        "Serialized bounding-box list and metadata managed by the Nodes 1.0 interactive canvas editor."
+                    ),
+                ),
+            ],
+            outputs=[
+                io.Image.Output(
+                    "preview",
+                    display_name="preview",
+                    tooltip="Preview image showing the dimmed background or canvas with numbered boxes, labels, and swatches.",
+                ),
+                io.BoundingBox.Output(
+                    "bboxes",
+                    display_name="bboxes",
+                    tooltip="Pixel-space bounding boxes [{x, y, width, height}, ...] aligned to the configured width and height.",
+                ),
+                io.Array.Output(
+                    "elements",
+                    display_name="elements",
+                    tooltip=(
+                        "Prompt layout elements [{type, bbox, desc, text?, color_palette?}, ...] ready to connect to "
+                        "FLUX.3 Layout Prompt (referenced as <obj_1>, <obj_2>, ...) or Build JSON Prompt (Ideogram)."
+                    ),
+                ),
+                io.String.Output(
+                    "moss_prompt",
+                    display_name="moss_prompt",
+                    tooltip=(
+                        "Ready-to-encode MOSS-Image layout JSON string with abs_centralized pixel coordinates aligned "
+                        "to the resolved width and height."
+                    ),
+                ),
+            ],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        width: int = 0,
+        height: int = 0,
+        input_coord_space: str = "normalized_1000",
+        box_data: str = '{"version":1,"boxes":[],"last_incoming":null}',
+        background=None,
+        bboxes=None,
+    ) -> io.NodeOutput:
+        return execute_create_bounding_boxes(
+            width=width,
+            height=height,
+            box_data=box_data,
+            background=background,
+            bboxes=bboxes,
+            input_coord_space=input_coord_space,
+        )
+
+
+CreateBoundingBoxesNodes1 = UC_CreateBoundingBoxes
+
+
+class UC_MOSSImageBBoxConvert(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="UC_MOSSImageBBoxConvert",
+            display_name="MOSS-Image BBox Coordinate Convert",
+            category="utils/image",
+            description=(
+                "Converts Gemini or Create Bounding Boxes 0 to 1000 [ymin, xmin, ymax, xmax] bounding-box coordinates "
+                "into MOSS-Image's abs_centralized pixel layout JSON aligned to the connected image or target width and height."
+            ),
+            inputs=[
+                io.String.Input(
+                    "prompt",
+                    multiline=True,
+                    dynamic_prompts=False,
+                    default="",
+                    tooltip=(
+                        "MOSS-Image or Ideogram JSON string from Gemini (with 0 to 1000 [ymin, xmin, ymax, xmax] boxes), "
+                        "or a plain summary caption when elements are connected."
+                    ),
+                ),
+                io.Image.Input(
+                    "image",
+                    optional=True,
+                    tooltip="Optional reference image used to automatically set width and height when they are left at 0.",
+                ),
+                io.Array.Input(
+                    "elements",
+                    optional=True,
+                    tooltip="Optional elements list from Create Bounding Boxes to override or supply the layout boxes.",
+                ),
+                io.Int.Input(
+                    "width",
+                    default=0,
+                    min=0,
+                    max=16384,
+                    step=16,
+                    tooltip="Target canvas width in pixels. Leave at 0 to match the connected image width (or 1024 when no image is connected).",
+                ),
+                io.Int.Input(
+                    "height",
+                    default=0,
+                    min=0,
+                    max=16384,
+                    step=16,
+                    tooltip="Target canvas height in pixels. Leave at 0 to match the connected image height (or 1024 when no image is connected).",
+                ),
+                io.Combo.Input(
+                    "input_coord_space",
+                    options=["normalized_1000", "abs_centralized"],
+                    default="normalized_1000",
+                    tooltip="Coordinate space of the input JSON boxes: normalized_1000 for Gemini's 0 to 1000 [ymin, xmin, ymax, xmax] grid, or abs_centralized for centered pixel coordinates.",
+                ),
+                io.String.Input(
+                    "character_boxes",
+                    default="",
+                    optional=True,
+                    tooltip="Optional 1-based box numbers (such as '1, 3') to label as character when boxes come from elements without explicit character labels.",
+                ),
+            ],
+            outputs=[
+                io.String.Output(
+                    "moss_prompt",
+                    display_name="moss_prompt",
+                    tooltip="Ready-to-encode MOSS-Image layout JSON string with abs_centralized yxyx pixel coordinates.",
+                ),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        prompt: str = "",
+        width: int = 0,
+        height: int = 0,
+        input_coord_space: str = "normalized_1000",
+        character_boxes: str = "",
+        image=None,
+        elements=None,
+    ) -> io.NodeOutput:
+        return io.NodeOutput(
+            build_moss_image_layout_prompt(
+                prompt=prompt,
+                elements=elements,
+                width=width,
+                height=height,
+                image=image,
+                input_coord_space=input_coord_space,
+                character_boxes=character_boxes,
+            )
+        )

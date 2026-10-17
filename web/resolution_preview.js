@@ -216,7 +216,7 @@ function updatePreview(node, backendValue) {
 app.registerExtension({
   name: "ComfyUI.UtilsCollection.ResolutionPreview",
   async beforeRegisterNodeDef(nodeType, nodeData) {
-    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector", "UC_VideoResolutionAndLengthPicker", "UC_MiniMaxH3RefVid"].includes(nodeData.name)) return;
+    if (!["UC_ResolutionSelectorExtended", "UC_VideoResolutionSelector", "UC_VideoResolutionAndLengthPicker", "UC_MiniMaxH3RefVid", "UC_H3RefVideoSegments"].includes(nodeData.name)) return;
 
     const computeSize = nodeType.prototype.computeSize;
     nodeType.prototype.computeSize = function (out) {
@@ -237,15 +237,23 @@ app.registerExtension({
       this.__ucVideoResolutionSelector = nodeData.name === "UC_VideoResolutionSelector";
       this.__ucVideoLengthPicker = nodeData.name === "UC_VideoResolutionAndLengthPicker";
       this.__ucH3ReferenceVideo = nodeData.name === "UC_MiniMaxH3RefVid";
+      this.__ucH3RefVideoSegments = nodeData.name === "UC_H3RefVideoSegments";
       this.__ucResolutionPreview = "";
-      if (this.__ucVideoLengthPicker) {
+      if (this.__ucVideoLengthPicker || this.__ucVideoResolutionSelector || this.__ucH3ReferenceVideo || this.__ucH3RefVideoSegments) {
+        const allowZeroDuration = this.__ucH3ReferenceVideo || this.__ucH3RefVideoSegments;
         const durationWidget = this.widgets?.find((w) => w.name === "duration_seconds");
         if (durationWidget) {
           const originalCallback = durationWidget.callback;
           durationWidget.callback = function (value) {
-            const k = Math.max(0, Math.round((Number(value) - 5 / 24) / (17 / 24)));
-            const snappedFrames = 5 + 17 * k;
-            const snappedSeconds = Number((snappedFrames / 24).toFixed(5));
+            const num = Number(value);
+            let snappedSeconds;
+            if (allowZeroDuration && (!Number.isFinite(num) || num <= 0.1)) {
+              snappedSeconds = 0.0;
+            } else {
+              const k = Math.max(0, Math.round((num - 5 / 24) / (17 / 24)));
+              const snappedFrames = 5 + 17 * k;
+              snappedSeconds = Number((snappedFrames / 24).toFixed(5));
+            }
             durationWidget.value = snappedSeconds;
             originalCallback?.call(this, snappedSeconds);
           };

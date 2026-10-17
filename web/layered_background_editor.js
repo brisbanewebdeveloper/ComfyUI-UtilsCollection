@@ -80,11 +80,12 @@ api.queuePrompt = async function(index, prompt, ...args) {
   do {
     await Promise.all(relevantEditors.map((editor) => editor.flushPaint()));
   } while (relevantEditors.some((editor) => editor.foregroundContent?.hasPending()));
-  const currentPrompt = updatePromptNodeInputs(prompt, relevantEditors.map((editor) => ({
+  const editorUpdates = relevantEditors.map((editor) => ({
     nodeId: editor.node.id,
     inputs: buildEditorPromptInputs(editor.placementWidget.value, editor.isStagedComposite()),
     serializedNode: editor.node.serialize(),
-  })));
+  }));
+  const currentPrompt = updatePromptNodeInputs(prompt, editorUpdates);
   const queuedPrompt = activeStagingQueue
     ? buildStagingPrompt(currentPrompt, activeStagingQueue.nodeId)
     : currentPrompt;

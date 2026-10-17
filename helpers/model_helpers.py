@@ -348,7 +348,7 @@ def _minimax_h3_clip_continuation_saved_path(relative_path: str) -> Path:
 
 def trim_minimax_h3_clip_continuation(
     images: torch.Tensor, audio: dict | None, trim_leading_frames: int,
-    trim_trailing_frames: int = 0, fps: int = 24,
+    trim_trailing_frames: int = 0, fps: float = 24.0, match_tail: bool = True,
 ) -> tuple[torch.Tensor, dict | None]:
     """Trim clip ends and keep decoded audio sample-aligned."""
     if not torch.is_tensor(images) or images.ndim != 4 or images.shape[0] < 1:
@@ -363,6 +363,9 @@ def trim_minimax_h3_clip_continuation(
         or trim_leading_frames + trim_trailing_frames >= images.shape[0]
     ):
         raise ValueError("MiniMax H3 Clip Continuation trim frames must leave at least one frame.")
+    fps = float(fps)
+    if not math.isfinite(fps) or fps <= 0:
+        raise ValueError("MiniMax H3 Clip Continuation fps must be positive.")
     stop = images.shape[0] - int(trim_trailing_frames) if trim_trailing_frames else None
     frames = images[int(trim_leading_frames):stop]
     if audio is None:
@@ -375,10 +378,16 @@ def trim_minimax_h3_clip_continuation(
     if start >= waveform.shape[-1]:
         raise ValueError("MiniMax H3 Clip Continuation trim removes all audio.")
     waveform = waveform[..., start:]
-    wanted = round(frames.shape[0] * sample_rate / fps)
-    waveform = waveform[..., :wanted]
-    if waveform.shape[-1] < wanted:
-        waveform = F.pad(waveform, (0, wanted - waveform.shape[-1]))
+    if trim_trailing_frames and not match_tail:
+        trail = round(int(trim_trailing_frames) * sample_rate / fps)
+        if trail >= waveform.shape[-1]:
+            raise ValueError("MiniMax H3 Clip Continuation trim removes all audio.")
+        waveform = waveform[..., :waveform.shape[-1] - trail]
+    elif match_tail or trim_trailing_frames:
+        wanted = round(frames.shape[0] * sample_rate / fps)
+        waveform = waveform[..., :wanted]
+        if waveform.shape[-1] < wanted:
+            waveform = F.pad(waveform, (0, wanted - waveform.shape[-1]))
     return frames, {"waveform": waveform, "sample_rate": sample_rate}
 
 
@@ -629,6 +638,11 @@ def snapshot_minimax_h3_clip_continuation_media(media: dict | None) -> dict | No
         snapshot["audio"]["waveform"] = media["audio"]["waveform"].detach().cpu().clone()
     else:
         snapshot["audio"] = None
+    if media.get("latent") is not None and isinstance(media["latent"], dict):
+        parts = h3_streams_from_latent(media["latent"])
+        snapshot["latent"] = {
+            "samples": NestedTensor(tuple(p.detach().cpu().clone() for p in parts))
+        }
     return snapshot
 
 
@@ -1028,43 +1042,63 @@ def _continuation_audio_waveform(audio: dict) -> tuple[torch.Tensor, int]:
 
 
 def save_minimax_h3_clip_continuation_media(
-    frames: torch.Tensor, tail_frames: int, filename_prefix: str, clip_index: int,
-    audio: dict | None = None, padded_frames: int = 0,
+    frames: torch.Tensor | None, tail_frames: int, filename_prefix: str, clip_index: int,
+    audio: dict | None = None, padded_frames: int = 0, latent: dict | None = None,
 ) -> str:
     if isinstance(tail_frames, bool) or not isinstance(tail_frames, numbers.Integral) or tail_frames not in {5, 22, 39, 56}:
         raise ValueError("MiniMax H3 Clip Continuation tail frames must be 5, 22, 39, or 56.")
     pad = int(padded_frames) if padded_frames is not None else 0
     if pad < 0:
         raise ValueError("Padded frames must be non-negative.")
-    media = {"format_version": 1, "frame_rate": 24, "frames": frames}
-    frames = validate_minimax_h3_clip_continuation_media(media)
-    if pad == 0 and frames.shape[0] > tail_frames:
-        last_frame = frames[-1]
-        auto_pad = 0
-        for i in range(2, min(frames.shape[0] - tail_frames + 1, 18)):
-            if (frames[-i] == last_frame).all():
-                auto_pad = i - 1
-            else:
-                break
-        if auto_pad > 0:
-            is_silent = True
-            if audio is not None and isinstance(audio.get("waveform"), torch.Tensor):
-                rate = audio.get("sample_rate", 32000)
-                pad_s = round(auto_pad * rate / 24)
-                if pad_s > 0 and audio["waveform"][..., -pad_s:].abs().max() > 1e-4:
-                    is_silent = False
-            if is_silent:
-                pad = auto_pad
-    if frames.shape[0] < tail_frames + pad:
-        detail = f"needs {tail_frames} frames" if not pad else f"needs {tail_frames + pad} frames ({tail_frames} tail + {pad} padded)"
-        raise ValueError(
-            f"MiniMax H3 Clip Continuation {detail} but received {frames.shape[0]}."
-        )
+    if frames is None and latent is None:
+        raise ValueError("MiniMax H3 Clip Continuation Save requires either 'latent' or 'images' to be connected.")
+
+    video_latent = None
+    audio_latent = None
+    if latent is not None:
+        parts = h3_streams_from_latent(latent)
+        if len(parts) < 2:
+            raise ValueError("MiniMax H3 Clip Continuation latent must contain both video and audio streams.")
+        video_latent = h3_video_from_latent(latent).detach().cpu().contiguous()
+        audio_stream = parts[1]
+        if audio_stream.ndim == 3:
+            audio_stream = audio_stream.unsqueeze(0)
+        if audio_stream.ndim != 4:
+            raise ValueError(f"Expected audio latent [B, C, 2, T], got shape {tuple(audio_stream.shape)}")
+        audio_latent = audio_stream.detach().cpu().contiguous()
+
+    tail = None
+    if frames is not None:
+        media = {"format_version": 1, "frame_rate": 24, "frames": frames}
+        frames = validate_minimax_h3_clip_continuation_media(media)
+        if pad == 0 and frames.shape[0] > tail_frames:
+            last_frame = frames[-1]
+            auto_pad = 0
+            for i in range(2, min(frames.shape[0] - tail_frames + 1, 18)):
+                if (frames[-i] == last_frame).all():
+                    auto_pad = i - 1
+                else:
+                    break
+            if auto_pad > 0:
+                is_silent = True
+                if audio is not None and isinstance(audio.get("waveform"), torch.Tensor):
+                    rate = audio.get("sample_rate", 32000)
+                    pad_s = round(auto_pad * rate / 24)
+                    if pad_s > 0 and audio["waveform"][..., -pad_s:].abs().max() > 1e-4:
+                        is_silent = False
+                if is_silent:
+                    pad = auto_pad
+        if frames.shape[0] < tail_frames + pad:
+            detail = f"needs {tail_frames} frames" if not pad else f"needs {tail_frames + pad} frames ({tail_frames} tail + {pad} padded)"
+            raise ValueError(
+                f"MiniMax H3 Clip Continuation {detail} but received {frames.shape[0]}."
+            )
+        stop_idx = frames.shape[0] - pad
+        start_idx = stop_idx - tail_frames
+        tail = frames[start_idx:stop_idx].detach().cpu().contiguous()
+
     path = _minimax_h3_clip_continuation_path(filename_prefix, clip_index)
     path.parent.mkdir(parents=True, exist_ok=True)
-    stop_idx = frames.shape[0] - pad
-    start_idx = stop_idx - tail_frames
-    tail = frames[start_idx:stop_idx].detach().cpu().contiguous()
     audio_tail = None
     audio_rate = None
     if audio is not None:
@@ -1083,16 +1117,21 @@ def save_minimax_h3_clip_continuation_media(
             audio_tail = active_wave[..., -sample_count:].detach().cpu().contiguous()
         else:
             audio_tail = F.pad(active_wave, (sample_count - active_wave.shape[-1], 0)).detach().cpu().contiguous()
+    meta_dict = {
+        "format_version": MINIMAX_H3_CLIP_CONTINUATION_FORMAT,
+        "frame_rate": 24,
+        "shape": list(tail.shape) if tail is not None else None,
+        "audio_shape": list(audio_tail.shape) if audio_tail is not None else None,
+        "audio_sample_rate": audio_rate,
+        "padded_frames": pad,
+        "tail_frames": int(tail_frames),
+    }
+    if video_latent is not None and audio_latent is not None:
+        meta_dict["video_latent_shape"] = list(video_latent.shape)
+        meta_dict["audio_latent_shape"] = list(audio_latent.shape)
     metadata = {
         MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY: json.dumps(
-            {
-                "format_version": MINIMAX_H3_CLIP_CONTINUATION_FORMAT,
-                "frame_rate": 24,
-                "shape": list(tail.shape),
-                "audio_shape": list(audio_tail.shape) if audio_tail is not None else None,
-                "audio_sample_rate": audio_rate,
-                "padded_frames": pad,
-            },
+            meta_dict,
             separators=(",", ":"), sort_keys=True,
         )
     }
@@ -1100,9 +1139,13 @@ def save_minimax_h3_clip_continuation_media(
     os.close(descriptor)
     try:
         with IncrementalSafetensorsWriter(temporary, metadata=metadata, max_workers=1) as writer:
-            writer.write("frames", tail)
+            if tail is not None:
+                writer.write("frames", tail)
             if audio_tail is not None:
                 writer.write("audio", audio_tail)
+            if video_latent is not None and audio_latent is not None:
+                writer.write("video_latent", video_latent)
+                writer.write("audio_latent", audio_latent)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -1163,54 +1206,100 @@ def get_minimax_h3_clip_continuation_path_fingerprint(relative_path: str) -> str
 
 def _load_minimax_h3_clip_continuation_media_path(path: Path) -> dict:
     with MemoryEfficientSafeOpen(str(path), low_memory=True) as handle:
-        if set(handle.keys()) not in ({"frames"}, {"frames", "audio"}):
+        keys = set(handle.keys())
+        raw_meta_dict = handle.metadata() or {}
+        if raw_meta_dict.get("format") == "h3_motion_context_av_v1" and keys == {"video", "audio"}:
+            video_latent = handle.get_tensor("video").detach().clone().contiguous()
+            audio_latent = handle.get_tensor("audio").detach().clone().contiguous()
+            return {
+                "format_version": 1,
+                "frame_rate": 24,
+                "frames": None,
+                "latent": {"samples": NestedTensor((video_latent, audio_latent))},
+            }
+
+        allowed_keys = {"frames", "audio", "video_latent", "audio_latent"}
+        has_frames = "frames" in keys
+        has_latent = "video_latent" in keys and "audio_latent" in keys
+        if not keys.issubset(allowed_keys) or (not has_frames and not has_latent):
             raise ValueError("MiniMax H3 Clip Continuation file must contain frames and optional audio only.")
-        raw_metadata = (handle.metadata() or {}).get(MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY)
+        if ("video_latent" in keys) != ("audio_latent" in keys):
+            raise ValueError("MiniMax H3 Clip Continuation file must contain both video_latent and audio_latent.")
+        if "audio" in keys and not has_frames:
+            raise ValueError("MiniMax H3 Clip Continuation file must contain frames and optional audio only.")
+
+        raw_metadata = raw_meta_dict.get(MINIMAX_H3_CLIP_CONTINUATION_METADATA_KEY)
         if raw_metadata is None:
             raise ValueError("MiniMax H3 Clip Continuation file has no metadata.")
         try:
             metadata = json.loads(raw_metadata)
         except json.JSONDecodeError as exc:
             raise ValueError("MiniMax H3 Clip Continuation metadata is invalid JSON.") from exc
-        shape = handle.get_shape("frames")
         if (
             not isinstance(metadata, dict)
             or metadata.get("format_version") != MINIMAX_H3_CLIP_CONTINUATION_FORMAT
             or metadata.get("frame_rate") != 24
-            or metadata.get("shape") != list(shape)
-            or len(shape) != 4
-            or shape[0] < 5
-            or min(shape[1:3]) < 1
-            or shape[3] != 3
-            or not handle.get_dtype("frames").is_floating_point
         ):
             raise ValueError("MiniMax H3 Clip Continuation file has invalid frame metadata.")
-        frames, audio = None, None
+
+        if has_frames:
+            shape = handle.get_shape("frames")
+            if (
+                metadata.get("shape") != list(shape)
+                or len(shape) != 4
+                or shape[0] < 5
+                or min(shape[1:3]) < 1
+                or shape[3] != 3
+                or not handle.get_dtype("frames").is_floating_point
+            ):
+                raise ValueError("MiniMax H3 Clip Continuation file has invalid frame metadata.")
+        if has_latent:
+            v_shape = handle.get_shape("video_latent")
+            a_shape = handle.get_shape("audio_latent")
+            if (
+                metadata.get("video_latent_shape") != list(v_shape)
+                or metadata.get("audio_latent_shape") != list(a_shape)
+                or len(v_shape) != 5
+                or len(a_shape) != 4
+            ):
+                raise ValueError("MiniMax H3 Clip Continuation file has invalid latent metadata.")
+
+        frames, audio, video_latent, audio_latent = None, None, None, None
         names = sorted(handle.keys())
         with closing(handle.async_stream(names, batch_size=1, prefetch_batches=1, pin_memory=False)) as stream:
             for batch in stream:
                 try:
-                    if len(batch) != 1 or batch[0][0] not in {"frames", "audio"}:
+                    if len(batch) != 1 or batch[0][0] not in allowed_keys:
                         raise ValueError("MiniMax H3 Clip Continuation stream returned an unexpected tensor.")
-                    if batch[0][0] == "frames":
-                        frames = batch[0][1].detach().clone()
-                    else:
-                        audio = batch[0][1].detach().clone()
+                    tensor_name, tensor_val = batch[0][0], batch[0][1].detach().clone()
+                    if tensor_name == "frames":
+                        frames = tensor_val
+                    elif tensor_name == "audio":
+                        audio = tensor_val
+                    elif tensor_name == "video_latent":
+                        video_latent = tensor_val
+                    elif tensor_name == "audio_latent":
+                        audio_latent = tensor_val
                 finally:
                     for name, _value in batch:
                         handle.mark_processed(name)
-        if frames is None:
+        if has_frames and frames is None:
             raise ValueError("MiniMax H3 Clip Continuation file has no frames.")
-    validate_minimax_h3_clip_continuation_media(
-        {"format_version": 1, "frame_rate": 24, "frames": frames}
-    )
+    if frames is not None:
+        validate_minimax_h3_clip_continuation_media(
+            {"format_version": 1, "frame_rate": 24, "frames": frames}
+        )
     result = {"format_version": 1, "frame_rate": 24, "frames": frames}
     if audio is not None:
         if metadata.get("audio_shape") != list(audio.shape) or metadata.get("audio_sample_rate") is None:
             raise ValueError("MiniMax H3 Clip Continuation file has invalid audio metadata.")
         result["audio"] = {"waveform": audio, "sample_rate": metadata["audio_sample_rate"]}
+    if video_latent is not None and audio_latent is not None:
+        result["latent"] = {"samples": NestedTensor((video_latent, audio_latent))}
     if "padded_frames" in metadata:
         result["padded_frames"] = metadata["padded_frames"]
+    if "tail_frames" in metadata:
+        result["tail_frames"] = int(metadata["tail_frames"])
     return result
 
 
@@ -1223,6 +1312,362 @@ H3_AUDIO_LATENT_FPS = 40
 H3_VIDEO_LATENT_CHANNELS = 24
 H3_AUDIO_LATENT_CHANNELS = 32
 H3_AUDIO_CHANNELS = 2
+H3_FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
+H3_FRAME_RESCALE = 5.0 / 3.0
+H3_VIDEO_RUN_GRID = (124, 107, 90, 73, 56, 39, 22, 5, 1)
+
+_H3_LAYOUT_CHECKED = None
+
+
+class _H3LayoutStub:
+    def __init__(self, shape):
+        self.shape = shape
+
+
+def _h3_layout_origin(layout) -> float:
+    a, b, kind = layout.segments[-1]
+    if kind != "video" or b <= a:
+        raise RuntimeError(
+            f"Expected the target video rows to be the last layout segment, found {kind!r} spanning {b - a} rows."
+        )
+    return float(layout.position_ids[a, 0])
+
+
+def _h3_layout_seg(layout, kind: str) -> list[tuple[int, int]]:
+    return [(a, b) for a, b, k in layout.segments if k == kind]
+
+
+def ensure_minimax_h3_layout_contract() -> None:
+    """Verify once that ComfyUI's MiniMax H3 PackedLayout places video and fractional/negative audio keyframes accurately."""
+    global _H3_LAYOUT_CHECKED
+    if _H3_LAYOUT_CHECKED is True:
+        return
+    if isinstance(_H3_LAYOUT_CHECKED, str):
+        raise RuntimeError(_H3_LAYOUT_CHECKED)
+
+    try:
+        import comfy.ldm.minimax.model as mm
+    except ImportError:
+        return
+
+    if not hasattr(mm, "PackedLayout") or not hasattr(mm, "FRAME_RESCALE"):
+        return
+
+    try:
+        text_len, latent_t, lh, lw, audio_t = 7, 7, 22, 38, 16
+        fr = mm.FRAME_RESCALE
+
+        def build(keyframes=None, refs=None):
+            return mm.PackedLayout(text_len, latent_t, lh, lw, audio_t, keyframes=keyframes, refs=refs)
+
+        video = _H3LayoutStub((1, 24, 1, lh, lw))
+        lay = build(keyframes=[{"resolved_frame_index": p, "latent": video} for p in (0, 3)])
+        o = _h3_layout_origin(lay)
+        got = [float(lay.position_ids[a, 0]) - o for a, _ in _h3_layout_seg(lay, "cond")]
+        want = [0.0, fr * 3]
+        if len(got) != 2 or any(abs(g - w) > 1e-9 for g, w in zip(got, want)):
+            raise RuntimeError(f"Keyframe anchors no longer sit at FRAME_RESCALE per pixel frame: got {got}, expected {want}")
+
+        lay = build(
+            keyframes=[{"resolved_frame_index": 3, "latent": video}],
+            refs=[{"kind": "audio", "ref_audio_t": 8}],
+        )
+        a, _ = _h3_layout_seg(lay, "cond")[0]
+        gap = float(lay.position_ids[a, 0]) - _h3_layout_origin(lay)
+        if abs(gap - fr * 3) > 1e-9:
+            raise RuntimeError(f"A reference moved keyframe anchors relative to the target: got {gap:.6f}, expected {fr * 3:.6f}")
+
+        rt, end_coord = 40, 8
+        end_frame = end_coord / fr
+        idx = end_frame - rt / fr
+        lay = build(keyframes=[{"resolved_frame_index": idx, "audio_latent": _H3LayoutStub((1, 32, 2, rt))}])
+        spans = _h3_layout_seg(lay, "cond_audio")
+        if len(spans) != 1:
+            raise RuntimeError(f"A keyframe carrying an audio latent produced {len(spans)} cond_audio segments, expected 1")
+        a, b = spans[0]
+        if b - a != 2 * rt:
+            raise RuntimeError(f"Pinned audio window has {b - a} rows for {rt} latent steps, expected {2 * rt}")
+        o = _h3_layout_origin(lay)
+        t = lay.position_ids[a:b, 0]
+        start = float(t.min()) - o
+        end = start + float(rt)
+        if abs(end - fr * end_frame) > 1e-9:
+            raise RuntimeError(f"Pinned audio window ends {end:.6f} past target origin, expected {fr * end_frame:.6f}")
+        if start >= 0.0:
+            raise RuntimeError(f"Pinned audio window starts {start:.6f} past target origin; expected negative start before origin")
+    except Exception as exc:
+        _H3_LAYOUT_CHECKED = f"MiniMax H3 layout contract check failed: {exc}"
+        raise RuntimeError(_H3_LAYOUT_CHECKED) from exc
+
+    _H3_LAYOUT_CHECKED = True
+
+
+def h3_pixel_frames_for_latent_steps(latent_t: int) -> int:
+    """Pixel frames covered by latent_t latent steps."""
+    return sum(H3_FRAME_PER_TOKEN[k % 5] for k in range(int(latent_t)))
+
+
+def h3_step_offsets(latent_t: int) -> list[int]:
+    """Pixel-frame index at which each latent step begins."""
+    out, acc = [], 0
+    for k in range(int(latent_t)):
+        out.append(acc)
+        acc += H3_FRAME_PER_TOKEN[k % 5]
+    return out
+
+
+def h3_steps_for_frames(n: int) -> int | None:
+    """Latent steps covering exactly n pixel frames from cycle position 0, or None."""
+    k, covered = 0, 0
+    while covered < n:
+        covered += H3_FRAME_PER_TOKEN[k % 5]
+        k += 1
+    return k if covered == n else None
+
+
+def h3_streams_from_latent(latent: Any) -> list[torch.Tensor]:
+    """Unpack an H3 AV latent into its contained video and audio streams."""
+    if not isinstance(latent, dict) or "samples" not in latent:
+        raise ValueError("Expected a MiniMax H3 AV latent dict with a 'samples' key.")
+    samples = latent["samples"]
+    if hasattr(samples, "unbind"):
+        parts = list(samples.unbind())
+    elif hasattr(samples, "tensors"):
+        parts = list(samples.tensors)
+    elif isinstance(samples, (tuple, list)):
+        parts = list(samples)
+    else:
+        raise ValueError(f"Expected a MiniMax H3 AV latent (nested video/audio pair), got {type(samples)!r}")
+    if not parts:
+        raise ValueError("MiniMax H3 AV latent contains no streams.")
+    return parts
+
+
+def h3_video_from_latent(latent: Any) -> torch.Tensor:
+    """Extract the 5D video stream [B, C, T, H, W] from an H3 AV latent."""
+    video = h3_streams_from_latent(latent)[0]
+    if video.ndim == 4:
+        video = video.unsqueeze(0)
+    if video.ndim != 5:
+        raise ValueError(f"Expected video latent [B, C, T, H, W], got shape {tuple(video.shape)}")
+    return video
+
+
+def h3_video_tail_from_latent(latent: Any, n: int) -> tuple[list[torch.Tensor], list[int], int]:
+    """Slice the last n pixel frames of video straight out of an H3 AV latent."""
+    video = h3_video_from_latent(latent)
+    total = int(video.shape[2])
+    steps = h3_steps_for_frames(int(n))
+    if steps is None:
+        raise ValueError(
+            f"A {n}-frame window is not a whole number of latent steps. Use 5, 22, 39, or 56."
+        )
+    if steps > total:
+        raise ValueError(f"Asked for {steps} latent steps, but context_latent only has {total}.")
+    start = total - steps
+    if start % 5 != 0:
+        raise RuntimeError(
+            f"The {steps}-step tail of a {total}-step latent starts at cycle position {start % 5}, not 0."
+        )
+    covered = h3_pixel_frames_for_latent_steps(steps)
+    if covered != n:
+        raise RuntimeError(f"{steps} steps cover {covered} frames, expected {n}.")
+    blocks = [video[:1, :, start + k : start + k + 1].clone() for k in range(steps)]
+    return blocks, h3_step_offsets(steps), covered
+
+
+def h3_audio_tail_from_latent(latent: Any, a_frames: int) -> tuple[torch.Tensor, int, float]:
+    """Slice the last a_frames worth of audio steps straight out of an H3 AV latent."""
+    parts = h3_streams_from_latent(latent)
+    if len(parts) < 2:
+        raise ValueError("context_latent has no audio stream. Wire the sampler output of an H3 AV graph.")
+    video, audio = parts[0], parts[1]
+    if video.ndim == 4:
+        video = video.unsqueeze(0)
+    if audio.ndim == 3:
+        audio = audio.unsqueeze(0)
+    if audio.ndim != 4:
+        raise ValueError(f"Expected audio latent [B, C, 2, T], got shape {tuple(audio.shape)}")
+    total_t = int(audio.shape[-1])
+    frames = h3_pixel_frames_for_latent_steps(int(video.shape[2]))
+    overhang = total_t - H3_FRAME_RESCALE * frames
+    if not (-0.5 < overhang < 0.5):
+        overhang = 0.0
+    rt = int(round(float(a_frames) / float(H3_CONTINUATION_FPS) * float(H3_AUDIO_LATENT_FPS)))
+    if rt > total_t:
+        rt = total_t
+    if rt < 1:
+        raise ValueError("Audio continuation window is empty.")
+    tail = audio[:1, ..., total_t - rt :].clone()
+    return tail, rt, float(overhang)
+
+
+def h3_encode_tail_audio(audio_vae: Any, audio: Mapping, seconds: float, cache: Any = None) -> tuple[torch.Tensor, int]:
+    """Encode the last `seconds` of a clip's audio with the H3 audio VAE."""
+    waveform = audio["waveform"]
+    sr = int(audio["sample_rate"])
+    vae_sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
+    if sr != vae_sr:
+        waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
+    want = int(round(seconds * vae_sr))
+    have = int(waveform.shape[-1])
+    if have >= want:
+        waveform = waveform[..., have - want :]
+    prepared = waveform[:1].movedim(1, -1)
+    z = cache.encode_vae(audio_vae, prepared) if cache is not None and hasattr(cache, "encode_vae") else audio_vae.encode(prepared)
+    return z, int(z.shape[-1])
+
+
+def apply_minimax_h3_clip_continuation(
+    conditioning: Any,
+    latent: Any,
+    tail_frames: int | str = 22,
+    audio_tail_frames: int = 24,
+    *,
+    continuation_latent: Any = None,
+    continuation_media: dict | None = None,
+    continuation_frames: torch.Tensor | None = None,
+    continuation_audio: dict | None = None,
+    vae: Any = None,
+    audio_vae: Any = None,
+    cache: Any = None,
+) -> tuple[Any, int]:
+    """Pin previous-clip video and audio tails onto H3 conditioning using exact Clip Continuation keyframes."""
+    media_type = "video+audio"
+    if continuation_media is not None and isinstance(continuation_media, Mapping):
+        media_type = continuation_media.get("media_type", "video+audio")
+        if continuation_latent is None and continuation_media.get("latent") is not None:
+            continuation_latent = continuation_media["latent"]
+        if continuation_frames is None and continuation_media.get("frames") is not None:
+            continuation_frames = validate_minimax_h3_clip_continuation_media(continuation_media)
+        if continuation_audio is None and continuation_media.get("audio") is not None:
+            continuation_audio = continuation_media["audio"]
+        if "tail_frames" in continuation_media and tail_frames is None:
+            tail_frames = int(continuation_media["tail_frames"])
+
+    use_video = media_type in ("video+audio", "video only") and (continuation_latent is not None or continuation_frames is not None)
+    use_audio = media_type in ("video+audio", "audio only") and (continuation_latent is not None or continuation_audio is not None)
+    if not use_video and not use_audio:
+        return conditioning, 0
+
+    ensure_minimax_h3_layout_contract()
+    tail_frames = int(tail_frames) if tail_frames is not None else 22
+
+    video = h3_video_from_latent(latent)
+    latent_t = int(video.shape[2])
+    width = int(video.shape[4]) * 16
+    height = int(video.shape[3]) * 16
+    frame_count = h3_pixel_frames_for_latent_steps(latent_t)
+
+    keyframes = []
+    span = 0
+    if use_video:
+        if continuation_latent is not None:
+            src_video = h3_video_from_latent(continuation_latent)
+            src_w = int(src_video.shape[4]) * 16
+            src_h = int(src_video.shape[3]) * 16
+            if src_w != width or src_h != height:
+                raise ValueError(
+                    f"continuation_latent is {src_w}x{src_h} but target clip is {width}x{height}. "
+                    "Latents cannot be resized across clips."
+                )
+            if int(src_video.shape[1]) != int(video.shape[1]):
+                raise ValueError(
+                    f"continuation_latent has {int(src_video.shape[1])} channels, target clip has {int(video.shape[1])}."
+                )
+            available = h3_pixel_frames_for_latent_steps(int(src_video.shape[2]))
+            video_src = "latent"
+        else:
+            if vae is None:
+                raise ValueError("MiniMax H3 Clip Continuation requires a video VAE.")
+            available = int(continuation_frames.shape[0])
+            video_src = "pixels"
+
+        n = min(int(tail_frames), available)
+        if n < 1:
+            raise ValueError("No frames available to pin for MiniMax H3 continuation.")
+        run = next((g for g in H3_VIDEO_RUN_GRID if g <= n), 1)
+        n = run
+        if n >= frame_count:
+            raise ValueError(
+                f"MiniMax H3 Clip Continuation tail frames ({n}) cannot exceed or equal the target frame count ({frame_count})."
+            )
+
+        if video_src == "latent":
+            blocks, offsets, covered = h3_video_tail_from_latent(continuation_latent, n)
+            span = covered
+        else:
+            samples = continuation_frames[available - n :, ..., :3].movedim(-1, 1)
+            tail = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
+            enc = cache.encode_vae(vae, tail) if cache is not None and hasattr(cache, "encode_vae") else vae.encode(tail)
+            if getattr(enc, "ndim", 0) != 5:
+                raise ValueError(f"Video VAE encode returned shape {tuple(getattr(enc, 'shape', ()))}, expected [B, C, T, H, W].")
+            steps = int(enc.shape[2])
+            covered = h3_pixel_frames_for_latent_steps(steps)
+            if covered != n:
+                expected_steps = h3_steps_for_frames(n) or steps
+                if steps < expected_steps and steps >= 1:
+                    offsets = h3_step_offsets(steps)
+                    blocks = [enc[:, :, k : k + 1] for k in range(steps)]
+                    span = n
+                else:
+                    raise RuntimeError(
+                        f"{n} frames encoded to {steps} latent steps covering {covered} frames; VAE grid mismatch."
+                    )
+            else:
+                offsets = h3_step_offsets(steps)
+                blocks = [enc[:, :, k : k + 1] for k in range(steps)]
+                span = covered
+
+        for p, blk in zip(offsets, blocks):
+            keyframes.append({
+                "resolved_frame_index": p,
+                "latent": blk,
+            })
+
+    audio_kf = None
+    if use_audio:
+        a_frames = int(audio_tail_frames) if audio_tail_frames else (span if span > 0 else int(tail_frames))
+        if continuation_latent is not None and len(h3_streams_from_latent(continuation_latent)) >= 2:
+            audio_latent, ref_audio_t, overhang = h3_audio_tail_from_latent(continuation_latent, a_frames)
+        else:
+            if audio_vae is None:
+                raise ValueError("MiniMax H3 Clip Continuation audio requires an audio_vae input (or continuation_latent).")
+            audio_latent, ref_audio_t = h3_encode_tail_audio(audio_vae, continuation_audio, a_frames / float(H3_CONTINUATION_FPS), cache=cache)
+            overhang = 0.0
+        effective_span = float(span if span > 0 else min(int(tail_frames), frame_count - 1))
+        end_frame = effective_span + overhang / H3_FRAME_RESCALE
+        end_coord = round(H3_FRAME_RESCALE * end_frame)
+        end_frame = end_coord / H3_FRAME_RESCALE
+        audio_kf = {
+            "resolved_frame_index": end_frame - ref_audio_t / H3_FRAME_RESCALE,
+            "audio_latent": audio_latent,
+        }
+
+    head_end = span
+    tail_kfs = [audio_kf] if audio_kf is not None else []
+    out = []
+    for emb, extra in conditioning:
+        d = extra.copy()
+        prior = d.get("minimax_keyframes") or []
+        kept = []
+        for kf in prior:
+            p = kf.get("resolved_frame_index", 0)
+            if p >= frame_count:
+                raise ValueError(
+                    f"Conditioning carries a keyframe anchored at frame {p}, but target clip is only {frame_count} frames."
+                )
+            if p < head_end:
+                continue
+            kept.append(dict(kf))
+        combined_kfs = kept + keyframes + tail_kfs
+        combined_kfs.sort(key=lambda item: float(item["resolved_frame_index"]))
+        d["minimax_keyframes"] = combined_kfs
+        d["minimax_frame_count"] = frame_count
+        d["minimax_trim_frames"] = span
+        out.append([emb, d])
+
+    return out, span
 
 
 def h3_video_latent_t(frame_count: int) -> int:

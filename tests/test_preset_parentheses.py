@@ -41,25 +41,6 @@ def test_preset_parenthesis_escaping_is_optional_and_idempotent():
     assert preset_nodes.escape_prompt_parentheses(text, True) == r"PBR \(metal\), already \(glass\)"
 
 
-def test_anatomical_error_edit_operation_preserves_identity_and_restores_detail():
-    preset_name = "FIX_ANATOMY"
-    presets = preset_nodes.UC_EditOpPresets.get_presets()
-
-    assert preset_name in presets
-    prompt = presets[preset_name]
-    assert preset_nodes.UC_EditOpPresets.execute(preset_name).args == (prompt,)
-    for required in (
-        "deformed pupils and irises",
-        "mouth contours",
-        "hands, fingers",
-        "high-fidelity geometry",
-        "visually pleasing detail",
-        "identity fully preserved",
-        "keeping all unaffected areas unchanged",
-    ):
-        assert required in prompt
-
-
 @pytest.mark.parametrize(
     "node",
     (

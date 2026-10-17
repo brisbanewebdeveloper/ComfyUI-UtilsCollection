@@ -53,7 +53,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
                 io.Video.Input("video", tooltip="Reference clip. Its original frame rate is used to preserve playback speed when preparing 24 fps frames."),
                 MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Optional output from MiniMax H3 Clip Continuation Load. When connected, continuation frames and audio replace or prepend the opening segment frames before reference preparation and Whisper transcription."),
                 io.Float.Input("megapixels", default=0.5, min=0.0, max=4.0, step=0.001, tooltip="Target frame size. Set to 0.0 to keep original video resolution without scaling or cropping. Otherwise matches the video to the nearest standard aspect ratio from Video Resolution Selector, chooses its preferred resolution, and center-crops to fit."),
-                io.Float.Input("duration_seconds", default=0.0, min=0.0, step=0.1, tooltip="Maximum reference duration after the start offset. 0 uses the remaining clip. The selected duration rounds up to a supported H3 frame count at 24 fps, so it may run slightly longer and repeat the final frame."),
+                io.Float.Input("duration_seconds", default=0.0, min=0.0, step=0.70833, tooltip="Maximum reference duration after the start offset. 0.0 uses the remaining clip. Positive values step by 17 frames (~0.708s) on the MiniMax H3 5+17k grid at 24 fps."),
                 io.Float.Input("start_at_timestamp", default=0.0, min=0.0, step=0.1, tooltip="Seconds to skip at the start, for both video and audio. 0 skips nothing; positive values use the same H3 frame-count rounding as duration. Preview frame numbers are zero-based and the end frame is inclusive."),
                 io.Custom("WHISPER_MODEL").Input("whisper_model", optional=True, tooltip="Optional native Whisper Loader output. Transcribes the selected audio in its original language; disconnected skips transcription."),
                 io.Combo.Input("timestamp_format", options=list(VIDEO_FRAME_TIMESTAMP_FORMATS), default="00.000s", optional=True, tooltip="Timestamp formatting for transcribed audio, matching the timeline nodes."),
@@ -137,28 +137,29 @@ class UC_MiniMaxH3ClipContinuationSave(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationSave",
             display_name="MiniMax H3 Clip Continuation Save",
             category="advanced/conditioning",
-            description="Saves the ending of a generated clip so the next clip in your sequence can pick up seamlessly where it left off.",
+            description="Saves the ending of a generated clip (latent or decoded frames/audio) so the next clip in your sequence can pick up seamlessly where it left off.",
             inputs=[
-                io.Image.Input("images", tooltip="Frames from the video clip you just made."),
-                io.Audio.Input("audio", optional=True, tooltip="Optional sound track from the same clip. The tail audio is saved to match the ending frames."),
+                io.Image.Input("images", optional=True, tooltip="Optional decoded frames from the video clip you just made. Can be left disconnected when latent is connected."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional sound track from the same clip. Can be left disconnected when latent is connected."),
+                io.Latent.Input("latent", optional=True, tooltip="Optional sampler output latent (recommended). Saves both video and audio streams directly in latent space so the next clip continues without decoding or re-encoding."),
                 io.Combo.Input("tail_frames", options=["5", "22", "39", "56"], default="22", tooltip="How many ending frames to keep for the next clip to follow (default 22 = ~0.9s)."),
                 io.String.Input("filename_prefix", default="h3_clip_continuation/clip", tooltip="Name or folder for this continuation sequence. Keep this the same on both Save and Load."),
                 io.Int.Input("clip_index", default=1, min=0, max=99999, step=1, tooltip="Manual clip number. Start with 1, then increase by 1 for each new clip. Ignored when auto_index is enabled."),
                 io.Boolean.Input("auto_index", default=False, label_on="Auto (next clip number)", label_off="Manual", tooltip="When enabled, automatically numbers this clip as the next one in sequence (latest + 1). Eliminates the need for integer counters or math nodes."),
-                io.Int.Input("padded_frames", default=0, min=0, max=99999, step=1, optional=True, tooltip="Optional extra frames at the very end to skip before extracting the tail (useful if the clip has trailing freeze padding)."),
+                io.Int.Input("padded_frames", default=0, min=0, max=99999, step=1, optional=True, tooltip="Optional extra frames at the very end to skip before extracting the tail (leave at 0 if already trimmed)."),
             ],
             outputs=[io.String.Output("path", tooltip="File path of the saved continuation data.")],
             is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, images, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0, auto_index=False):
+    def execute(cls, images=None, audio=None, tail_frames="22", filename_prefix="h3_clip_continuation/clip", clip_index=1, padded_frames=0, auto_index=False, latent=None):
         if auto_index or int(clip_index) <= 0:
             target_index = get_latest_minimax_h3_clip_continuation_index(filename_prefix) + 1
         else:
             target_index = int(clip_index)
         path = save_minimax_h3_clip_continuation_media(
-            images, int(tail_frames), filename_prefix, target_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0,
+            images, int(tail_frames), filename_prefix, target_index, audio=audio, padded_frames=int(padded_frames) if padded_frames is not None else 0, latent=latent,
         )
         return io.NodeOutput(path)
 
@@ -286,23 +287,30 @@ class UC_MiniMaxH3ClipContinuationTrim(io.ComfyNode):
             node_id="UC_MiniMaxH3ClipContinuationTrim",
             display_name="MiniMax H3 Clip Continuation Trim",
             category="advanced/conditioning",
-            description="Removes repeated beginning or ending frames before joining clips.",
+            description="Removes repeated beginning or ending frames and aligns sound to exact frame duration before joining clips.",
             inputs=[
                 io.Image.Input("images", tooltip="Frames from the clip to trim."),
-                io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip. It is trimmed to match the frames."),
-                io.Int.Input("trim_leading_frames", default=0, min=0, max=99999, step=1, tooltip="How many beginning frames to remove. Use 0 for the first clip."),
+                io.Audio.Input("audio", optional=True, tooltip="Optional audio from the same clip. Trimmed by the matching duration so sound stays locked to picture."),
+                io.Int.Input("trim_leading_frames", default=0, min=0, max=99999, step=1, tooltip="How many beginning frames to remove. Connect trim_frames from the continuation encoder, motion context node, or continuation sampler."),
                 io.Int.Input("trim_trailing_frames", default=0, min=0, max=99999, step=1, tooltip="How many ending frames to remove."),
+                io.Float.Input("fps", default=24.0, min=1.0, max=240.0, step=0.001, optional=True, tooltip="Frame rate used to convert trimmed frames into exact audio duration (default 24 fps)."),
+                io.Boolean.Input("match_tail", default=True, optional=True, tooltip="Matches audio duration to frames/fps exactly by trimming any 8ms H3 audio grid overhang or padding a short tail with silence so timing never drifts across clips."),
             ],
             outputs=[
-                io.Image.Output("images"),
-                io.Audio.Output("audio"),
+                io.Image.Output("images", tooltip="Trimmed video frames."),
+                io.Audio.Output("audio", tooltip="Trimmed and duration-matched audio track."),
             ],
         )
 
     @classmethod
-    def execute(cls, images, audio=None, trim_leading_frames=0, trim_trailing_frames=0):
+    def execute(cls, images, audio=None, trim_leading_frames=0, trim_trailing_frames=0, fps=24.0, match_tail=True):
         trimmed_images, trimmed_audio = trim_minimax_h3_clip_continuation(
-            images, audio, int(trim_leading_frames), int(trim_trailing_frames)
+            images,
+            audio,
+            int(trim_leading_frames),
+            int(trim_trailing_frames),
+            fps=float(fps) if fps is not None else 24.0,
+            match_tail=bool(match_tail) if match_tail is not None else True,
         )
         return io.NodeOutput(trimmed_images, trimmed_audio)
 
@@ -1759,6 +1767,9 @@ class UC_EncoderNodesGuide(io.ComfyNode):
                 "### Specialized encoders\n\n"
                 "- `UC_MiniMaxH3MediaConfig`: packages ordered timestamped images as one Qwen Video timeline and can carry optional native H3 audio conditioning.\n"
                 "- `UC_AdvancedMiniMaxH3ImageToVideo`: role-separated MiniMax H3 conditioning for optional first/last frames, native-reference mode, or Qwen visual fusion. Frame and native-reference modes remain mutually exclusive; the node returns CONDITIONING and the matching H3 latent.\n"
+                "- `UC_MiniMaxH3ClipContinuationEncoder`: extends `UC_AdvancedMiniMaxH3ImageToVideo` with `continuation_media` and a `trim_frames` output so a saved clip ending (latent or decoded frames/audio) pins seamless motion and sound at the start of the new clip.\n"
+                "- `UC_MiniMaxH3ClipContinuationApply`: attaches a previous clip's ending frames and sound (`continuation_latent` or `continuation_media`) directly onto any MiniMax H3 conditioning and outputs `trim_frames` without re-running the text encoder.\n"
+                "- `UC_MiniMaxH3ClipContinuationSampler`: samples a list of MiniMax H3 segments in a single run, automatically chaining each finished segment's latent tail into the next segment without re-encoding media, and outputs both per-segment latents/trim counts for A/B testing and the combined full-length latent.\n"
                 "- `UC_MiniMaxH3VLMGuide`: experimental CONDITIONING-only guide. Independently encodes a timestamp and image together, then splices them before the existing H3 prompt.\n"
                 "- `UC_AdvMiniMaxH3ImageToVideoTemporalFusion`: experimental video fusion after separate Qwen encodes. Fuses corresponding video blocks into lane zero; returns CONDITIONING and LATENT.\n"
                 "- `UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion`: experimental video fusion of corresponding visual tokens and DeepStack features before Qwen encoding; returns CONDITIONING and LATENT.\n"
@@ -1954,6 +1965,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                         "placement_editor",
                         "paint_layer",
                         "mediapipe_face_composite",
+                        "create_bounding_boxes",
                     ],
                     default="node_catalog",
                     tooltip="Select the composite documentation topic.",
@@ -1976,7 +1988,9 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `UC_StagedMediaPipeFaceOptions`: supplies detection, extraction, face feather, initial scale, and face-blend settings.\n"
                 "- `UC_StagedMediaPipeFaceBackgroundComposite`: stages ordinary foreground layers and independently placeable detected face layers.\n"
                 "- `UC_MediaPipeFaceCompositeOptions`: supplies options for direct source-to-target face compositing.\n"
-                "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face."
+                "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face.\n"
+                "- `UC_CreateBoundingBoxes`: interactive Nodes 1.0 bounding-box canvas editor outputting `preview`, pixel `bboxes`, layout `elements`, and `moss_prompt` for `FLUX.3 Layout Prompt`, `Build JSON Prompt (Ideogram)`, and `MOSS-Image`.\n"
+                "- `UC_MOSSImageBBoxConvert`: passthrough converter that maps Gemini's 0 to 1000 `[ymin, xmin, ymax, xmax]` layout JSON (or `Create Bounding Boxes` elements) into `MOSS-Image`'s `abs_centralized` pixel layout JSON."
             ),
             "model_inputs": (
                 "## Model inputs and defaults\n\n"
@@ -2081,6 +2095,14 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `warp_decay_radius`: warp falloff radius. Default `64`.\n"
                 "- `score_thresh`: detector score threshold. Default `0.25`.\n\n"
                 "The source face mask is intersected with the source background-removal mask. Outputs are the composited target IMAGE and the extracted Face Crop."
+            ),
+            "create_bounding_boxes": (
+                "## Create Bounding Boxes (Nodes 1.0)\n\n"
+                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements`, and `moss_prompt` (`MOSS-Image` `abs_centralized` pixel layout JSON). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected).\n\n"
+                "- Click and drag on empty canvas space (or Shift+drag over existing boxes) to draw a new bounding box, or use `+ Object Box` and `+ Text Box`.\n"
+                "- Click a box to select it, drag inside to move it, or drag its eight handles to resize it.\n"
+                "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, open the docked `PaintColorPicker` swatch to assign an optional prompt color (boxes default to outline-only so no color is sent to the prompt unless set; right-click, Shift+click, or press `Clear color (outline only)` to clear), and lock or exclude individual boxes.\n"
+                "- Connect `elements` directly to `FLUX.3 Layout Prompt` (citing `<obj_1>`, `<obj_2>`, etc. in the prompt) or `Build JSON Prompt (Ideogram)`, or connect `moss_prompt` (or `UC_MOSSImageBBoxConvert`) directly to a `MOSS-Image` text encoder."
             ),
         }
         return io.NodeOutput(topics.get(topic, "Unknown topic selected."))

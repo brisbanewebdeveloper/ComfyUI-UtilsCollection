@@ -5,17 +5,22 @@ from contextlib import nullcontext
 from enum import Enum
 
 from comfy_api.latest import io
+import comfy.ops
 from comfy import model_management
 from comfy.text_encoders.qwen_vl import qwen2vl_mrope_position_ids
 
 from ..helpers.encoder_helpers import evaluate_tensor_expression, fuse_visual_token_sources, fuse_deepstack_layers, prepare_vlm_image
 from ..helpers.textgen_helpers import (
+    _qwen_execution_context,
+    conform_and_validate_response_schema,
     generate_qwen3vl_video,
     prepare_qwen3vl_video_frames,
     qwen3vl_video_prompt,
+    schema_guided_generation_context,
 )
 
 VisualFusionConfig = io.Custom("VISUAL_FUSION_CONFIG")
+ResponseSchema = io.Custom("GEMINI_RESPONSE_SCHEMA")
 
 # -----------------------------------------------------------------------------
 # 1. Helper classes, mappings and functions
@@ -100,13 +105,14 @@ def _load_qwen_generation_model(clip):
     model = _qwen_clip_model(clip)
     if model is None:
         raise ValueError("Active visual fusion requires a supported Core Qwen multimodal model wrapper.")
+    if hasattr(model, "reset_clip_options"):
+        model.reset_clip_options()
     if hasattr(clip, "load_model"):
         clip.load_model()
     device = getattr(getattr(clip, "patcher", None), "load_device", None) or getattr(model, "execution_device", None)
     if device is None:
         device = model.transformer.get_input_embeddings().weight.device
-    if hasattr(model, "reset_clip_options"):
-        model.reset_clip_options()
+    if hasattr(model, "set_clip_options"):
         model.set_clip_options({"layer": None, "execution_device": device})
     return model, device
 
@@ -152,29 +158,29 @@ def generate_fused_qwen3vl(clip, full_prompt, images, config, generation_args, t
     if config.get("save_blended_embeds", False):
         logging.warning("UC_TextGenerate ignores save_blended_embeds: a primary block alone cannot save the complete DeepStack generation state.")
 
-    passes = _encode_qwen_visual_sources(clip, model, device, full_prompt, images, thinking)
-    deepstacks = {}
-    for index, (_, entry, _, _) in enumerate(passes):
-        deepstack = entry.get("extra", {}).get("deepstack")
-        if not deepstack:
-            raise ValueError("Qwen3-VL visual fusion source is missing DeepStack tensors.")
-        deepstacks[index] = deepstack
+    with _qwen_execution_context(clip, device):
+        passes = _encode_qwen_visual_sources(clip, model, device, full_prompt, images, thinking)
+        deepstacks = {}
+        for index, (_, entry, _, _) in enumerate(passes):
+            deepstack = entry.get("extra", {}).get("deepstack")
+            if not deepstack:
+                raise ValueError("Qwen3-VL visual fusion source is missing DeepStack tensors.")
+            deepstacks[index] = deepstack
 
-    mask_cache = {}
-    canonical, canonical_info, grids, size = _fuse_qwen_primary_sources(passes, config, device, mask_cache)
-    fused_deepstack = fuse_deepstack_layers(deepstacks, config, device, mask_cache, size, grids)
-    logging.info(
-        "TokenFusion visual-token fusion complete: fused %d Qwen3-VL visual sources into 1 block (%d visual tokens, %d DeepStack layers).",
-        len(passes), size, len(fused_deepstack),
-    )
-    fused_info = dict(canonical_info)
-    fused_info["extra"] = dict(canonical_info["extra"])
-    fused_info["extra"]["deepstack"] = fused_deepstack
-    position_ids, visual_mask, rebuilt_deepstack = model.transformer.build_image_inputs(canonical, [fused_info])
-    context = model_management.cuda_device_context(device) if hasattr(model_management, "cuda_device_context") else nullcontext()
-    with context:
+        mask_cache = {}
+        canonical, canonical_info, grids, size = _fuse_qwen_primary_sources(passes, config, device, mask_cache)
+        fused_deepstack = fuse_deepstack_layers(deepstacks, config, device, mask_cache, size, grids)
+        logging.info(
+            "TokenFusion visual-token fusion complete: fused %d Qwen3-VL visual sources into 1 block (%d visual tokens, %d DeepStack layers).",
+            len(passes), size, len(fused_deepstack),
+        )
+        fused_info = dict(canonical_info)
+        fused_info["extra"] = dict(canonical_info["extra"])
+        fused_info["extra"]["deepstack"] = fused_deepstack
+        position_ids, visual_mask, rebuilt_deepstack = model.transformer.build_image_inputs(canonical, [fused_info])
+        transformer_args = {k: v for k, v in generation_args.items() if k != "mtp"}
         return model.transformer.generate(
-            canonical, **generation_args, position_ids=position_ids,
+            canonical, **transformer_args, position_ids=position_ids,
             visual_pos_masks=visual_mask, deepstack_embeds=rebuilt_deepstack
         )
 
@@ -188,19 +194,18 @@ def generate_fused_qwen35(clip, full_prompt, images, config, generation_args, th
         logging.warning("UC_TextGenerate ignores save_blended_embeds in the fused text-generation path.")
     logging.info("UC_TextGenerate: Qwen3.5 visual fusion uses the primary visual block only; this model has no configured DeepStack outputs.")
 
-    passes = _encode_qwen_visual_sources(clip, model, device, full_prompt, images, thinking)
-    canonical, canonical_info, _, _ = _fuse_qwen_primary_sources(passes, config, device, {})
-    logging.info(
-        "TokenFusion visual-token fusion complete: fused %d Qwen3.5 visual sources into 1 block (%d visual tokens, no DeepStack).",
-        len(passes), canonical_info["size"],
-    )
-    fused_info = dict(canonical_info)
-    fused_info["extra"] = passes[0][2]
-    position_ids = qwen2vl_mrope_position_ids([fused_info], canonical.shape[1], canonical.device)
-    if position_ids is None:
-        raise ValueError("Qwen3.5 visual fusion could not rebuild multimodal MRoPE positions.")
-    context = model_management.cuda_device_context(device) if hasattr(model_management, "cuda_device_context") else nullcontext()
-    with context:
+    with _qwen_execution_context(clip, device):
+        passes = _encode_qwen_visual_sources(clip, model, device, full_prompt, images, thinking)
+        canonical, canonical_info, _, _ = _fuse_qwen_primary_sources(passes, config, device, {})
+        logging.info(
+            "TokenFusion visual-token fusion complete: fused %d Qwen3.5 visual sources into 1 block (%d visual tokens, no DeepStack).",
+            len(passes), canonical_info["size"],
+        )
+        fused_info = dict(canonical_info)
+        fused_info["extra"] = passes[0][2]
+        position_ids = qwen2vl_mrope_position_ids([fused_info], canonical.shape[1], canonical.device)
+        if position_ids is None:
+            raise ValueError("Qwen3.5 visual fusion could not rebuild multimodal MRoPE positions.")
         return model.transformer.generate(canonical, **generation_args, position_ids=position_ids)
 
 # -----------------------------------------------------------------------------
@@ -373,6 +378,13 @@ class UC_TextGenerate(io.ComfyNode):
                     tooltip="Optional image blend. Leave empty to keep images separate."
                 ),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Include model thinking text when available."),
+                io.Combo.Input(
+                    "mtp",
+                    options=["auto", "off", "2", "3", "4", "5"],
+                    default="auto",
+                    optional=True,
+                    tooltip="Multi-token speculative decoding when supported by the loaded model (auto adapts depth; off disables it).",
+                ),
                 io.Boolean.Input(
                     "escape_parentheses",
                     optional=True,
@@ -380,6 +392,12 @@ class UC_TextGenerate(io.ComfyNode):
                     tooltip="Prevents errors from parentheses left in generated text.",
                 ),
                 VisualFusionConfig.Input("visual_fusion_config", display_name="Fusion Config", optional=True, tooltip="Optional settings for combining images before generation."),
+                ResponseSchema.Input(
+                    "response_schema",
+                    display_name="Response Schema",
+                    optional=True,
+                    tooltip="Optional JSON Schema (such as from VLM System Instruction Presets or Configure Gemini Response Schema) to enforce structured JSON output.",
+                ),
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode", tooltip="On varies results using the seed. Off gives repeatable results."),
                 io.Image.Input(
                     "video",
@@ -421,9 +439,11 @@ class UC_TextGenerate(io.ComfyNode):
         sampling_mode,
         formula="",
         thinking=False,
+        mtp="auto",
         escape_parentheses=False,
         image_inputs=None,
         visual_fusion_config=None,
+        response_schema=None,
         video=None,
         video_fps=24.0,
         sample_fps=2.0,
@@ -431,6 +451,8 @@ class UC_TextGenerate(io.ComfyNode):
     ) -> io.NodeOutput:
         if clip is None:
             raise RuntimeError("ERROR: CLIP/TextEncoder input is invalid: None")
+
+        mtp_val = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
         template_name = detect_textgen_template(clip)
 
@@ -591,6 +613,12 @@ class UC_TextGenerate(io.ComfyNode):
         if not thinking and temp["suppress_thinking"]:
             full_prompt += temp["suppress_thinking"]
 
+        schema_active = isinstance(response_schema, dict) and bool(response_schema)
+        prefill_open = ""
+        if schema_active and not thinking:
+            prefill_open = "[" if response_schema.get("type") == "array" else "{"
+            full_prompt += prefill_open
+
         # 6. Setup Tokenizer Dispatch Arguments
         kwargs = {}
         if len(images_vl) > 0:
@@ -630,7 +658,8 @@ class UC_TextGenerate(io.ComfyNode):
             min_p=min_p,
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
-            seed=seed
+            seed=seed,
+            mtp=mtp_val,
         )
         attempts = empty_response_retries + 1 if do_sample and seed is not None else 1
         used_seed = int(seed) if seed is not None else 0
@@ -640,26 +669,31 @@ class UC_TextGenerate(io.ComfyNode):
                 used_seed = (int(seed) + attempt) & 0xffffffffffffffff
                 generation_args["seed"] = used_seed
 
-            if video_frames is not None:
-                generated_ids = generate_qwen3vl_video(
-                    clip,
-                    full_prompt,
-                    images_vl,
-                    video_frames,
-                    visual_fusion_config if fusion_active else None,
-                    generation_args,
-                    thinking,
-                )
-            elif fusion_active:
-                if template_name == "qwen3vl":
-                    generated_ids = generate_fused_qwen3vl(clip, full_prompt, images_vl, visual_fusion_config, generation_args, thinking)
+            with schema_guided_generation_context(clip, response_schema if schema_active else None, prefilled_open=prefill_open):
+                if video_frames is not None:
+                    generated_ids = generate_qwen3vl_video(
+                        clip,
+                        full_prompt,
+                        images_vl,
+                        video_frames,
+                        visual_fusion_config if fusion_active else None,
+                        generation_args,
+                        thinking,
+                    )
+                elif fusion_active:
+                    if template_name == "qwen3vl":
+                        generated_ids = generate_fused_qwen3vl(clip, full_prompt, images_vl, visual_fusion_config, generation_args, thinking)
+                    else:
+                        generated_ids = generate_fused_qwen35(clip, full_prompt, images_vl, visual_fusion_config, generation_args, thinking)
                 else:
-                    generated_ids = generate_fused_qwen35(clip, full_prompt, images_vl, visual_fusion_config, generation_args, thinking)
-            else:
-                generated_ids = clip.generate(tokens, **generation_args)
+                    generated_ids = clip.generate(tokens, **generation_args)
 
-            generated_text = clip.decode(generated_ids, skip_special_tokens=True)
-            if generated_text.strip():
+            generated_text = prefill_open + clip.decode(generated_ids, skip_special_tokens=True)
+            if schema_active:
+                generated_text, schema_valid = conform_and_validate_response_schema(generated_text, response_schema)
+                if schema_valid and generated_text.strip():
+                    break
+            elif generated_text.strip():
                 break
 
         if escape_parentheses:
@@ -710,6 +744,19 @@ class UC_TextGenerateQwen35SystemPrompt(io.ComfyNode):
                 io.Int.Input("max_length", default=512, min=1, max=8192),
                 io.Boolean.Input("thinking", optional=True, default=False,
                     tooltip="Include model thinking text when available."),
+                io.Combo.Input(
+                    "mtp",
+                    options=["auto", "off", "2", "3", "4", "5"],
+                    default="auto",
+                    optional=True,
+                    tooltip="Multi-token speculative decoding when supported by the loaded model (auto adapts depth; off disables it).",
+                ),
+                ResponseSchema.Input(
+                    "response_schema",
+                    display_name="Response Schema",
+                    optional=True,
+                    tooltip="Optional JSON Schema (such as from VLM System Instruction Presets or Configure Gemini Response Schema) to enforce structured JSON output.",
+                ),
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
             ],
             outputs=[
@@ -759,7 +806,9 @@ class UC_TextGenerateQwen35SystemPrompt(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, prompt, system_message, max_length, sampling_mode,
-                image=None, thinking=False) -> io.NodeOutput:
+                image=None, thinking=False, mtp="auto", response_schema=None) -> io.NodeOutput:
+
+        mtp_val = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
         formatted_prompt = cls._build_prompt(
             prompt=prompt,
@@ -767,6 +816,11 @@ class UC_TextGenerateQwen35SystemPrompt(io.ComfyNode):
             has_image=image is not None,
             thinking=thinking,
         )
+        schema_active = isinstance(response_schema, dict) and bool(response_schema)
+        prefill_open = ""
+        if schema_active and not thinking:
+            prefill_open = "[" if response_schema.get("type") == "array" else "{"
+            formatted_prompt += prefill_open
 
         # skip_template=True because we built the full template ourselves.
         # The tokenizer detects <|im_start|> prefix and skips its own template (qwen35.py:769).
@@ -787,18 +841,22 @@ class UC_TextGenerateQwen35SystemPrompt(io.ComfyNode):
         repetition_penalty = sampling_mode.get("repetition_penalty", 1.0)
         presence_penalty = sampling_mode.get("presence_penalty", 0.0)
 
-        generated_ids = clip.generate(
-            tokens,
-            do_sample=do_sample,
-            max_length=max_length,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            min_p=min_p,
-            repetition_penalty=repetition_penalty,
-            presence_penalty=presence_penalty,
-            seed=seed,
-        )
+        with schema_guided_generation_context(clip, response_schema if schema_active else None, prefilled_open=prefill_open):
+            generated_ids = clip.generate(
+                tokens,
+                do_sample=do_sample,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                repetition_penalty=repetition_penalty,
+                presence_penalty=presence_penalty,
+                seed=seed,
+                mtp=mtp_val,
+            )
 
-        generated_text = clip.decode(generated_ids, skip_special_tokens=True)
+        generated_text = prefill_open + clip.decode(generated_ids, skip_special_tokens=True)
+        if schema_active:
+            generated_text, _ = conform_and_validate_response_schema(generated_text, response_schema)
         return io.NodeOutput(generated_text)

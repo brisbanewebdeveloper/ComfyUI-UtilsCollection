@@ -28,7 +28,13 @@ except ImportError:
 
 import comfy.lora
 import comfy.ldm.common_dit
+from comfy.ldm.flux.math import apply_rope
 from comfy.ldm.ideogram4 import model as ideogram4_model
+from comfy.ldm.krea2 import model as krea2_model
+try:
+    from comfy.ldm.moss_image import model as moss_image_model
+except ImportError:
+    moss_image_model = None
 import comfy.ldm.modules.attention
 import comfy.model_management
 import comfy.model_patcher
@@ -60,6 +66,59 @@ MINIMAX_H3_VISION_END = 151653
 IDEOGRAM4_DEBANNER_WRAPPER_KEY = "utilscollection_ideogram4_debanner"
 IDEOGRAM4_DEBANNER_STATE_KEY = "utilscollection_ideogram4_debanner_state"
 IDEOGRAM4_DEBANNER_BUNDLE = Path(__file__).resolve().parent.parent / "models" / "ideogram4_correction_v1.safetensors"
+KREA2_NAG_DIFFUSION_WRAPPER_KEY = "utilscollection_krea2_nag_diffusion"
+KREA2_NAG_CALC_COND_WRAPPER_KEY = "utilscollection_krea2_nag_calc_cond"
+KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY = "utilscollection_krea2_nag_predict_noise"
+KREA2_NAG_STATE_KEY = "utilscollection_krea2_nag_state"
+KREA2_NAG_NEG_CONTEXT_KEY = "utilscollection_krea2_nag_neg_context"
+KREA2_NAG_CFG_SCALE_KEY = "utilscollection_krea2_nag_cfg_scale"
+KREA2_NAG_ATTN_STEP_KEY = "utilscollection_krea2_nag_attn_step"
+MOSS_IMAGE_TEMPORAL_DIFFUSION_WRAPPER_KEY = "utilscollection_moss_image_temporal_diffusion"
+MOSS_IMAGE_TEMPORAL_OUTER_SAMPLE_WRAPPER_KEY = "utilscollection_moss_image_temporal_outer_sample"
+MOSS_IMAGE_TEMPORAL_NOISE_MODES = ("flow_warp", "cosine_arc", "slerp", "ar1", "shared", "independent")
+MOSS_IMAGE_TEMPORAL_ATTENTION_MODES = ("tube_attention", "packed_sequence")
+MOSS_IMAGE_TEMPORAL_PRESETS: dict[str, dict[str, Any]] = {
+    "balanced": {
+        "attention_mode": "tube_attention",
+        "tube_window": 4,
+        "temporal_smoothing": 0.20,
+        "noise_mode": "flow_warp",
+        "noise_correlation": 0.85,
+        "attention_scale": 1.05,
+        "end_percent": 0.90,
+    },
+    "subtle_motion": {
+        "attention_mode": "tube_attention",
+        "tube_window": 4,
+        "temporal_smoothing": 0.25,
+        "noise_mode": "flow_warp",
+        "noise_correlation": 0.92,
+        "attention_scale": 1.05,
+        "end_percent": 0.92,
+    },
+    "strong_motion": {
+        "attention_mode": "tube_attention",
+        "tube_window": 6,
+        "temporal_smoothing": 0.15,
+        "noise_mode": "flow_warp",
+        "noise_correlation": 0.76,
+        "attention_scale": 1.08,
+        "end_percent": 0.85,
+    },
+    "character_consistency": {
+        "attention_mode": "tube_attention",
+        "tube_window": 0,
+        "temporal_smoothing": 0.05,
+        "noise_mode": "cosine_arc",
+        "noise_correlation": 0.80,
+        "attention_scale": 1.10,
+        "end_percent": 0.82,
+    },
+}
+_MOSS_TEMPORAL_ROPE_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "moss_temporal_rope_context",
+    default=None,
+)
 
 
 def _register_minimax_h3_projection_folder() -> None:
@@ -2570,3 +2629,1250 @@ def patch_ideogram4_debanner_model(model: Any, directions: dict[int, torch.Tenso
 
 def patch_ideogram4_debanner(model: Any, strength: float) -> Any:
     return patch_ideogram4_debanner_model(model, load_ideogram4_debanner_directions(), strength)
+
+
+def apply_nag_guidance(
+    z_pos: torch.Tensor,
+    z_neg: torch.Tensor,
+    nag_scale: float,
+    nag_tau: float,
+    nag_alpha: float,
+    eps: float = 1e-6,
+    heads: int | None = None,
+) -> torch.Tensor:
+    orig_shape = z_pos.shape
+    z_pos_f = z_pos.float()
+    z_neg_f = z_neg.float()
+    if heads is not None and heads > 1 and orig_shape[-1] % heads == 0:
+        head_shape = (*orig_shape[:-1], heads, orig_shape[-1] // heads)
+        z_pos_f = z_pos_f.reshape(head_shape)
+        z_neg_f = z_neg_f.reshape(head_shape)
+    guided = z_pos_f * nag_scale - z_neg_f * (nag_scale - 1.0)
+    norm_pos = torch.linalg.vector_norm(z_pos_f, ord=1, dim=-1, keepdim=True).clamp_min(eps)
+    norm_guided = torch.linalg.vector_norm(guided, ord=1, dim=-1, keepdim=True).clamp_min(eps)
+    ratio = norm_guided / norm_pos
+    scale_factor = torch.clamp(ratio, max=nag_tau) / ratio
+    guided_normalized = guided * scale_factor
+    z_final = guided_normalized * nag_alpha + z_pos_f * (1.0 - nag_alpha)
+    return z_final.reshape(orig_shape).to(dtype=z_pos.dtype)
+
+
+def _extract_krea2_cross_attn(cond_source: Any) -> torch.Tensor | None:
+    if torch.is_tensor(cond_source):
+        return cond_source
+    if isinstance(cond_source, Sequence) and len(cond_source) > 0:
+        first = cond_source[0]
+        if isinstance(first, (list, tuple)) and len(first) > 0 and torch.is_tensor(first[0]):
+            return first[0]
+        if isinstance(first, dict):
+            model_conds = first.get("model_conds")
+            if isinstance(model_conds, dict) and "c_crossattn" in model_conds:
+                c_ca = model_conds["c_crossattn"]
+                tensor = getattr(c_ca, "cond", c_ca)
+                if torch.is_tensor(tensor):
+                    return tensor
+            if torch.is_tensor(first.get("cross_attn")):
+                return first["cross_attn"]
+            if torch.is_tensor(first.get("c_crossattn")):
+                return first["c_crossattn"]
+    return None
+
+
+def _is_krea2_nag_sigma_active(
+    sigma_source: Any,
+    sigma_window: tuple[float, float] | None,
+) -> bool:
+    if sigma_window is None or sigma_source is None:
+        return True
+    sigma_start, sigma_end = sigma_window
+    if torch.is_tensor(sigma_source):
+        if sigma_source.numel() == 0:
+            return True
+        sigma_val = float(sigma_source.reshape(-1)[0].detach().cpu().item())
+    elif isinstance(sigma_source, Sequence) and len(sigma_source) > 0:
+        first = sigma_source[0]
+        sigma_val = float(first.detach().cpu().item()) if torch.is_tensor(first) else float(first)
+    else:
+        sigma_val = float(sigma_source)
+    return (sigma_end - 1e-5) <= sigma_val <= (sigma_start + 1e-5)
+
+
+def _krea2_nag_post_input_patch(args: dict[str, Any]) -> dict[str, Any]:
+    transformer_options = args["transformer_options"]
+    state = transformer_options.get(KREA2_NAG_STATE_KEY)
+    if state is None:
+        return args
+
+    dit = state["dit"]
+    img = args["img"]
+    context = args["txt"]
+    imgpos = args["img_ids"]
+    txtpos = args["txt_ids"]
+    bs = context.shape[0]
+
+    neg_context = state["neg_context"]
+    neg_context = comfy.model_management.cast_to_device(neg_context, context.device, context.dtype)
+    neg_context = comfy.utils.repeat_to_batch_size(neg_context, bs)
+    neg_unpacked = dit._unpack_context(neg_context)
+    txt_neg = dit.txtfusion(neg_unpacked, mask=None, transformer_options=transformer_options)
+    txt_neg = dit.txtmlp(txt_neg)
+
+    l_pos = context.shape[1]
+    l_neg = txt_neg.shape[1]
+    neg_key_log_scale = 0.0
+    if 0 < l_neg < l_pos:
+        idx = torch.arange(l_pos, device=txt_neg.device) % l_neg
+        txt_neg = txt_neg[:, idx, :]
+        l_neg = l_pos
+    elif l_neg > l_pos > 0:
+        neg_key_log_scale = math.log(l_pos / l_neg)
+
+    ref_num_tokens = transformer_options.get("reference_image_num_tokens")
+    ref_total = sum(ref_num_tokens) if ref_num_tokens else 0
+    img_tokens = img.shape[1] - ref_total
+
+    txtpos_neg = torch.zeros(bs, l_neg, 3, device=imgpos.device, dtype=imgpos.dtype)
+    if ref_total > 0:
+        img = torch.cat((img[:, :img_tokens], txt_neg, img[:, img_tokens:]), dim=1)
+        imgpos = torch.cat((imgpos[:, :img_tokens], txtpos_neg, imgpos[:, img_tokens:]), dim=1)
+    else:
+        img = torch.cat((img, txt_neg), dim=1)
+        imgpos = torch.cat((imgpos, txtpos_neg), dim=1)
+
+    state["l_pos"] = l_pos
+    state["img_tokens"] = img_tokens
+    state["l_neg"] = l_neg
+    state["ref_total"] = ref_total
+    state["neg_key_log_scale"] = neg_key_log_scale
+    return {
+        "img": img,
+        "txt": context,
+        "img_ids": imgpos,
+        "txt_ids": txtpos,
+        "transformer_options": transformer_options,
+    }
+
+
+def _krea2_nag_attn1_patch(q, k, v, pe=None, attn_mask=None, extra_options=None):
+    if extra_options is None:
+        return {"q": q, "k": k, "v": v, "pe": pe, "attn_mask": attn_mask}
+    state = extra_options.get(KREA2_NAG_STATE_KEY)
+    if state is None or "l_neg" not in state:
+        return {"q": q, "k": k, "v": v, "pe": pe, "attn_mask": attn_mask}
+
+    if pe is not None:
+        q, k = apply_rope(q, k, pe)
+
+    l_pos = state["l_pos"]
+    img_tokens = state["img_tokens"]
+    l_neg = state["l_neg"]
+    ref_total = state["ref_total"]
+    neg_start = l_pos + img_tokens
+    neg_end = neg_start + l_neg
+
+    if ref_total > 0:
+        q_pos = torch.cat((q[:, :, :neg_start, :], q[:, :, neg_end:, :]), dim=2)
+        k_pos = torch.cat((k[:, :, :neg_start, :], k[:, :, neg_end:, :]), dim=2)
+        v_pos = torch.cat((v[:, :, :neg_start, :], v[:, :, neg_end:, :]), dim=2)
+        q_neg = torch.cat((q[:, :, neg_start:neg_end, :], q[:, :, l_pos:neg_start, :], q[:, :, neg_end:, :]), dim=2)
+        k_neg = torch.cat((k[:, :, neg_start:neg_end, :], k[:, :, l_pos:neg_start, :], k[:, :, neg_end:, :]), dim=2)
+        v_neg = torch.cat((v[:, :, neg_start:neg_end, :], v[:, :, l_pos:neg_start, :], v[:, :, neg_end:, :]), dim=2)
+    else:
+        q_pos = q[:, :, :neg_start, :]
+        k_pos = k[:, :, :neg_start, :]
+        v_pos = v[:, :, :neg_start, :]
+        q_neg = torch.cat((q[:, :, neg_start:, :], q[:, :, l_pos:neg_start, :]), dim=2)
+        k_neg = torch.cat((k[:, :, neg_start:, :], k[:, :, l_pos:neg_start, :]), dim=2)
+        v_neg = torch.cat((v[:, :, neg_start:, :], v[:, :, l_pos:neg_start, :]), dim=2)
+
+    extra_options[KREA2_NAG_ATTN_STEP_KEY] = (q_neg, k_neg, v_neg, attn_mask)
+    return {"q": q_pos, "k": k_pos, "v": v_pos, "pe": None, "attn_mask": attn_mask}
+
+
+def _krea2_nag_attn1_output_patch(out_pos, extra_options):
+    if extra_options is None:
+        return out_pos
+    step_tensors = extra_options.pop(KREA2_NAG_ATTN_STEP_KEY, None)
+    state = extra_options.get(KREA2_NAG_STATE_KEY)
+    if step_tensors is None or state is None:
+        return out_pos
+
+    q_neg, k_neg, v_neg, attn_mask = step_tensors
+    heads = q_neg.shape[1]
+    if k_neg.shape[1] != heads:
+        rep = heads // k_neg.shape[1]
+        k_neg = k_neg.repeat_interleave(rep, dim=1)
+        v_neg = v_neg.repeat_interleave(rep, dim=1)
+
+    dit = state["dit"]
+    block_index = extra_options.get("block_index", 0)
+    preferred_attention = None
+    if hasattr(dit, "blocks") and block_index < len(dit.blocks):
+        preferred_attention = getattr(dit.blocks[block_index].attn, "comfy_attention", None)
+
+    l_pos = state["l_pos"]
+    img_tokens = state["img_tokens"]
+    l_neg = state["l_neg"]
+    ref_total = state["ref_total"]
+    neg_key_log_scale = state.get("neg_key_log_scale", 0.0)
+    neg_mask = attn_mask
+    if neg_key_log_scale != 0.0:
+        bias = q_neg.new_zeros(1, 1, 1, k_neg.shape[2])
+        bias[..., :l_neg] = neg_key_log_scale
+        if neg_mask is None:
+            neg_mask = bias
+        elif neg_mask.dtype == torch.bool:
+            additive = torch.zeros(neg_mask.shape, device=neg_mask.device, dtype=q_neg.dtype)
+            additive.masked_fill_(~neg_mask, -torch.finfo(q_neg.dtype).max)
+            neg_mask = additive + bias
+        else:
+            neg_mask = neg_mask.to(dtype=q_neg.dtype) + bias
+
+    q_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(q_neg)
+    k_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(k_neg)
+    v_neg_c = comfy.ldm.modules.attention.AttentionTensorContainer(v_neg)
+    out_neg = comfy.ldm.modules.attention.optimized_attention_masked(
+        q_neg_c,
+        k_neg_c,
+        v_neg_c,
+        heads,
+        mask=neg_mask,
+        skip_reshape=True,
+        preferred_attention=preferred_attention,
+        transformer_options=extra_options,
+    )
+
+    z_img_pos = out_pos[:, l_pos : l_pos + img_tokens, :]
+    z_img_neg = out_neg[:, l_neg : l_neg + img_tokens, :]
+    z_img_nag = apply_nag_guidance(
+        z_img_pos,
+        z_img_neg,
+        nag_scale=state["nag_scale"],
+        nag_tau=state["nag_tau"],
+        nag_alpha=state["nag_alpha"],
+        heads=heads,
+    )
+
+    if ref_total > 0:
+        return torch.cat(
+            (
+                out_pos[:, :l_pos, :],
+                z_img_nag,
+                out_neg[:, :l_neg, :],
+                out_pos[:, l_pos + img_tokens :, :],
+            ),
+            dim=1,
+        )
+    return torch.cat((out_pos[:, :l_pos, :], z_img_nag, out_neg[:, :l_neg, :]), dim=1)
+
+
+_krea2_nag_post_input_patch._uc_krea2_nag_patch = True
+_krea2_nag_attn1_patch._uc_krea2_nag_patch = True
+_krea2_nag_attn1_output_patch._uc_krea2_nag_patch = True
+
+
+def _make_krea2_nag_block_forward(original: Callable[..., torch.Tensor]):
+    def forward(self, x, vec, freqs, mask=None, timestep_zero_index=None, transformer_options={}):
+        if timestep_zero_index is not None:
+            state = transformer_options.get(KREA2_NAG_STATE_KEY)
+            if state is not None and "l_neg" in state:
+                timestep_zero_index = timestep_zero_index + state["l_neg"]
+        return original(
+            x,
+            vec,
+            freqs,
+            mask=mask,
+            timestep_zero_index=timestep_zero_index,
+            transformer_options=transformer_options,
+        )
+
+    return forward
+
+
+def _make_krea2_nag_diffusion_wrapper(
+    nag_scale: float,
+    nag_tau: float,
+    nag_alpha: float,
+    sigma_window: tuple[float, float] | None,
+    explicit_neg_context: torch.Tensor | None,
+):
+    def wrapper(executor, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
+        options = {} if transformer_options is None else dict(transformer_options)
+        options.pop(KREA2_NAG_STATE_KEY, None)
+
+        cond_or_uncond = options.get("cond_or_uncond")
+        if cond_or_uncond is not None and 0 not in cond_or_uncond:
+            return executor(x, timesteps, context, attention_mask, ref_latents, options, **kwargs)
+
+        neg_context = options.get(KREA2_NAG_NEG_CONTEXT_KEY, explicit_neg_context)
+        sigma_source = options.get("sigmas", timesteps)
+        if neg_context is not None and context is not None and _is_krea2_nag_sigma_active(sigma_source, sigma_window):
+            options[KREA2_NAG_STATE_KEY] = {
+                "dit": executor.class_obj,
+                "neg_context": neg_context,
+                "nag_scale": nag_scale,
+                "nag_tau": nag_tau,
+                "nag_alpha": nag_alpha,
+            }
+        return executor(x, timesteps, context, attention_mask, ref_latents, options, **kwargs)
+
+    return wrapper
+
+
+def _make_krea2_nag_predict_noise_wrapper():
+    def wrapper(executor, x, timestep, model_options={}, seed=None):
+        guider = executor.class_obj
+        cfg = getattr(guider, "cfg", None)
+        options = comfy.model_patcher.create_model_options_clone(model_options)
+        options.setdefault("transformer_options", {})[KREA2_NAG_CFG_SCALE_KEY] = cfg
+        return executor(x, timestep, options, seed)
+
+    return wrapper
+
+
+def _make_krea2_nag_calc_cond_batch_wrapper(
+    sigma_window: tuple[float, float] | None,
+    explicit_neg_context: torch.Tensor | None,
+):
+    def wrapper(executor, model, conds, x_in, timestep, model_options):
+        if not conds or conds[0] is None:
+            return executor(model, conds, x_in, timestep, model_options)
+
+        uncond = conds[1] if len(conds) > 1 else None
+        neg_context = explicit_neg_context if explicit_neg_context is not None else _extract_krea2_cross_attn(uncond)
+        active = neg_context is not None and _is_krea2_nag_sigma_active(timestep, sigma_window)
+
+        transformer_options = model_options.get("transformer_options", {})
+        cfg = transformer_options.get(KREA2_NAG_CFG_SCALE_KEY)
+        has_custom_cfg = (
+            "sampler_cfg_function" in model_options
+            or bool(model_options.get("sampler_pre_cfg_function"))
+            or bool(model_options.get("sampler_post_cfg_function"))
+        )
+        skip_uncond = cfg is not None and math.isclose(float(cfg), 1.0) and not has_custom_cfg
+
+        if not active:
+            if skip_uncond and uncond is not None:
+                return executor(model, [conds[0], None], x_in, timestep, model_options)
+            return executor(model, conds, x_in, timestep, model_options)
+
+        pos_options = comfy.model_patcher.create_model_options_clone(model_options)
+        pos_options.setdefault("transformer_options", {})[KREA2_NAG_NEG_CONTEXT_KEY] = neg_context
+
+        if uncond is None or skip_uncond:
+            conds_to_run = [conds[0], None] if len(conds) > 1 else [conds[0]]
+            return executor(model, conds_to_run, x_in, timestep, pos_options)
+
+        out_pos = executor(model, [conds[0], None], x_in, timestep, pos_options)[0]
+        out_neg = executor(model, [None, uncond], x_in, timestep, model_options)[1]
+        return [out_pos, out_neg]
+
+    return wrapper
+
+
+def patch_krea2_nag_model(
+    model: Any,
+    nag_scale: float = 5.0,
+    nag_tau: float = 2.5,
+    nag_alpha: float = 0.25,
+    start_percent: float = 0.0,
+    end_percent: float = 1.0,
+    nag_negative: Any = None,
+) -> Any:
+    nag_scale = float(nag_scale)
+    nag_tau = float(nag_tau)
+    nag_alpha = float(nag_alpha)
+    start_percent = float(start_percent)
+    end_percent = float(end_percent)
+
+    if nag_scale < 0.0:
+        raise ValueError("Krea2 NAG scale must be nonnegative.")
+    if nag_tau <= 0.0:
+        raise ValueError("Krea2 NAG tau must be positive.")
+    if not 0.0 <= nag_alpha <= 1.0:
+        raise ValueError("Krea2 NAG alpha must be between 0.0 and 1.0.")
+    if not 0.0 <= start_percent <= 1.0 or not 0.0 <= end_percent <= 1.0:
+        raise ValueError("Krea2 NAG start_percent and end_percent must be between 0.0 and 1.0.")
+
+    diffusion_model = model.get_model_object("diffusion_model")
+    if not isinstance(diffusion_model, krea2_model.SingleStreamDiT):
+        raise ValueError("Krea2 NAG requires a Krea2 SingleStreamDiT diffusion model.")
+
+    explicit_neg_context = None
+    if nag_negative is not None:
+        explicit_neg_context = _extract_krea2_cross_attn(nag_negative)
+        if explicit_neg_context is None:
+            raise ValueError("Krea2 NAG nag_negative must contain a valid conditioning tensor.")
+
+    patched = model.clone()
+    if nag_alpha == 0.0 or nag_scale <= 1.0 or start_percent >= end_percent:
+        return patched
+
+    sigma_window: tuple[float, float] | None = None
+    if start_percent > 0.0 or end_percent < 1.0:
+        model_sampling = patched.get_model_object("model_sampling")
+        if model_sampling is not None:
+            sigma_window = (
+                float(model_sampling.percent_to_sigma(start_percent)),
+                float(model_sampling.percent_to_sigma(end_percent)),
+            )
+
+    patches = patched.model_options.setdefault("transformer_options", {}).setdefault("patches", {})
+    for patch_name in ("post_input", "attn1_patch", "attn1_output_patch"):
+        if patch_name in patches:
+            patches[patch_name] = [
+                fn for fn in patches[patch_name] if not getattr(fn, "_uc_krea2_nag_patch", False)
+            ]
+
+    patched.set_model_post_input_patch(_krea2_nag_post_input_patch)
+    patched.set_model_attn1_patch(_krea2_nag_attn1_patch)
+    patched.set_model_attn1_output_patch(_krea2_nag_attn1_output_patch)
+
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+        KREA2_NAG_DIFFUSION_WRAPPER_KEY,
+        _make_krea2_nag_diffusion_wrapper(nag_scale, nag_tau, nag_alpha, sigma_window, explicit_neg_context),
+    )
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.PREDICT_NOISE,
+        KREA2_NAG_PREDICT_NOISE_WRAPPER_KEY,
+        _make_krea2_nag_predict_noise_wrapper(),
+    )
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.CALC_COND_BATCH,
+        KREA2_NAG_CALC_COND_WRAPPER_KEY,
+        _make_krea2_nag_calc_cond_batch_wrapper(sigma_window, explicit_neg_context),
+    )
+
+    if hasattr(diffusion_model, "blocks"):
+        for index, block in enumerate(diffusion_model.blocks):
+            patched_forward = types.MethodType(_make_krea2_nag_block_forward(block.forward), block)
+            patched.add_object_patch(f"diffusion_model.blocks.{index}.forward", patched_forward)
+
+    if explicit_neg_context is None:
+        patched.disable_model_cfg1_optimization()
+
+    return patched
+
+
+def _is_moss_image_diffusion_model(diffusion_model: Any) -> bool:
+    if diffusion_model is None:
+        return False
+    if moss_image_model is not None and isinstance(diffusion_model, moss_image_model.MOSSImage):
+        return True
+    return (
+        hasattr(diffusion_model, "video_embedder")
+        and hasattr(diffusion_model, "final_linear_video")
+        and hasattr(diffusion_model, "rope")
+    )
+
+
+def _reflect_grid_coord(coord: torch.Tensor, size: int) -> torch.Tensor:
+    if size <= 1:
+        return torch.zeros_like(coord)
+    period = 2.0 * float(size - 1)
+    wrapped = torch.remainder(coord, period)
+    return torch.where(wrapped > float(size - 1), period - wrapped, wrapped)
+
+
+def _warp_noise_variance_preserved(base: torch.Tensor, dy: torch.Tensor, dx: torch.Tensor) -> torch.Tensor:
+    # base: [N, C, H, W], dy/dx: [N, 1, H, W] in latent pixel units
+    num_clips, channels, h, w = base.shape
+    device = base.device
+    dtype = base.dtype
+
+    grid_y = torch.arange(h, device=device, dtype=dtype).view(1, 1, h, 1) - dy
+    grid_x = torch.arange(w, device=device, dtype=dtype).view(1, 1, 1, w) - dx
+    src_y = _reflect_grid_coord(grid_y.expand(num_clips, 1, h, w), h)
+    src_x = _reflect_grid_coord(grid_x.expand(num_clips, 1, h, w), w)
+
+    y0 = torch.floor(src_y).to(torch.long).clamp(0, max(0, h - 1))
+    x0 = torch.floor(src_x).to(torch.long).clamp(0, max(0, w - 1))
+    y1 = (y0 + 1).clamp(0, max(0, h - 1))
+    x1 = (x0 + 1).clamp(0, max(0, w - 1))
+
+    fy = torch.where(y0 == y1, torch.zeros_like(src_y), (src_y - y0.to(dtype)).clamp(0.0, 1.0))
+    fx = torch.where(x0 == x1, torch.zeros_like(src_x), (src_x - x0.to(dtype)).clamp(0.0, 1.0))
+
+    w00 = (1.0 - fy) * (1.0 - fx)
+    w01 = (1.0 - fy) * fx
+    w10 = fy * (1.0 - fx)
+    w11 = fy * fx
+    var_norm = torch.sqrt((w00 * w00 + w01 * w01 + w10 * w10 + w11 * w11).clamp_min(1e-8))
+
+    flat_base = base.reshape(num_clips, channels, h * w)
+    idx00 = (y0 * w + x0).reshape(num_clips, 1, h * w).expand(num_clips, channels, h * w)
+    idx01 = (y0 * w + x1).reshape(num_clips, 1, h * w).expand(num_clips, channels, h * w)
+    idx10 = (y1 * w + x0).reshape(num_clips, 1, h * w).expand(num_clips, channels, h * w)
+    idx11 = (y1 * w + x1).reshape(num_clips, 1, h * w).expand(num_clips, channels, h * w)
+
+    v00 = torch.gather(flat_base, 2, idx00).reshape(num_clips, channels, h, w)
+    v01 = torch.gather(flat_base, 2, idx01).reshape(num_clips, channels, h, w)
+    v10 = torch.gather(flat_base, 2, idx10).reshape(num_clips, channels, h, w)
+    v11 = torch.gather(flat_base, 2, idx11).reshape(num_clips, channels, h, w)
+
+    return (w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11) / var_norm
+
+
+def _smooth_displacement_field(seed_tensor: torch.Tensor, h: int, w: int) -> tuple[torch.Tensor, torch.Tensor]:
+    # Extracts a smooth 2D displacement field (vy, vx) of shape [N, 1, H, W] from a seed noise tensor [N, C, H, W]
+    num_clips, channels, _, _ = seed_tensor.shape
+    if channels >= 2:
+        raw_uv = seed_tensor[:, :2]
+    else:
+        raw_uv = torch.cat((seed_tensor[:, :1], seed_tensor[:, :1].flip(-1)), dim=1)
+    coarse_h = min(max(2, h), 3)
+    coarse_w = min(max(2, w), 3)
+    coarse = F.adaptive_avg_pool2d(raw_uv, (coarse_h, coarse_w))
+    smooth = F.interpolate(coarse, size=(h, w), mode="bilinear", align_corners=True)
+    std = smooth.std(dim=(-2, -1), keepdim=True).clamp_min(1e-5)
+    smooth = smooth / std
+    if h > 2 and w > 2:
+        taper_y = 0.35 + 0.65 * torch.sin(math.pi * torch.linspace(0.0, 1.0, h, device=seed_tensor.device, dtype=seed_tensor.dtype)).view(1, 1, h, 1)
+        taper_x = 0.35 + 0.65 * torch.sin(math.pi * torch.linspace(0.0, 1.0, w, device=seed_tensor.device, dtype=seed_tensor.dtype)).view(1, 1, 1, w)
+        smooth = smooth * (taper_y * taper_x)
+    return smooth[:, 0:1], smooth[:, 1:2]
+
+
+def correlate_moss_temporal_noise(
+    noise: torch.Tensor,
+    frames_per_clip: int = 0,
+    noise_mode: str = "flow_warp",
+    noise_correlation: float = 0.85,
+    loop: bool = False,
+) -> torch.Tensor:
+    noise_mode = str(noise_mode)
+    if noise_mode not in MOSS_IMAGE_TEMPORAL_NOISE_MODES:
+        raise ValueError(f"Unsupported MOSS-Image temporal noise_mode: {noise_mode}")
+    rho = float(noise_correlation)
+    if not 0.0 <= rho <= 1.0:
+        raise ValueError("MOSS-Image temporal noise_correlation must be between 0.0 and 1.0.")
+    if not torch.is_tensor(noise) or noise.ndim < 2 or noise_mode == "independent":
+        return noise
+
+    total_frames = int(noise.shape[0])
+    clip_frames = int(frames_per_clip) if int(frames_per_clip) > 0 else total_frames
+    if clip_frames <= 1 or total_frames < clip_frames or total_frames % clip_frames != 0:
+        return noise
+
+    num_clips = total_frames // clip_frames
+    clips = noise.to(torch.float32).reshape(num_clips, clip_frames, *noise.shape[1:])
+
+    if noise_mode == "shared" or (rho >= 1.0 and noise_mode != "flow_warp"):
+        out = clips[:, :1].expand_as(clips).clone()
+        return out.reshape_as(noise).to(dtype=noise.dtype)
+
+    sigma = math.sqrt(max(0.0, 1.0 - rho * rho))
+    out = torch.empty_like(clips)
+
+    if noise_mode == "flow_warp" and noise.ndim == 4:
+        _, _, _, h, w = clips.shape
+        e0 = clips[:, 0]
+        e1 = clips[:, 1]
+        e2 = clips[:, 2] if clip_frames >= 3 else -e1
+        vy1, vx1 = _smooth_displacement_field(e1, h, w)
+        vy2, vx2 = _smooth_displacement_field(e2, h, w)
+        max_shift = max(1.0, 0.12 * float(min(h, w))) * max(0.25, 1.15 - 0.5 * rho)
+        for k in range(clip_frames):
+            if loop:
+                theta = (2.0 * math.pi * k) / clip_frames
+                dy = max_shift * (0.5 * (1.0 - math.cos(theta)) * vy1 + 0.5 * math.sin(theta) * vy2)
+                dx = max_shift * (0.5 * (1.0 - math.cos(theta)) * vx1 + 0.5 * math.sin(theta) * vx2)
+            else:
+                frac = float(k) / float(clip_frames - 1)
+                theta = 0.5 * math.pi * frac
+                dy = max_shift * frac * vy1
+                dx = max_shift * frac * vx1
+            warped_e0 = _warp_noise_variance_preserved(e0, dy, dx) if k > 0 else e0
+            if clip_frames == 2 and k == 0:
+                out[:, k] = e0
+            elif clip_frames == 2:
+                out[:, k] = rho * warped_e0 + sigma * e1
+            else:
+                arc = math.cos(theta) * e1 + math.sin(theta) * e2
+                out[:, k] = rho * warped_e0 + sigma * arc
+    elif noise_mode in ("cosine_arc", "flow_warp"):
+        e0 = clips[:, 0]
+        e1 = clips[:, 1]
+        if clip_frames == 2:
+            out[:, 0] = e0
+            out[:, 1] = rho * e0 + sigma * e1
+        else:
+            e2 = clips[:, 2]
+            for k in range(clip_frames):
+                if loop:
+                    theta = (2.0 * math.pi * k) / clip_frames
+                else:
+                    theta = (0.5 * math.pi * k) / (clip_frames - 1)
+                arc = math.cos(theta) * e1 + math.sin(theta) * e2
+                out[:, k] = rho * e0 + sigma * arc
+    elif noise_mode == "slerp":
+        u0 = clips[:, 0].flatten(1)
+        u1 = (rho * clips[:, 0] + sigma * clips[:, 1]).flatten(1)
+        norm0 = u0.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        norm1 = u1.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        dot = ((u0 / norm0) * (u1 / norm1)).sum(dim=-1, keepdim=True).clamp(-0.999999, 0.999999)
+        omega = torch.acos(dot)
+        sin_omega = torch.sin(omega)
+        use_lerp = sin_omega.abs() < 1e-5
+        for k in range(clip_frames):
+            if loop:
+                alpha = 0.5 * (1.0 - math.cos((2.0 * math.pi * k) / clip_frames))
+            else:
+                alpha = float(k) / float(clip_frames - 1)
+            w0 = torch.sin((1.0 - alpha) * omega) / sin_omega.clamp_min(1e-6)
+            w1 = torch.sin(alpha * omega) / sin_omega.clamp_min(1e-6)
+            if torch.any(use_lerp):
+                lerp_denom = math.sqrt(max(1e-8, (1.0 - alpha) ** 2 + alpha**2 + 2.0 * alpha * (1.0 - alpha) * rho))
+                w0 = torch.where(use_lerp, torch.full_like(w0, (1.0 - alpha) / lerp_denom), w0)
+                w1 = torch.where(use_lerp, torch.full_like(w1, alpha / lerp_denom), w1)
+            frame_flat = w0 * u0 + w1 * u1
+            out[:, k] = frame_flat.reshape(num_clips, *noise.shape[1:])
+    elif noise_mode == "ar1":
+        out[:, 0] = clips[:, 0]
+        for k in range(1, clip_frames):
+            out[:, k] = rho * out[:, k - 1] + sigma * clips[:, k]
+        if loop and clip_frames >= 3 and rho > 0.0:
+            z0 = out[:, 0].clone()
+            for k in range(1, clip_frames):
+                w = (float(k) / float(clip_frames)) * rho
+                corr_k0 = rho**k
+                var_scale = math.sqrt(max(1e-8, (1.0 - w) ** 2 + w * w + 2.0 * w * (1.0 - w) * corr_k0))
+                out[:, k] = ((1.0 - w) * out[:, k] + w * z0) / var_scale
+
+    return out.reshape_as(noise).to(dtype=noise.dtype)
+
+
+def build_moss_temporal_rope_ids(
+    frames: int,
+    h: int,
+    w: int,
+    text_len: int,
+    temporal_stride: float = 1.0,
+    reference_stride: float = 0.0,
+    loop: bool = False,
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    frames = max(1, int(frames))
+    h = int(h)
+    w = int(w)
+    text_len = int(text_len)
+    pixels_per_frame = h * w
+    visual_tokens = frames * pixels_per_frame
+
+    ids = torch.zeros(visual_tokens + text_len, 4, device=device, dtype=torch.float32)
+    if frames == 1:
+        tau = torch.zeros(1, device=device, dtype=torch.float32)
+    elif loop:
+        k = torch.arange(frames, device=device, dtype=torch.float32)
+        tau = 0.5 * (frames - 1) * (1.0 - torch.cos(2.0 * math.pi * k / frames))
+    else:
+        tau = torch.arange(frames, device=device, dtype=torch.float32)
+
+    if float(reference_stride) != 0.0:
+        ids[:visual_tokens, 0] = (tau * float(reference_stride)).repeat_interleave(pixels_per_frame)
+    ids[:visual_tokens, 1] = (float(text_len) + tau * float(temporal_stride)).repeat_interleave(pixels_per_frame)
+    row_coords = (torch.arange(h, device=device, dtype=torch.float32) - (h - 1) / 2.0).repeat_interleave(w)
+    col_coords = (torch.arange(w, device=device, dtype=torch.float32) - (w - 1) / 2.0).repeat(h)
+    ids[:visual_tokens, 2] = row_coords.repeat(frames)
+    ids[:visual_tokens, 3] = col_coords.repeat(frames)
+    ids[visual_tokens:, 1] = torch.arange(text_len, device=device, dtype=torch.float32)
+    return ids
+
+
+def _compute_moss_temporal_pe(
+    diffusion_model: Any,
+    ids: torch.Tensor,
+    visual_tokens: int,
+    attention_scale: float,
+) -> torch.Tensor:
+    if hasattr(diffusion_model, "pe_embedder"):
+        pe = diffusion_model.pe_embedder(ids.unsqueeze(0)).transpose(1, 2).contiguous()
+    else:
+        rope_mod = diffusion_model.rope
+        if hasattr(rope_mod, "_default_bands"):
+            bands = rope_mod._default_bands(ids.device)
+        else:
+            bands = rope_mod.bands.to(device=ids.device, dtype=torch.float32)
+        phase = ids.unsqueeze(-1) * bands
+        pe = torch.cat((phase.sin(), phase.cos()), -2).flatten(-2).unsqueeze(0)
+
+    if float(attention_scale) != 1.0 and visual_tokens > 0:
+        scale = math.sqrt(float(attention_scale))
+        pe = pe.clone()
+        if pe.ndim == 6:
+            pe[:, :, :visual_tokens] = pe[:, :, :visual_tokens] * scale
+        else:
+            pe[:, :visual_tokens] = pe[:, :visual_tokens] * scale
+    return pe
+
+
+def _make_moss_temporal_rope_callable(diffusion_model: Any, original_rope: Callable[..., torch.Tensor]):
+    def temporal_rope(h: int, w: int, text_len: int, device: torch.device):
+        ctx = _MOSS_TEMPORAL_ROPE_CONTEXT.get()
+        if ctx is None:
+            return original_rope(h, w, text_len, device)
+        frames = int(ctx["frames"])
+        frame_h = int(ctx["frame_h"])
+        frame_w = int(ctx["frame_w"])
+        if frames <= 1 or int(h) != frames * frame_h or int(w) != frame_w:
+            return original_rope(h, w, text_len, device)
+        ids = build_moss_temporal_rope_ids(
+            frames=frames,
+            h=frame_h,
+            w=frame_w,
+            text_len=int(text_len),
+            temporal_stride=float(ctx["temporal_stride"]),
+            reference_stride=float(ctx["reference_stride"]),
+            loop=bool(ctx["loop"]),
+            device=device,
+        )
+        return _compute_moss_temporal_pe(
+            diffusion_model=diffusion_model,
+            ids=ids,
+            visual_tokens=frames * frame_h * frame_w,
+            attention_scale=float(ctx["attention_scale"]),
+        )
+
+    return temporal_rope
+
+
+def _make_moss_temporal_outer_sample_wrapper(
+    state: dict[str, Any],
+    frames_per_clip: int,
+    noise_mode: str,
+    noise_correlation: float,
+    loop: bool,
+):
+    def outer_sample_wrapper(
+        executor,
+        noise,
+        latent_image,
+        sampler,
+        sigmas,
+        denoise_mask=None,
+        callback=None,
+        disable_pbar=False,
+        seed=None,
+        **kwargs,
+    ):
+        if torch.is_tensor(noise) and noise.ndim >= 2:
+            total_frames = int(noise.shape[0])
+            resolved_frames = int(frames_per_clip) if int(frames_per_clip) > 0 else total_frames
+            state["active_clip_frames"] = resolved_frames
+            if resolved_frames > 1 and total_frames >= resolved_frames and total_frames % resolved_frames == 0:
+                noise = correlate_moss_temporal_noise(
+                    noise,
+                    frames_per_clip=resolved_frames,
+                    noise_mode=noise_mode,
+                    noise_correlation=noise_correlation,
+                    loop=loop,
+                )
+        return executor(
+            noise,
+            latent_image,
+            sampler,
+            sigmas,
+            denoise_mask,
+            callback,
+            disable_pbar,
+            seed,
+            **kwargs,
+        )
+
+    return outer_sample_wrapper
+
+
+def _make_moss_uncond_skip_block_replace(cond_or_uncond: Sequence[int]):
+    cond_flags = tuple(int(flag) for flag in cond_or_uncond)
+    all_uncond = bool(cond_flags) and all(flag == 1 for flag in cond_flags)
+
+    def block_replace(args: dict[str, Any], extra_args: dict[str, Any]) -> dict[str, Any]:
+        if all_uncond:
+            return {"img": args["img"]}
+        out = extra_args["original_block"](args)["img"]
+        if out.shape[0] == len(cond_flags) and any(flag == 1 for flag in cond_flags):
+            out = out.clone()
+            for idx, flag in enumerate(cond_flags):
+                if flag == 1:
+                    out[idx] = args["img"][idx]
+        return {"img": out}
+
+    return block_replace
+
+
+def _run_moss_temporal_tube_attention(
+    q_vis: torch.Tensor,
+    k_vis: torch.Tensor,
+    v_vis: torch.Tensor,
+    num_clips: int,
+    clip_frames: int,
+    frame_h: int,
+    frame_w: int,
+    heads: int,
+    head_dim: int,
+    tube_window: int,
+    attention_scale: float,
+    loop: bool,
+) -> torch.Tensor:
+    total_b = num_clips * clip_frames
+    channels = heads * head_dim
+    q_grid = q_vis.view(num_clips, clip_frames, frame_h, frame_w, heads, head_dim)
+    k_grid = k_vis.view(num_clips, clip_frames, frame_h, frame_w, heads, head_dim)
+    v_grid = v_vis.view(num_clips, clip_frames, frame_h, frame_w, heads, head_dim)
+
+    if int(tube_window) <= 0 or (int(tube_window) >= frame_h and int(tube_window) >= frame_w):
+        win_h, win_w = frame_h, frame_w
+    else:
+        win_h = min(frame_h, int(tube_window))
+        win_w = min(frame_w, int(tube_window))
+
+    pad_h = (win_h - (frame_h % win_h)) % win_h
+    pad_w = (win_w - (frame_w % win_w)) % win_w
+    if pad_h > 0 or pad_w > 0:
+        def _pad_spatial(tensor: torch.Tensor) -> torch.Tensor:
+            if pad_h > 0:
+                tensor = torch.cat((tensor, tensor[:, :, -1:, :].expand(-1, -1, pad_h, -1, -1, -1)), dim=2)
+            if pad_w > 0:
+                tensor = torch.cat((tensor, tensor[:, :, :, -1:].expand(-1, -1, -1, pad_w, -1, -1)), dim=3)
+            return tensor
+
+        q_grid = _pad_spatial(q_grid)
+        k_grid = _pad_spatial(k_grid)
+        v_grid = _pad_spatial(v_grid)
+
+    h_pad = frame_h + pad_h
+    w_pad = frame_w + pad_w
+    nh = h_pad // win_h
+    nw = w_pad // win_w
+    num_win = nh * nw
+    patches_per_win = win_h * win_w
+
+    def _to_windows(tensor: torch.Tensor) -> torch.Tensor:
+        return (
+            tensor.view(num_clips, clip_frames, nh, win_h, nw, win_w, heads, head_dim)
+            .permute(0, 1, 2, 4, 3, 5, 6, 7)
+            .reshape(num_clips, clip_frames, num_win, patches_per_win, heads, head_dim)
+        )
+
+    q_win = _to_windows(q_grid)
+    k_win = _to_windows(k_grid)
+    v_win = _to_windows(v_grid)
+
+    k_anchor = k_win[:, :1].expand(-1, clip_frames, -1, -1, -1, -1)
+    v_anchor = v_win[:, :1].expand(-1, clip_frames, -1, -1, -1, -1)
+    if loop:
+        k_prev = torch.roll(k_win, shifts=1, dims=1)
+        v_prev = torch.roll(v_win, shifts=1, dims=1)
+        k_next = torch.roll(k_win, shifts=-1, dims=1)
+        v_next = torch.roll(v_win, shifts=-1, dims=1)
+    else:
+        k_prev = torch.cat((k_win[:, :1], k_win[:, :-1]), dim=1)
+        v_prev = torch.cat((v_win[:, :1], v_win[:, :-1]), dim=1)
+        k_next = torch.cat((k_win[:, 1:], k_win[:, -1:]), dim=1)
+        v_next = torch.cat((v_win[:, 1:], v_win[:, -1:]), dim=1)
+
+    k_bank = torch.cat((k_anchor, k_prev, k_win, k_next), dim=3)
+    v_bank = torch.cat((v_anchor, v_prev, v_win, v_next), dim=3)
+
+    batch_tubes = num_clips * clip_frames * num_win
+    q_sdpa = q_win.reshape(batch_tubes, patches_per_win, heads, head_dim).transpose(1, 2).contiguous()
+    k_sdpa = k_bank.reshape(batch_tubes, 4 * patches_per_win, heads, head_dim).transpose(1, 2).contiguous()
+    v_sdpa = v_bank.reshape(batch_tubes, 4 * patches_per_win, heads, head_dim).transpose(1, 2).contiguous()
+
+    scale = (float(attention_scale) / math.sqrt(float(head_dim))) if float(attention_scale) != 1.0 else None
+    out_sdpa = F.scaled_dot_product_attention(
+        q_sdpa.to(v_sdpa.dtype),
+        k_sdpa.to(v_sdpa.dtype),
+        v_sdpa,
+        scale=scale,
+    )
+    out_win = out_sdpa.transpose(1, 2).reshape(num_clips, clip_frames, nh, nw, win_h, win_w, heads, head_dim)
+    out_grid = out_win.permute(0, 1, 2, 4, 3, 5, 6, 7).reshape(num_clips, clip_frames, h_pad, w_pad, channels)
+    if pad_h > 0 or pad_w > 0:
+        out_grid = out_grid[:, :, :frame_h, :frame_w, :]
+    return out_grid.reshape(total_b, frame_h * frame_w, channels)
+
+
+def _make_moss_tube_block_replace(
+    block: Any,
+    num_clips: int,
+    clip_frames: int,
+    frame_h: int,
+    frame_w: int,
+    temporal_strength: float,
+    tube_window: int,
+    temporal_smoothing: float,
+    attention_scale: float,
+    loop: bool,
+    is_uncond_skip: bool,
+    cond_or_uncond: Sequence[int],
+):
+    cond_flags = tuple(int(flag) for flag in cond_or_uncond)
+    all_uncond = bool(cond_flags) and all(flag == 1 for flag in cond_flags)
+    mixed_uncond = bool(cond_flags) and not all_uncond and any(flag == 1 for flag in cond_flags)
+
+    def block_replace(args: dict[str, Any], extra_args: dict[str, Any]) -> dict[str, Any]:
+        if is_uncond_skip and all_uncond:
+            return {"img": args["img"]}
+        if moss_image_model is None or not hasattr(block, "norm1") or not hasattr(block, "proj"):
+            return extra_args["original_block"](args)
+
+        x = args["img"]
+        x_orig = x.clone() if (is_uncond_skip and mixed_uncond) else None
+        mod = args["mod"]
+        pe = args["pe"]
+        t_opts = args["transformer_options"]
+
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = mod
+        y = moss_image_model.modulated_rms_norm(x, block.norm1, scale_a, shift_a)
+        if getattr(block, "fused_qkv", False):
+            q, k, v = block.proj["qkv"](y).chunk(3, dim=-1)
+        else:
+            q, k, v = block.proj["q"](y), block.proj["k"](y), block.proj["v"](y)
+
+        total_b, seq_len, channels = q.shape
+        heads = block.num_heads
+        head_dim = channels // heads
+        q_h = q.view(total_b, seq_len, heads, head_dim)
+        k_h = k.view(total_b, seq_len, heads, head_dim)
+        if comfy.model_management.in_training:
+            q_rot = moss_image_model.rope_split_half(block.q_norm(q_h), pe)
+            k_rot = moss_image_model.rope_split_half(block.k_norm(k_h), pe)
+        else:
+            q_scale, _, q_stream = comfy.ops.cast_bias_weight(block.q_norm, q_h, offloadable=True)
+            k_scale, _, k_stream = comfy.ops.cast_bias_weight(block.k_norm, k_h, offloadable=True)
+            q_rot, k_rot = comfy.quant_ops.ck.rms_rope_split_half(q_h, k_h, pe, q_scale, k_scale, block.q_norm.eps)
+            comfy.ops.uncast_bias_weight(block.q_norm, q_scale, None, q_stream)
+            comfy.ops.uncast_bias_weight(block.k_norm, k_scale, None, k_stream)
+
+        q_c = moss_image_model.AttentionTensorContainer(q_rot.flatten(2))
+        k_c = moss_image_model.AttentionTensorContainer(k_rot.flatten(2))
+        v_c = moss_image_model.AttentionTensorContainer(v)
+        out_spatial = moss_image_model.optimized_attention(
+            q_c,
+            k_c,
+            v_c,
+            heads,
+            transformer_options=t_opts,
+            preferred_attention=block.comfy_attention,
+        )
+
+        vis_len = frame_h * frame_w
+        if float(temporal_strength) > 0.0 and clip_frames > 1 and vis_len <= seq_len:
+            out_tube = _run_moss_temporal_tube_attention(
+                q_vis=q_rot[:, :vis_len],
+                k_vis=k_rot[:, :vis_len],
+                v_vis=v[:, :vis_len],
+                num_clips=num_clips,
+                clip_frames=clip_frames,
+                frame_h=frame_h,
+                frame_w=frame_w,
+                heads=heads,
+                head_dim=head_dim,
+                tube_window=tube_window,
+                attention_scale=attention_scale,
+                loop=loop,
+            )
+            vis_out = torch.lerp(out_spatial[:, :vis_len], out_tube.to(out_spatial.dtype), float(temporal_strength))
+            if float(temporal_smoothing) > 0.0:
+                vis_4d = vis_out.view(num_clips, clip_frames, vis_len, channels)
+                if loop:
+                    prev_v = torch.roll(vis_4d, shifts=1, dims=1)
+                    next_v = torch.roll(vis_4d, shifts=-1, dims=1)
+                else:
+                    prev_v = torch.cat((vis_4d[:, :1], vis_4d[:, :-1]), dim=1)
+                    next_v = torch.cat((vis_4d[:, 1:], vis_4d[:, -1:]), dim=1)
+                smooth_w = float(temporal_smoothing)
+                vis_4d = (1.0 - smooth_w) * vis_4d + (0.5 * smooth_w) * (prev_v + next_v)
+                vis_out = vis_4d.reshape(total_b, vis_len, channels)
+            out = torch.cat((vis_out, out_spatial[:, vis_len:]), dim=1)
+        else:
+            out = out_spatial
+
+        x = moss_image_model.gated_residual(x, block.proj["o"](out), gate_a)
+        y = moss_image_model.modulated_rms_norm(x, block.norm2, scale_f, shift_f)
+        hidden, gate = block.proj["ffn_up_gate"](y).chunk(2, dim=-1)
+        ffn_out = block.proj["ffn_down"](torch.tanh(gate / 4.0) * torch.sigmoid(gate) * torch.tanh(hidden / 25.0))
+        x = moss_image_model.gated_residual(x, ffn_out, gate_f * 100.0)
+
+        if is_uncond_skip and mixed_uncond and x_orig is not None:
+            if x.shape[0] == len(cond_flags) * clip_frames:
+                x = x.clone()
+                for idx, flag in enumerate(cond_flags):
+                    if flag == 1:
+                        start = idx * clip_frames
+                        x[start : start + clip_frames] = x_orig[start : start + clip_frames]
+        return {"img": x}
+
+    return block_replace
+
+
+def _make_moss_temporal_diffusion_wrapper(
+    diffusion_model: Any,
+    state: dict[str, Any],
+    frames_per_clip: int,
+    attention_mode: str,
+    temporal_strength: float,
+    tube_window: int,
+    temporal_smoothing: float,
+    temporal_stride: float,
+    reference_stride: float,
+    loop: bool,
+    attention_scale: float,
+    uncond_skip_layer: int,
+    sigma_window: tuple[float, float] | None,
+):
+    def diffusion_wrapper(executor, x, timestep, context, transformer_options={}, **kwargs):
+        sigma_source = transformer_options.get("sigmas", timestep)
+        if not _is_krea2_nag_sigma_active(sigma_source, sigma_window):
+            return executor(x, timestep, context, transformer_options, **kwargs)
+
+        local_options = transformer_options.copy() if isinstance(transformer_options, dict) else {}
+        cond_or_uncond = local_options.get("cond_or_uncond", ())
+
+        if not torch.is_tensor(x) or x.ndim != 4:
+            return executor(x, timestep, context, local_options, **kwargs)
+
+        total_b, channels, frame_h, frame_w = x.shape
+        if int(frames_per_clip) > 0:
+            clip_frames = int(frames_per_clip)
+        elif int(state.get("active_clip_frames", 0)) > 1:
+            clip_frames = int(state["active_clip_frames"])
+        elif len(cond_or_uncond) > 0 and total_b % len(cond_or_uncond) == 0:
+            clip_frames = total_b // len(cond_or_uncond)
+        else:
+            clip_frames = total_b
+
+        if clip_frames <= 1 or total_b < clip_frames or total_b % clip_frames != 0:
+            if int(uncond_skip_layer) >= 0 and 1 in cond_or_uncond:
+                patches_replace = dict(local_options.get("patches_replace", {}))
+                dit_replace = dict(patches_replace.get("dit", {}))
+                block_key = ("single_block", int(uncond_skip_layer))
+                if block_key not in dit_replace:
+                    dit_replace[block_key] = _make_moss_uncond_skip_block_replace(cond_or_uncond)
+                    patches_replace["dit"] = dit_replace
+                    local_options["patches_replace"] = patches_replace
+            return executor(x, timestep, context, local_options, **kwargs)
+
+        num_clips = total_b // clip_frames
+
+        if str(attention_mode) == "tube_attention" and hasattr(diffusion_model, "layers"):
+            patches_replace = dict(local_options.get("patches_replace", {}))
+            dit_replace = dict(patches_replace.get("dit", {}))
+            for layer_idx, block in enumerate(diffusion_model.layers):
+                block_key = ("single_block", layer_idx)
+                if block_key not in dit_replace:
+                    is_skip = int(uncond_skip_layer) == layer_idx and (1 in cond_or_uncond)
+                    dit_replace[block_key] = _make_moss_tube_block_replace(
+                        block=block,
+                        num_clips=num_clips,
+                        clip_frames=clip_frames,
+                        frame_h=frame_h,
+                        frame_w=frame_w,
+                        temporal_strength=temporal_strength,
+                        tube_window=tube_window,
+                        temporal_smoothing=temporal_smoothing,
+                        attention_scale=attention_scale,
+                        loop=loop,
+                        is_uncond_skip=is_skip,
+                        cond_or_uncond=cond_or_uncond,
+                    )
+            patches_replace["dit"] = dit_replace
+            local_options["patches_replace"] = patches_replace
+            return executor(x, timestep, context, local_options, **kwargs)
+
+        if int(uncond_skip_layer) >= 0 and 1 in cond_or_uncond:
+            patches_replace = dict(local_options.get("patches_replace", {}))
+            dit_replace = dict(patches_replace.get("dit", {}))
+            block_key = ("single_block", int(uncond_skip_layer))
+            if block_key not in dit_replace:
+                dit_replace[block_key] = _make_moss_uncond_skip_block_replace(cond_or_uncond)
+                patches_replace["dit"] = dit_replace
+                local_options["patches_replace"] = patches_replace
+
+        x_packed = x.reshape(num_clips, clip_frames, channels, frame_h, frame_w)
+        x_packed = x_packed.permute(0, 2, 1, 3, 4).reshape(num_clips, channels, clip_frames * frame_h, frame_w)
+
+        if torch.is_tensor(timestep) and timestep.ndim >= 1 and timestep.shape[0] == total_b:
+            timestep_packed = timestep[::clip_frames]
+        else:
+            timestep_packed = timestep
+
+        if torch.is_tensor(context) and context.ndim >= 2 and context.shape[0] == total_b:
+            context_packed = context[::clip_frames]
+        else:
+            context_packed = context
+
+        rope_attr = getattr(diffusion_model, "rope", None)
+        is_rope_module = isinstance(rope_attr, torch.nn.Module)
+        orig_rope = rope_attr.forward if is_rope_module else rope_attr
+        wrapped_rope = _make_moss_temporal_rope_callable(diffusion_model, orig_rope)
+
+        token = _MOSS_TEMPORAL_ROPE_CONTEXT.set(
+            {
+                "frames": clip_frames,
+                "frame_h": frame_h,
+                "frame_w": frame_w,
+                "temporal_stride": temporal_stride,
+                "reference_stride": reference_stride,
+                "loop": loop,
+                "attention_scale": attention_scale,
+            }
+        )
+        try:
+            if is_rope_module:
+                rope_attr.forward = wrapped_rope
+            elif callable(orig_rope):
+                diffusion_model.rope = wrapped_rope
+            out_packed = executor(x_packed, timestep_packed, context_packed, local_options, **kwargs)
+        finally:
+            if is_rope_module:
+                rope_attr.forward = orig_rope
+            elif callable(orig_rope):
+                diffusion_model.rope = orig_rope
+            _MOSS_TEMPORAL_ROPE_CONTEXT.reset(token)
+
+        out = out_packed.reshape(num_clips, channels, clip_frames, frame_h, frame_w)
+        return out.permute(0, 2, 1, 3, 4).reshape(total_b, channels, frame_h, frame_w)
+
+    return diffusion_wrapper
+
+
+def patch_moss_image_temporal_model(
+    model: Any,
+    preset: str = "balanced",
+    strength: float | None = None,
+    frames_per_clip: int = 0,
+    attention_mode: str | None = None,
+    temporal_strength: float | None = None,
+    tube_window: int | None = None,
+    temporal_smoothing: float | None = None,
+    temporal_stride: float = 1.0,
+    reference_stride: float = 0.0,
+    noise_mode: str | None = None,
+    noise_correlation: float | None = None,
+    loop: bool = False,
+    attention_scale: float | None = None,
+    uncond_skip_layer: int | None = None,
+    uncond_skip_layer_22: bool = False,
+    start_percent: float = 0.0,
+    end_percent: float | None = None,
+) -> Any:
+    preset_key = str(preset or "balanced")
+    if preset_key not in MOSS_IMAGE_TEMPORAL_PRESETS:
+        raise ValueError(f"Unsupported MOSS-Image temporal preset: {preset_key}")
+    defaults = MOSS_IMAGE_TEMPORAL_PRESETS[preset_key]
+
+    resolved_strength = (
+        float(temporal_strength)
+        if temporal_strength is not None
+        else (float(strength) if strength is not None else 0.55)
+    )
+    frames_per_clip = int(frames_per_clip)
+    attention_mode = str(attention_mode if attention_mode is not None else defaults["attention_mode"])
+    temporal_strength = resolved_strength
+    tube_window = int(tube_window if tube_window is not None else defaults["tube_window"])
+    temporal_smoothing = float(
+        temporal_smoothing if temporal_smoothing is not None else defaults["temporal_smoothing"] * min(1.0, resolved_strength / 0.55 if resolved_strength > 0 else 0.0)
+    )
+    temporal_stride = float(temporal_stride)
+    reference_stride = float(reference_stride)
+    noise_mode = str(noise_mode if noise_mode is not None else defaults["noise_mode"])
+    noise_correlation = float(noise_correlation if noise_correlation is not None else defaults["noise_correlation"])
+    loop = bool(loop)
+    attention_scale = float(attention_scale if attention_scale is not None else defaults["attention_scale"])
+    if uncond_skip_layer is not None:
+        uncond_skip_layer = int(uncond_skip_layer)
+    else:
+        uncond_skip_layer = 22 if bool(uncond_skip_layer_22) else -1
+    start_percent = float(start_percent)
+    end_percent = float(end_percent if end_percent is not None else defaults["end_percent"])
+
+    if frames_per_clip < 0:
+        raise ValueError("MOSS-Image temporal frames_per_clip must be nonnegative.")
+    if attention_mode not in MOSS_IMAGE_TEMPORAL_ATTENTION_MODES:
+        raise ValueError(f"Unsupported MOSS-Image temporal attention_mode: {attention_mode}")
+    if not 0.0 <= temporal_strength <= 1.0:
+        raise ValueError("MOSS-Image temporal_strength must be between 0.0 and 1.0.")
+    if tube_window < 0:
+        raise ValueError("MOSS-Image tube_window must be nonnegative.")
+    if not 0.0 <= temporal_smoothing <= 1.0:
+        raise ValueError("MOSS-Image temporal_smoothing must be between 0.0 and 1.0.")
+    if temporal_stride < 0.0:
+        raise ValueError("MOSS-Image temporal_stride must be nonnegative.")
+    if reference_stride < 0.0:
+        raise ValueError("MOSS-Image reference_stride must be nonnegative.")
+    if noise_mode not in MOSS_IMAGE_TEMPORAL_NOISE_MODES:
+        raise ValueError(f"Unsupported MOSS-Image temporal noise_mode: {noise_mode}")
+    if not 0.0 <= noise_correlation <= 1.0:
+        raise ValueError("MOSS-Image temporal noise_correlation must be between 0.0 and 1.0.")
+    if attention_scale <= 0.0:
+        raise ValueError("MOSS-Image temporal attention_scale must be positive.")
+    if not 0.0 <= start_percent <= 1.0 or not 0.0 <= end_percent <= 1.0:
+        raise ValueError("MOSS-Image temporal start_percent and end_percent must be between 0.0 and 1.0.")
+
+    diffusion_model = model.get_model_object("diffusion_model")
+    if not _is_moss_image_diffusion_model(diffusion_model):
+        raise ValueError("MOSS-Image Temporal Clip Patcher requires a MOSS-Image diffusion model.")
+
+    num_layers = len(getattr(diffusion_model, "layers", ()))
+    if uncond_skip_layer >= 0 and num_layers > 0 and uncond_skip_layer >= num_layers:
+        raise ValueError(f"MOSS-Image uncond_skip_layer must be less than {num_layers} (or -1 to disable).")
+
+    patched = model.clone()
+    if start_percent >= end_percent:
+        return patched
+
+    sigma_window: tuple[float, float] | None = None
+    if start_percent > 0.0 or end_percent < 1.0:
+        model_sampling = patched.get_model_object("model_sampling")
+        if model_sampling is not None:
+            sigma_window = (
+                float(model_sampling.percent_to_sigma(start_percent)),
+                float(model_sampling.percent_to_sigma(end_percent)),
+            )
+
+    state: dict[str, Any] = {"active_clip_frames": frames_per_clip}
+    if hasattr(patched, "remove_wrappers_with_key"):
+        patched.remove_wrappers_with_key(
+            comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+            MOSS_IMAGE_TEMPORAL_OUTER_SAMPLE_WRAPPER_KEY,
+        )
+        patched.remove_wrappers_with_key(
+            comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+            MOSS_IMAGE_TEMPORAL_DIFFUSION_WRAPPER_KEY,
+        )
+
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+        MOSS_IMAGE_TEMPORAL_OUTER_SAMPLE_WRAPPER_KEY,
+        _make_moss_temporal_outer_sample_wrapper(
+            state=state,
+            frames_per_clip=frames_per_clip,
+            noise_mode=noise_mode,
+            noise_correlation=noise_correlation,
+            loop=loop,
+        ),
+    )
+    patched.add_wrapper_with_key(
+        comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+        MOSS_IMAGE_TEMPORAL_DIFFUSION_WRAPPER_KEY,
+        _make_moss_temporal_diffusion_wrapper(
+            diffusion_model=diffusion_model,
+            state=state,
+            frames_per_clip=frames_per_clip,
+            attention_mode=attention_mode,
+            temporal_strength=temporal_strength,
+            tube_window=tube_window,
+            temporal_smoothing=temporal_smoothing,
+            temporal_stride=temporal_stride,
+            reference_stride=reference_stride,
+            loop=loop,
+            attention_scale=attention_scale,
+            uncond_skip_layer=uncond_skip_layer,
+            sigma_window=sigma_window,
+        ),
+    )
+    return patched
+
