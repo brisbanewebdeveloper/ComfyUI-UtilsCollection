@@ -567,12 +567,22 @@ _MOSS_IMAGE_RESPONSE_SCHEMA: dict[str, Any] = {
         "summary": {
             "type": "object",
             "properties": {
+                "meta": {
+                    "type": "array",
+                    "description": "1 to 3 concise medium or genre tags describing the image format or genre.",
+                    "items": {"type": "string"},
+                },
+                "canvas": {
+                    "type": "string",
+                    "enum": ["single", "multi_panel", "collage"],
+                    "description": "Canvas layout type: single, multi_panel, or collage.",
+                },
                 "caption": {
                     "type": "string",
                     "description": "Whole-scene description combining subject overview, camera viewpoint, background environment, lighting, medium, and aesthetics.",
                 },
             },
-            "required": ["caption"],
+            "required": ["meta", "canvas", "caption"],
         },
         "items": {
             "type": "array",
@@ -625,12 +635,22 @@ _MOSS_IMAGE_SHORT_RESPONSE_SCHEMA: dict[str, Any] = {
         "summary": {
             "type": "object",
             "properties": {
+                "meta": {
+                    "type": "array",
+                    "description": "1 to 3 concise medium or genre tags describing the image format or genre.",
+                    "items": {"type": "string"},
+                },
+                "canvas": {
+                    "type": "string",
+                    "enum": ["single", "multi_panel", "collage"],
+                    "description": "Canvas layout type: single, multi_panel, or collage.",
+                },
                 "caption": {
                     "type": "string",
                     "description": "Concise whole-scene description combining subject overview, camera viewpoint, background environment, lighting, medium, and aesthetics.",
                 },
             },
-            "required": ["caption"],
+            "required": ["meta", "canvas", "caption"],
         },
         "items": {
             "type": "array",
@@ -653,6 +673,69 @@ _MOSS_IMAGE_SHORT_RESPONSE_SCHEMA: dict[str, Any] = {
                     "bbox": {
                         "type": "array",
                         "description": "Four integers [ymin, xmin, ymax, xmax] on a 0..1000 normalized top-left grid.",
+                        "items": {"type": "integer", "minimum": 0, "maximum": 1000},
+                    },
+                },
+                "required": ["label", "caption", "bbox"],
+            },
+        },
+        "bbox_coord_space": {
+            "type": "string",
+            "enum": ["abs_centralized"],
+        },
+        "bbox_format": {
+            "type": "string",
+            "enum": ["yxyx"],
+        },
+    },
+    "required": ["summary", "items", "bbox_coord_space", "bbox_format"],
+}
+
+_MOSS_IMAGE_LAYOUT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "object",
+            "properties": {
+                "meta": {
+                    "type": "array",
+                    "description": "1 to 3 concise medium or genre tags describing the image format or genre.",
+                    "items": {"type": "string"},
+                },
+                "canvas": {
+                    "type": "string",
+                    "enum": ["single", "multi_panel", "collage"],
+                    "description": "Canvas layout type: single, multi_panel, or collage.",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Complete natural language scene description combining viewpoint, spatial arrangement, primary subjects, actions, background environment, lighting, medium, and atmosphere.",
+                },
+            },
+            "required": ["meta", "canvas", "caption"],
+        },
+        "items": {
+            "type": "array",
+            "description": "Coherent visible subjects, physical objects, and rendered text regions in the resulting scene ordered from background to foreground and anchored to the first input image's spatial layout.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "enum": ["character", "object", "text"],
+                        "description": "Item category: character for human, humanoid, anthropomorphic, feral, or creature subjects; object for distinct physical objects or props; text for visible rendered text regions.",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Detailed natural language visual description of this coherent item's identity, species, gender, anatomy, pose, action, interactions, colors, and surface traits in the resulting scene, or typography and surface treatment for text items.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Exact verbatim visible characters when label is text.",
+                    },
+                    "bbox": {
+                        "type": "array",
+                        "description": "Four integers [ymin, xmin, ymax, xmax] on a 0 to 1000 top left grid measured strictly from the first input image's canvas coordinates.",
                         "items": {"type": "integer", "minimum": 0, "maximum": 1000},
                     },
                 },
@@ -838,6 +921,13 @@ VLM_PRESET_RESPONSE_SCHEMAS: dict[str, dict[str, Any]] = {
     "moss_image_json_instruction": _MOSS_IMAGE_RESPONSE_SCHEMA,
     "moss_image_json_instruction_short": _MOSS_IMAGE_SHORT_RESPONSE_SCHEMA,
     "moss_image_json_instruction_color": _MOSS_IMAGE_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_neutral": _MOSS_IMAGE_LAYOUT_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_action": _MOSS_IMAGE_LAYOUT_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_qwen": _MOSS_IMAGE_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_short_qwen": _MOSS_IMAGE_SHORT_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_color_qwen": _MOSS_IMAGE_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_neutral_qwen": _MOSS_IMAGE_LAYOUT_RESPONSE_SCHEMA,
+    "moss_image_json_instruction_action_qwen": _MOSS_IMAGE_LAYOUT_RESPONSE_SCHEMA,
     "ideogram_4_json_instruction": _IDEOGRAM_4_RESPONSE_SCHEMA,
     "ideogram_4_json_instruction_short": _IDEOGRAM_4_SHORT_RESPONSE_SCHEMA,
     "ideogram_4_json_instruction_style": _IDEOGRAM_4_STYLE_RESPONSE_SCHEMA,

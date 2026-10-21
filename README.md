@@ -176,6 +176,8 @@ the base-resolution conditioning fusion.
 - `UC_ModifyMask`
 - `UC_SAM31CheckpointLoader`
 - `UC_SAM3Detect`
+- `UC_YOLODetectorLoader`
+- `UC_YOLODetect`
 - `UC_MaskToBoundingBox`
 - `UC_ImageBlendByMask`
 - `UC_ImagePad`
@@ -248,13 +250,15 @@ Both nodes share optional `temporal_filter`: it treats the input batch as ordere
 
 Additional files: `animalpose_ap10k_256.safetensors` under HF `preprocessors/animalpose/`, and `densepose_r50_fpn.safetensors` under `preprocessors/densepose/`; both install in the same local preprocessor model directory. Artifact conversion/loading is verified separately from numerical prediction parity and measured speed, which remain unverified for these ports.
 
+`UC_YOLODetectorLoader` and `UC_YOLODetect` run converted YOLOv8 and YOLO11 detection and segmentation `.safetensors` models through UEL and ComfyUI model management without requiring external detector packages or unsafe `.pt` pickle loading. `UC_YOLODetectorLoader` outputs `BBOX_DETECTOR` and `SEGM_DETECTOR` objects, while `UC_YOLODetect` processes single images or video frame batches in `batch_size` chunks (including partial tail chunks without padding) with vectorized tensor letterboxing, on-device NMS/mask decoding, and optional cross-chunk `temporal_filter` (`temporal_radius`, `temporal_min_support`, `temporal_match_iou`), outputting `masks` (`MASK`, combined per frame or per detection) and `bboxes` (`BOUNDING_BOX`). Missing checkpoints download on execution from `silveroxides/ComfyUI-UtilsCollection-Models` (`yolo/segm/` for `face_yolov8m-seg_60.safetensors`, `person_yolov8m-seg.safetensors`, `skin_yolov8m-seg_400.safetensors`, and `hair_yolov8n-seg_60.safetensors` into `models/yolo/segm`; `yolo/bbox/` for `face_yolov8m.safetensors`, `hand_yolov8s.safetensors`, and `yolo11x-train28-best.safetensors` into `models/yolo/bbox`).
+
 For further models, use `MODEL_MIGRATION.md` and the shared `models/migrations.json` manifest/schema rather than inventing a new conversion/loading flow.
 
 `UC_StagedLayeredBackgroundComposite` builds a scene from a background and ordered foreground sockets. Use `run_staging` to retain cutouts and populate the placement editor. Use `run_staged` to composite retained cutouts without loading models or evaluating foreground branches. Use `full_run` to restage and composite in one queue. `foreground_0` is the backmost layer. Retained cutouts are held in server memory and must be recreated after restarting ComfyUI.
 
 `UC_StagedMediaPipeFaceBackgroundComposite` detects faces in each foreground and adds them as independently placeable layers. The background and face options nodes contain removal, extraction, feathering, and blend settings. `UC_StagedIndividualComposites` provides the same ordinary foreground staging editor but returns one full-background image, placement mask, and box per included foreground without stacking them. `UC_BackgroundRemovalPreserveAlpha` directly returns source-resolution RGBA images and their soft alpha masks; existing RGBA inputs keep their supplied alpha without model execution. `UC_FaceRemovalPreserveAlpha` returns expanded face crops as RGBA images with matching alpha masks and transparent padding for differently sized batched crops.
 
-`UC_CreateBoundingBoxes` (**Create Bounding Boxes (Nodes 1.0)**) provides a Nodes 1.0 interactive bounding-box canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements` (for `FLUX.3 Layout Prompt` and `Build JSON Prompt (Ideogram)`), and `moss_prompt` (MOSS-Image `abs_centralized` pixel layout JSON). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected). Drag on the canvas (or press `+ Object Box` / `+ Text Box`) to create boxes, drag inside a box to move it, drag its 8 handles to resize it, reorder boxes from background to foreground, and assign descriptions, rendered text, and optional prompt colors via the docked `PaintColorPicker` panel (boxes default to outline-only so no unwanted colors are sent to the prompt unless explicitly set; right-click, Shift+click, or use `Clear color (outline only)` to clear). `UC_MOSSImageBBoxConvert` (**MOSS-Image BBox Coordinate Convert**) converts Gemini's `0..1000` `[ymin, xmin, ymax, xmax]` layout JSON or `Create Bounding Boxes` `elements` directly into MOSS-Image's `abs_centralized` pixel layout JSON.
+`UC_CreateBoundingBoxes` (**Create Bounding Boxes (Nodes 1.0)**) provides a Nodes 1.0 interactive bounding-box canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements` (for `FLUX.3 Layout Prompt` and `Build JSON Prompt (Ideogram)`), and `moss_prompt` (a ready-to-encode MOSS-Image centered-pixel layout JSON prompt). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected). Drag on the canvas (or press `+ Object Box` / `+ Text Box`) to create boxes, drag inside a box to move it, drag its 8 handles to resize it, reorder boxes from background to foreground, and assign descriptions, rendered text, and optional prompt colors via the docked `PaintColorPicker` panel (boxes default to outline-only so no unwanted colors are sent to the prompt unless explicitly set; right-click, Shift+click, or use `Clear color (outline only)` to clear). `UC_MOSSImageBBoxConvert` (**MOSS-Image BBox Coordinate Convert**) converts Gemini's `0` to `1000` layout JSON or `Create Bounding Boxes` `elements` directly into a ready-to-encode MOSS-Image centered-pixel layout JSON prompt.
 
 `UC_LoadLaMaModel` loads Big LaMa `.safetensors` files from `ComfyUI/models/lama` through Unified Efficient Loader. Connect its `LAMA_MODEL` output to `UC_LaMaInpaint`. Device choices include ComfyUI's default device, CPU, and every visible GPU. Models are never downloaded automatically. Download [Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/big-lama.safetensors) or [Anime/Manga Big LaMa](https://huggingface.co/silveroxides/ComfyUI-UtilsCollection-Models/blob/main/big-lama/anime-manga-big-lama.safetensors), then place the selected file in `ComfyUI/models/lama`.
 
@@ -353,7 +357,7 @@ The left sidebar stays visible and shows the selected foreground's context actio
 - `UC_MiniMaxH3PDDAcc`
 - `UC_UnifiedAttentionPatcher`
 - `UC_Krea2NAG`
-- `UC_MOSSImageTemporalClipPatcher`
+- `UC_MOSSImageEditPatcher`
 - `UC_MarkdownPreview`
 - `UC_BoldFrakturTextStyle`
 - `UC_UnBoldFrakturTextStyle`
@@ -473,16 +477,17 @@ a guider without a negative input.
   guidance halfway through sampling to save generation time while keeping most
   of the negative prompt effect.
 
-### MOSS-Image Temporal Clip Patcher
+### MOSS-Image Edit Patcher
 
-`UC_MOSSImageTemporalClipPatcher` links a batch of MOSS-Image frames across time using windowed spatio-temporal tube attention, 1D block smoothing, and motion-warped starting noise so standard `Empty Flux 2 Latent` batches (`batch_size > 1`) generate short animated clips or consistent multi-frame sequences instead of unrelated still images.
+`UC_MOSSImageEditPatcher` configures a MOSS-Image diffusion model for reference-guided image editing, character or style transfer, and masked inpainting using clean reference attention across all 42 transformer blocks and spatial structure retention on the Flux 2 latent grid.
 
-Connect the MOSS-Image `model` (after `ModelSamplingAuraFlow` with `shift = 5.0`) through `UC_MOSSImageTemporalClipPatcher` to your sampler alongside an `Empty Flux 2 Latent` (`batch_size` set to the frame count, e.g. `4` to `8` at `512x512` or `768x512`) and decode with the `Flux 2` VAE.
+Connect the MOSS-Image `model` (after `ModelSamplingAuraFlow` with `shift = 5.0`) through `UC_MOSSImageEditPatcher` to your sampler. You can supply the reference image in any of three ways: connect a `Flux 2` `VAEEncode` latent to `reference_latent` on the patcher, attach reference images to your positive conditioning with `ReferenceLatent` or `UC_AdvancedVisualConditioningEncode` (with `vae` connected), or pass the `VAEEncode` latent directly into your sampler's `latent_image` input at `denoise = 1.0`.
 
-- `preset`: selects the motion and frame-linking profile (`balanced`, `subtle_motion`, `strong_motion`, or `character_consistency`).
-- `strength`: controls how strongly cross-frame tube attention is blended with each frame's spatial attention (default `0.60`; `0.0` disables cross-frame linking).
-- `loop`: wraps the motion trajectory and frame neighborhood links into a closed cycle so the last frame transitions smoothly back into the first frame for seamless looping GIFs (default `True`).
+- `preset`: selects the editing profile (`balanced_edit`, `preserve_structure`, `subject_reference`, `style_reference`, or `inpaint_only`).
+- `strength`: controls how strongly the 42 transformer blocks pull visual details and appearance from the reference image (default `0.65`; `0.0` disables reference attention).
+- `structure_retention`: controls how strongly the reference image's spatial layout, pose, and unedited background are preserved during the early composition steps (default `0.50`; set to `0.0` when placing a reference subject into a new pose or scene).
 - `uncond_skip_layer_22`: bypasses transformer block 22 on the negative prompt pass, matching OpenMOSS's recommended two-pass guidance setting without adding a third sampling pass (default `True`).
+- `reference_latent` and `mask` (optional): direct `LATENT` and `MASK` inputs for source-image editing and region-locked inpainting.
 
 ### Scheduler presets
 

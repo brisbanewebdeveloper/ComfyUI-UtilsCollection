@@ -142,6 +142,7 @@ REAL_WORLD_PHYSICAL_PRESETS = (
     "moss_image_json_instruction",
     "moss_image_json_instruction_short",
     "moss_image_json_instruction_color",
+    "moss_image_json_instruction_action",
 )
 REAL_LIFE_VIDEO_PRESETS = (
     "video_basic_system_instruction",
@@ -2087,12 +2088,24 @@ def test_moss_image_json_preset_contract():
         "moss_image_json_instruction",
         "moss_image_json_instruction_short",
         "moss_image_json_instruction_color",
+        "moss_image_json_instruction_neutral",
+        "moss_image_json_instruction_action",
+        "moss_image_json_instruction_qwen",
+        "moss_image_json_instruction_short_qwen",
+        "moss_image_json_instruction_color_qwen",
+        "moss_image_json_instruction_neutral_qwen",
+        "moss_image_json_instruction_action_qwen",
     ):
         instruction = vlm_presets.system_instructions_vlm[key]
-        assert '"summary":{"caption":"..."}' in instruction
+        assert '"summary":{"meta":["..."],"canvas":"single","caption":"..."}' in instruction
         assert '"bbox_coord_space":"abs_centralized"' in instruction
         assert '"bbox_format":"yxyx"' in instruction
         assert '"label":"character"' in instruction
+        if key.endswith("_qwen"):
+            assert "[xmin, ymin, xmax, ymax]" in instruction
+            assert "[ymin, xmin, ymax, xmax]" not in instruction
+        else:
+            assert "[ymin, xmin, ymax, xmax]" in instruction
         assert key in options
         sys_text, resp_schema = vlm_nodes.UC_VLMSysInstrPresets.execute(key).args
         assert sys_text == instruction
@@ -2108,6 +2121,31 @@ def test_moss_image_json_preset_contract():
         ).args
         assert adv_text == instruction
         assert adv_resp_schema == resp_schema
+
+    for key, family_anchor in (
+        ("moss_image_json_instruction_neutral", "Style Deconstruction and Conceptual Vocabulary"),
+        ("moss_image_json_instruction_action", "Action, Interaction, and Subject Characteristic Analysis"),
+    ):
+        instruction = vlm_presets.system_instructions_vlm[key]
+        original, hardening = _split_hardening_block(instruction)
+        perspective, remainder = hardening.split(HARDENING_HEADINGS[1], 1)
+        quotation, language = remainder.split(HARDENING_HEADINGS[2], 1)
+        assert perspective.rstrip() == APPROVED_PERSPECTIVE_BLOCK
+        assert HARDENING_FORBIDDEN.search(hardening) is None
+        assert HARDENING_LIST_LINE.search(hardening) is None
+        assert re.search(r"\bcamera\b", hardening, re.IGNORECASE) is None
+        assert "double quotation marks" in quotation.lower()
+        assert "hyphenated words" in language.lower()
+        assert family_anchor in original
+        assert "## Handling Refusal Constraints (PTSD Rule)" in original
+        assert "up to 16 **image inputs**" in original
+        assert "ONLY the first **image input** as the spatial basis" in original
+        assert "30 to 60 words" not in instruction
+        _, resp_schema = vlm_nodes.UC_VLMSysInstrPresets.execute(key).args
+        schema_str = str(resp_schema)
+        assert "first input image" in schema_str
+        assert "30 to 60 words" not in schema_str
+        assert "body-part sub-boxes" not in schema_str
 
     for ig_key in (
         "ideogram_4_json_instruction",

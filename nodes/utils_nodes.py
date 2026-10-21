@@ -52,7 +52,7 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
             inputs=[
                 io.Video.Input("video", tooltip="Reference clip. Its original frame rate is used to preserve playback speed when preparing 24 fps frames."),
                 MiniMaxH3ClipContinuationMedia.Input("continuation_media", optional=True, tooltip="Optional output from MiniMax H3 Clip Continuation Load. When connected, continuation frames and audio replace or prepend the opening segment frames before reference preparation and Whisper transcription."),
-                io.Float.Input("megapixels", default=0.5, min=0.0, max=4.0, step=0.001, tooltip="Target frame size. Set to 0.0 to keep original video resolution without scaling or cropping. Otherwise matches the video to the nearest standard aspect ratio from Video Resolution Selector, chooses its preferred resolution, and center-crops to fit."),
+                io.Float.Input("megapixels", default=0.5, min=0.0, max=4.0, step=0.0125, tooltip="Target frame size. Set to 0.0 to keep original video resolution without scaling or cropping. Otherwise matches the video to the nearest standard aspect ratio from Video Resolution Selector, chooses its preferred resolution, and center-crops to fit."),
                 io.Float.Input("duration_seconds", default=0.0, min=0.0, step=0.70833, tooltip="Maximum reference duration after the start offset. 0.0 uses the remaining clip. Positive values step by 17 frames (~0.708s) on the MiniMax H3 5+17k grid at 24 fps."),
                 io.Float.Input("start_at_timestamp", default=0.0, min=0.0, step=0.1, tooltip="Seconds to skip at the start, for both video and audio. 0 skips nothing; positive values use the same H3 frame-count rounding as duration. Preview frame numbers are zero-based and the end frame is inclusive."),
                 io.Custom("WHISPER_MODEL").Input("whisper_model", optional=True, tooltip="Optional native Whisper Loader output. Transcribes the selected audio in its original language; disconnected skips transcription."),
@@ -1831,13 +1831,13 @@ class UC_EncoderNodesGuide(io.ComfyNode):
             ),
             "resolution_and_reference_latents": (
                 "## VLM resolution\n\n"
-                "`UC_AdvancedVisualConditioningEncode`, `UC_Krea2TokenAttentionWeight`, and `UC_AdvancedVisConEncoder` use an integer `vlm_resolution`:\n\n"
+                "`UC_AdvancedVisualConditioningEncode`, `UC_Krea2TokenAttentionWeight`, `UC_AdvancedVisConEncoder`, and `UC_VLMInputEmbeds` use an integer `vlm_resolution`:\n\n"
                 "- Default: `384`\n"
                 "- Widget range: `0` through `4096`\n"
                 "- Widget step: `32`\n"
                 "- Values from `256` through `4096` select an aspect-preserving equivalent-square target aligned to a 32-pixel grid.\n"
                 "- Values below `256` or above `4096` preserve the input resolution.\n\n"
-                "`UC_TextEncodeSystemEditAdvanced`, `UC_TextEncodeGemmaSystemEditAdvanced`, and `UC_VLMInputEmbeds` retain the preset choices `Fast (384)`, `Balanced (512)`, `Detailed (768)`, `Large (1024)`, `X-Large (1280)`, `XX-Large (1536)`, and `Original`.\n\n"
+                "`UC_TextEncodeSystemEditAdvanced` and `UC_TextEncodeGemmaSystemEditAdvanced` retain the preset choices `Fast (384)`, `Balanced (512)`, `Detailed (768)`, `Large (1024)`, `X-Large (1280)`, `XX-Large (1536)`, and `Original`.\n\n"
                 "VAE reference resolution choices are `Ultra (512)`, `Turbo (768)`, `Fast (1024)`, `Balanced (1280)`, `Detailed (1536)`, and `Original`.\n\n"
                 "`UC_AdvancedVisualConditioningEncode` and `UC_Krea2TokenAttentionWeight` encode only the selected base VLM resolution. `resolution_samples` belongs only to the `UC_AdvancedVisConEncoder` consensus stage and is not part of `UC_VisualFusionConfig`.\n\n"
                 "- `UC_AdvancedConsensusConfiguration` adds odd `resolution_samples` values from `1` through `15` with step `2`, plus `sample_offset` from `32` through `512` with step `32`, to the complete Text Consensus Blend Configurator contract.\n"
@@ -1914,11 +1914,11 @@ class UC_EncoderNodesGuide(io.ComfyNode):
             ),
             "embedding_export": (
                 "## VLM Input Embedding Export\n\n"
-                "`UC_VLMInputEmbeds` accepts `clip`, `prompt`, line-separated `image_paths`, preset `vlm_resolution`, line-separated `file_names`, and `slice_visual_tokens`.\n\n"
+                "`UC_VLMInputEmbeds` accepts `clip`, `prompt`, line-separated `image_paths`, integer `vlm_resolution`, line-separated `file_names`, and `slice_visual_tokens`.\n\n"
                 "- Every non-empty image path must map to one file name.\n"
                 "- Tokenization uses `skip_template=True`.\n"
                 "- With `slice_visual_tokens=False`, the full processed token embedding sequence is retained.\n"
-                "- With `slice_visual_tokens=True`, the first validated visual-token span is removed.\n"
+                "- With `slice_visual_tokens=True`, only the interior visual-token span is retained (stripping `<|vision_start|>`, `<|vision_end|>`, and surrounding text tokens).\n"
                 "- Each state dictionary is saved as `.safetensors` below ComfyUI's embeddings directory.\n"
                 "- The node outputs the final state dictionary and final two-dimensional embedding tensor produced by the input list."
             ),
@@ -1990,7 +1990,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
                 "- `UC_MediaPipeFaceCompositeOptions`: supplies options for direct source-to-target face compositing.\n"
                 "- `UC_MediaPipeFaceComposite`: composites the largest detected source face into the largest detected target face.\n"
                 "- `UC_CreateBoundingBoxes`: interactive Nodes 1.0 bounding-box canvas editor outputting `preview`, pixel `bboxes`, layout `elements`, and `moss_prompt` for `FLUX.3 Layout Prompt`, `Build JSON Prompt (Ideogram)`, and `MOSS-Image`.\n"
-                "- `UC_MOSSImageBBoxConvert`: passthrough converter that maps Gemini's 0 to 1000 `[ymin, xmin, ymax, xmax]` layout JSON (or `Create Bounding Boxes` elements) into `MOSS-Image`'s `abs_centralized` pixel layout JSON."
+                "- `UC_MOSSImageBBoxConvert`: passthrough converter that maps Gemini (`gemini_0_to_1000`) or Qwen3-VL / Qwen3.5 (`qwen_0_to_1000`) 0 to 1000 layout JSON (or `Create Bounding Boxes` elements) into a ready-to-encode `MOSS-Image` centered-pixel layout JSON prompt."
             ),
             "model_inputs": (
                 "## Model inputs and defaults\n\n"
@@ -2098,7 +2098,7 @@ class UC_CompositeNodesGuide(io.ComfyNode):
             ),
             "create_bounding_boxes": (
                 "## Create Bounding Boxes (Nodes 1.0)\n\n"
-                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements`, and `moss_prompt` (`MOSS-Image` `abs_centralized` pixel layout JSON). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected).\n\n"
+                "`UC_CreateBoundingBoxes` provides a Nodes 1.0 canvas editor that outputs `preview`, pixel-space `bboxes`, normalized `elements`, and `moss_prompt` (a ready-to-encode `MOSS-Image` centered-pixel layout JSON prompt). Leaving `width` and `height` at `0` automatically uses the connected `background` image dimensions (`1024x1024` fallback when disconnected).\n\n"
                 "- Click and drag on empty canvas space (or Shift+drag over existing boxes) to draw a new bounding box, or use `+ Object Box` and `+ Text Box`.\n"
                 "- Click a box to select it, drag inside to move it, or drag its eight handles to resize it.\n"
                 "- Each row in the box list corresponds to `<obj_1>`, `<obj_2>`, and so on from background to foreground. Reorder boxes with the row arrow buttons, toggle between `Obj` and `Text`, edit the description or rendered text, open the docked `PaintColorPicker` swatch to assign an optional prompt color (boxes default to outline-only so no color is sent to the prompt unless set; right-click, Shift+click, or press `Clear color (outline only)` to clear), and lock or exclude individual boxes.\n"
