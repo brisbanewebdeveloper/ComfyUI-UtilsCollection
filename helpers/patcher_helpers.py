@@ -873,7 +873,7 @@ def patch_minimax_h3_pdd_model(model: Any, pdd_lora: str, nfe: int, partition: s
     patched.add_wrapper_with_key(wrapper_type, PDD_WRAPPER_KEY, make_pdd_diffusion_wrapper(execution_state))
     patched.model_options[MINIMAX_H3_PDD_OWNER_KEY] = True
     if curve_note:
-        LOG.info("MiniMax H3 PDD: %s", curve_note)
+        logging.info("MiniMax H3 PDD: %s", curve_note)
     return patched, torch.tensor(bounds, dtype=torch.float32)
 
 
