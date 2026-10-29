@@ -22,6 +22,8 @@ DESCRIPTIONS = {
     "UC_SAM31CheckpointLoader": "Loads SAM 3.1 with automatic or deterministic FP32 precision.",
     "UC_YOLODetectorLoader": "Loads a converted YOLOv8 or YOLO11 bounding-box or segmentation safetensors detector from models/yolo for YOLO Detect or detailer workflows.",
     "UC_YOLODetect": "Detects faces, people, hands, skin, hair, or watermarks across images or video frame batches using native safetensors YOLOv8 and YOLO11 models, returning masks and bounding boxes.",
+    "UC_DepthAnythingV3Loader": "Loads a converted Depth Anything V3 safetensors model from models/depthanything3 for monocular or multi-view depth estimation.",
+    "UC_DepthAnythingV3": "Estimates depth maps, confidence masks, sky masks, and camera poses across single images, multi-view sets, or video frame batches using Depth Anything V3.",
     "UC_MaskToBoundingBox": "Returns the smallest Core-compatible bounding box containing the mask.",
     "UC_ImageBlendByMask": "Blends two images using a mask and configurable blend behavior.",
     "UC_ImagePad": "Pads an image and produces the corresponding placement mask.",
@@ -76,6 +78,7 @@ DESCRIPTIONS = {
     "UC_Krea2TokenAttentionWeightTokenFusion": "Applies Krea2 attention weighting after token-first visual fusion and one shared conditioning encode.",
     "UC_AdvMiniMaxH3ImageToVideoTokenFusion": "Builds MiniMax H3 conditioning by fusing Picture tokens before one shared Qwen encode.",
     "UC_MiniMaxH3VLMGuide": "Experimentally inserts independently encoded timestamp and image conditioning before an H3 prompt.",
+    "UC_MiniMaxH3VLMFrameGuide": "Experimentally inserts independently encoded frame-indexed image conditioning before an H3 prompt.",
     "UC_AdvMiniMaxH3ImageToVideoTemporalFusion": "Experimentally fuses corresponding video conditioning blocks from separate Qwen encodes into lane zero.",
     "UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion": "Experimentally fuses corresponding video tokens and DeepStack features before a shared Qwen encode.",
     "UC_ConditioningConsensusBlend": "Blends multiple conditioning outputs after encoding while preserving reference placement.",
@@ -84,7 +87,7 @@ DESCRIPTIONS = {
     "UC_WeightedTextEncodeSystemPrompt": "Encodes weighted text with a custom system prompt.",
     "UC_TextEncodeSystemEditAdvanced": "Encodes advanced image-edit conditioning with custom prompts and multiple images.",
     "UC_TextEncodeGemmaSystemEditAdvanced": "Encodes advanced Gemma image-edit conditioning with custom system prompts.",
-    "UC_AdvancedVisualConditioningEncode": "Encodes and fuses visual conditioning from multiple images with advanced controls.",
+    "UC_AdvancedVisualConditioningEncode": "Encodes and fuses visual conditioning from multiple images with attention strength, inline mapping, and consensus controls.",
     "UC_MiniMaxH3MediaConfig": "Configures Qwen Video sampling and Video motion-guidance memory use for MiniMax H3 nodes.",
     "UC_MiniMaxH3ReferenceMedia": "Collects reference videos, paired reference video audio tracks, and standalone reference audio tracks for MiniMax H3.",
     "UC_AdvancedMiniMaxH3RefMediaImageToVideo": "Encodes MiniMax H3 conditioning, multi-video and audio references from a Reference Media container.",
@@ -98,7 +101,7 @@ DESCRIPTIONS = {
     "UC_AdvancedConsensusConfiguration": "Extends Text Consensus Blend Configurator with resolution count and offset controls.",
     "UC_VLMInputEmbeds": "Exports raw input embeddings from a supported vision-language model encoder.",
     "UC_Krea2TokenAttentionWeight": "Applies phrase-level attention weights while encoding Krea2 visual conditioning.",
-    "UC_TextGenerate": "Generates text from images and timestamped Qwen3-VL video frames, with optional visual-token fusion and structured JSON schema enforcement.",
+    "UC_TextGenerate": "Generates text from images and timestamped Qwen3-VL or Qwen3.5 video frames, with optional visual-token fusion and structured JSON schema enforcement.",
     "UC_TextGenerateQwen35SystemPrompt": "Generates Qwen3.5 text with optional image input, custom system message, and structured JSON schema enforcement.",
     "UC_SwitchInverseNode": "Selects between two inputs using an inverted boolean switch.",
     "UC_SoftSwitchInverseNode": "Selects available inputs using an inverted soft switch.",
@@ -181,6 +184,8 @@ DESCRIPTIONS = {
     "UC_MiniMaxH3ClipContinuationEncoder": "Encodes MiniMax H3 prompts and reference media while pinning a saved clip's ending so motion and sound continue seamlessly across clips.",
     "UC_MiniMaxH3ClipContinuationApply": "Pins the ending frames and sound of your previous clip onto the start of the new clip so motion, characters, and music continue seamlessly across the cut without re-encoding.",
     "UC_MiniMaxH3ClipContinuationSampler": "Samples a list of MiniMax H3 video segments in a single run, automatically slicing each finished segment's latent video and audio tail into the next segment without re-encoding media.",
+    "UC_MiniMaxH3RefVid": "Prepares video frames, audio, and matching generation dimensions for MiniMax H3 reference video workflows.",
+    "UC_H3RefVideoSegments": "Prepares all sequential H3 reference segments as list outputs for multi-chunk captioning and conditioning workflows.",
 }
 
 
@@ -194,9 +199,12 @@ EXTRA_ALIASES = {
     "UC_FromSeedCluster": ["unpack seeds", "seed list", "distribute seeds"],
     "UC_ConditioningConsensusBlend": ["conditioning merge", "conditioning combine", "post encoder", "cwb"],
     "UC_VisualFusionConfig": ["image token fusion", "visual blend", "dither", "checkerboard"],
+    "UC_AdvancedVisualConditioningEncode": ["visual conditioning", "image strength", "multi image encode", "moss image edit"],
     "UC_AdvancedVisualConditioningEncodeTokenFusion": ["token fusion", "visual token encode"],
     "UC_Krea2TokenAttentionWeightTokenFusion": ["token fusion", "Krea2 attention"],
     "UC_AdvMiniMaxH3ImageToVideoTokenFusion": ["token fusion", "MiniMax H3"],
+    "UC_MiniMaxH3VLMGuide": ["minimax guide", "h3 guide", "timestamp guide", "vlm guide"],
+    "UC_MiniMaxH3VLMFrameGuide": ["minimax guide", "h3 guide", "frame guide", "vlm guide", "minimax frame guide"],
     "UC_AdvancedVisConEncoder": ["visual consensus", "resolution consensus", "deepstack fusion"],
     "UC_AdvancedVisConEncoderTokenFusion": ["visual consensus", "token fusion", "resolution consensus"],
     "UC_VisualConsensusConfiguration": ["visual consensus config", "spatial consensus"],
@@ -240,6 +248,10 @@ EXTRA_ALIASES = {
     "UC_MiniMaxH3ClipContinuationSampler": ["continuation sampler", "chain sampler", "segment list sampler", "h3 list sampler"],
     "UC_YOLODetectorLoader": ["yolo detector loader", "yolo loader", "yolov8", "yolo11", "bbox detector", "segm detector", "adetailer", "impact pack"],
     "UC_YOLODetect": ["yolo detect", "yolov8", "yolo11", "watermark detector", "face detector", "hand detector", "person segmentation", "hair segmentation", "skin segmentation", "segs"],
+    "UC_DepthAnythingV3Loader": ["depth anything", "depth anything v3", "da3", "depth loader", "monocular depth", "multiview depth"],
+    "UC_DepthAnythingV3": ["depth anything", "depth anything v3", "da3", "depth map", "controlnet depth", "disparity", "camera pose", "sky mask"],
+    "UC_MiniMaxH3RefVid": ["minimax", "h3", "reference video", "h3 ref video", "24 fps"],
+    "UC_H3RefVideoSegments": ["minimax", "h3", "reference", "video", "segments", "list", "h3 segments"],
 }
 
 

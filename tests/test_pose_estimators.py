@@ -179,8 +179,9 @@ def test_available_safetensors_load_through_uel_without_inference(monkeypatch, f
     with model_helpers.MemoryEfficientSafeOpen(path, low_memory=True) as source:
         assert set(loaded) == set(source.keys())
         first, last = next(iter(loaded)), next(reversed(loaded))
-        assert torch.equal(loaded[first], source.get_tensor(first))
-        assert torch.equal(loaded[last], source.get_tensor(last))
+    streamed, _ = model_helpers.read_uel_safetensors_dict(path, [first, last])
+    assert torch.equal(loaded[first], streamed[first])
+    assert torch.equal(loaded[last], streamed[last])
 
 
 def test_pose_download_uses_registered_directory_and_reuses_existing_file(monkeypatch, tmp_path):
@@ -398,12 +399,14 @@ def test_new_pose_migrations_load_installed_safetensors_without_inference(monkey
         loaded = patcher.model.state_dict()
         assert set(loaded) == set(source.keys())
         last = next(reversed(loaded))
-        assert torch.equal(loaded[last], source.get_tensor(last))
-        if kind == "densepose_r50":
-            for name in ("roi_heads.box_head.fc1", "roi_heads.box_head.fc2", "roi_heads.box_predictor.cls_score", "roi_heads.box_predictor.bbox_pred"):
-                for suffix in ("weight", "bias"):
-                    key = f"{name}.{suffix}"
-                    assert torch.equal(loaded[key], source.get_tensor(key))
+    check_keys = [last]
+    if kind == "densepose_r50":
+        for name in ("roi_heads.box_head.fc1", "roi_heads.box_head.fc2", "roi_heads.box_predictor.cls_score", "roi_heads.box_predictor.bbox_pred"):
+            for suffix in ("weight", "bias"):
+                check_keys.append(f"{name}.{suffix}")
+    streamed, _ = model_helpers.read_uel_safetensors_dict(path, check_keys)
+    for key in check_keys:
+        assert torch.equal(loaded[key], streamed[key])
 
 
 @pytest.mark.parametrize("model_name", model_helpers.YOLO_MODELS)
@@ -431,8 +434,9 @@ def test_yolo_migrations_load_installed_safetensors_without_inference(monkeypatc
         loaded = patcher.model.state_dict()
         assert set(loaded) == set(source.keys())
         first, last = next(iter(loaded)), next(reversed(loaded))
-        assert torch.equal(loaded[first], source.get_tensor(first))
-        assert torch.equal(loaded[last], source.get_tensor(last))
+    streamed, _ = model_helpers.read_uel_safetensors_dict(path, [first, last])
+    assert torch.equal(loaded[first], streamed[first])
+    assert torch.equal(loaded[last], streamed[last])
 
 
 def test_yolo_detect_batches_frames_decodes_masks_and_builds_segs():
@@ -550,8 +554,197 @@ def test_yolo_dfl_and_c2psa_forward_math():
     decoded = dfl(logits)
     torch.testing.assert_close(decoded[0, :, 0], torch.tensor([0.0, 1.0, 2.0, 3.0]), atol=1e-4, rtol=1e-4)
 
-    psa = _C2PSA(128, 128, depth=1, operations=torch.nn).eval()
+    psa = _C2PSA(128, 128, depth=1, operations=torch.nn).train(False)
     sample = torch.zeros((1, 128, 4, 4), dtype=torch.float32)
     out = psa(sample)
     assert out.shape == (1, 128, 4, 4)
+
+
+@pytest.mark.parametrize("model_name", model_helpers.DEPTH_ANYTHING_MODELS)
+@pytest.mark.parametrize("lazy_linear", [False, True])
+def test_depth_anything_migrations_load_installed_safetensors_without_inference(monkeypatch, model_name, lazy_linear):
+    monkeypatch.setattr(comfy.memory_management, "aimdo_enabled", lazy_linear)
+    model_helpers.register_depth_anything_paths()
+    if pathlib.Path(r"F:\models\depthanything3").is_dir():
+        model_helpers.folder_paths.add_model_folder_path(model_helpers.DEPTH_ANYTHING_FOLDER, r"F:\models\depthanything3")
+    kind, architecture = model_helpers.DEPTH_ANYTHING_MIGRATIONS[model_name]
+    specification = model_helpers.get_model_migration(kind)
+    path = model_helpers.folder_paths.get_full_path(model_helpers.DEPTH_ANYTHING_FOLDER, specification["filename"])
+    if path is None:
+        pytest.skip("Converted local Depth Anything 3 checkpoint not present")
+    monkeypatch.setattr(model_helpers.comfy.model_management, "get_torch_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(model_helpers.comfy.model_management, "unet_offload_device", lambda: torch.device("cpu"))
+    alias_name = model_name.removesuffix(".safetensors").replace("_", "-")
+    patcher = model_helpers.load_depth_anything_model(alias_name)
+    assert type(patcher.model) is architecture
+    assert patcher.model.model_name == model_name
+    with model_helpers.MemoryEfficientSafeOpen(path, low_memory=True) as source:
+        loaded = patcher.model.state_dict()
+        assert set(loaded) == set(source.keys())
+    check_keys = [
+        next(iter(loaded)),
+        "backbone.pretrained.blocks.0.attn.qkv.weight",
+        "backbone.pretrained.blocks.0.attn.qkv.bias",
+        next(reversed(loaded)),
+    ]
+    streamed, _ = model_helpers.read_uel_safetensors_dict(path, check_keys)
+    for check_key in check_keys:
+        assert torch.equal(loaded[check_key], streamed[check_key])
+
+
+def test_depth_anything_architecture_rope_reordering_and_heads_forward_math():
+    from utils_collection_pose_test.models.depth_anything import (
+        _CameraDec,
+        _CameraEnc,
+        _DinoVisionTransformer,
+        _DPT,
+        _DualDPT,
+        reorder_by_reference,
+        restore_original_order,
+        select_reference_view,
+    )
+
+    tokens = torch.arange(2 * 4 * 5 * 8, dtype=torch.float32).reshape(2, 4, 5, 8) + 1.0
+    for strategy in ("first", "middle", "saddle_balanced", "saddle_sim_range"):
+        ref_idx = select_reference_view(tokens, strategy=strategy)
+        reordered = reorder_by_reference(tokens, ref_idx)
+        assert torch.equal(reordered[0, 0], tokens[0, ref_idx[0]])
+        assert torch.equal(reordered[1, 0], tokens[1, ref_idx[1]])
+        restored = restore_original_order(reordered, ref_idx)
+        assert torch.equal(restored, tokens)
+
+    vit = _DinoVisionTransformer(
+        img_size=28,
+        patch_size=14,
+        embed_dim=32,
+        depth=3,
+        num_heads=4,
+        alt_start=1,
+        qknorm_start=1,
+        rope_start=1,
+        cat_token=True,
+        operations=torch.nn,
+    ).train(False)
+    sample_5d = torch.zeros((1, 3, 3, 28, 42), dtype=torch.float32)
+    feats = vit.forward_features(sample_5d, out_layers=(1, 2), ref_view_strategy="middle")
+    assert len(feats) == 2
+    assert feats[0][0].shape == (1, 3, 6, 64)
+    assert feats[0][1].shape == (1, 3, 64)
+
+    dual_head = _DualDPT(
+        dim_in=64,
+        output_dim=2,
+        features=16,
+        out_channels=(8, 16, 32, 32),
+        operations=torch.nn,
+    ).train(False)
+    four_stage_feats = [(feats[0][0], feats[0][1])] * 4
+    out_no_ray = dual_head(four_stage_feats, 28, 42, compute_ray=False)
+    assert set(out_no_ray) == {"depth", "depth_conf"}
+    assert out_no_ray["depth"].shape == (1, 3, 28, 42)
+    assert out_no_ray["depth_conf"].shape == (1, 3, 28, 42)
+    assert bool((out_no_ray["depth"] > 0).all())
+    assert bool((out_no_ray["depth_conf"] >= 1.0).all())
+
+    out_with_ray = dual_head(four_stage_feats, 28, 42, compute_ray=True)
+    assert set(out_with_ray) == {"depth", "depth_conf", "ray", "ray_conf"}
+    assert out_with_ray["ray"].shape == (1, 3, 16, 24, 6)
+    assert out_with_ray["ray_conf"].shape == (1, 3, 16, 24)
+
+    mono_head = _DPT(
+        dim_in=32,
+        output_dim=1,
+        features=16,
+        out_channels=(8, 16, 32, 32),
+        use_sky_head=True,
+        operations=torch.nn,
+    ).train(False)
+    mono_feats = [(feats[0][0][..., :32], feats[0][1][..., :32])] * 4
+    mono_out = mono_head(mono_feats, 28, 42)
+    assert set(mono_out) == {"depth", "sky"}
+    assert mono_out["depth"].shape == (1, 3, 28, 42)
+    assert mono_out["sky"].shape == (1, 3, 28, 42)
+
+    cam_dec = _CameraDec(dim_in=64, operations=torch.nn).train(False)
+    pose_enc = cam_dec(feats[-1][1])
+    assert pose_enc.shape == (1, 3, 9)
+
+    cam_enc = _CameraEnc(dim_out=32, num_heads=4, operations=torch.nn).train(False)
+    ext = torch.eye(4, dtype=torch.float32).unsqueeze(0).unsqueeze(0).expand(1, 3, 4, 4).clone()
+    ixt = torch.tensor([[[28.0, 0.0, 21.0], [0.0, 28.0, 14.0], [0.0, 0.0, 1.0]]]).unsqueeze(0).expand(1, 3, 3, 3).clone()
+    cam_tok = cam_enc(ext, ixt, (28, 42))
+    assert cam_tok.shape == (1, 3, 32)
+
+
+def test_depth_anything_preprocess_and_run_pipeline():
+    import json
+
+    raw_images = torch.rand((3, 50, 80, 3), dtype=torch.float32)
+    for method in image_helpers.DEPTH_ANYTHING_RESIZE_METHODS:
+        proc = image_helpers.preprocess_depth_anything_batch(raw_images, process_res=56, resize_method=method)
+        assert proc.shape[0] == 3 and proc.shape[1] == 3
+        assert proc.shape[2] % 14 == 0 and proc.shape[3] % 14 == 0
+
+    seen_shapes = []
+
+    class DummyDA3Model:
+        class model:
+            ALT_START = 4
+
+    def fake_forward(patcher, images_5d, ref_view_strategy="saddle_balanced"):
+        seen_shapes.append((tuple(images_5d.shape), ref_view_strategy))
+        b, s, _, h, w = images_5d.shape
+        n = b * s
+        depth = torch.ones((b, s, h, w), dtype=torch.float32) * 2.0
+        depth[:, :, : h // 2, :] = 1.0  # Top half closer (d=1.0), bottom half farther (d=2.0)
+        depth[:, :, -2:, -2:] = 100.0   # Small sky corner
+        conf = torch.full((b, s, h, w), 1.5, dtype=torch.float32)
+        sky = torch.zeros((b, s, h, w), dtype=torch.float32)
+        sky[:, :, -2:, -2:] = 0.8
+        ext = torch.eye(4, dtype=torch.float32)[:3, :4].unsqueeze(0).unsqueeze(0).expand(b, s, 3, 4).clone()
+        ixt = torch.tensor([[50.0, 0.0, w / 2.0], [0.0, 50.0, h / 2.0], [0.0, 0.0, 1.0]]).view(1, 1, 3, 3).expand(b, s, 3, 3).clone()
+        return {"depth": depth.reshape(n, h, w), "depth_conf": conf, "sky": sky, "extrinsics": ext, "intrinsics": ixt}
+
+    depth_img, depth_mask, conf_mask, sky_mask, poses_json = image_helpers.run_depth_anything(
+        DummyDA3Model(),
+        raw_images,
+        process_res=56,
+        resize_method="upper_bound_resize",
+        multi_view_mode="independent",
+        output_mode="disparity",
+        sky_fill=True,
+        keep_model_size=False,
+        batch_size=2,
+        forward=fake_forward,
+    )
+    assert [shape[:2] for shape, _ in seen_shapes] == [(2, 1), (1, 1)]
+    assert depth_img.shape == (3, 50, 80, 3)
+    assert depth_mask.shape == (3, 50, 80)
+    assert conf_mask.shape == (3, 50, 80) and torch.all(conf_mask == 1.0)
+    assert sky_mask.shape == (3, 50, 80)
+    # Closer top half should have higher disparity (1.0) than farther bottom half (0.0)
+    assert float(depth_mask[0, 5, 10]) > float(depth_mask[0, 40, 10])
+    poses = json.loads(poses_json)
+    assert len(poses) == 3 and [p["frame_index"] for p in poses] == [0, 1, 2]
+    assert poses[0]["intrinsics"][0][2] == pytest.approx(40.0, abs=1e-3)
+    assert poses[0]["intrinsics"][1][2] == pytest.approx(25.0, abs=1e-3)
+
+    seen_shapes.clear()
+    _, mv_mask, _, _, _ = image_helpers.run_depth_anything(
+        DummyDA3Model(),
+        raw_images,
+        process_res=56,
+        multi_view_mode="multi_view",
+        ref_view_strategy="first",
+        output_mode="depth",
+        invert_depth=True,
+        keep_model_size=True,
+        batch_size=2,
+        forward=fake_forward,
+    )
+    assert [shape[:2] for shape, _ in seen_shapes] == [(1, 2), (1, 1)]
+    assert mv_mask.shape[1] % 14 == 0 and mv_mask.shape[2] % 14 == 0
+    # With invert_depth=True on linear depth, closer top half is darker (0.0) than farther bottom half (1.0)
+    assert float(mv_mask[0, 2, 2]) < float(mv_mask[0, mv_mask.shape[1] - 5, 2])
+
 

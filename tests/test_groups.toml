@@ -102,6 +102,7 @@ paths = [
   "models/yolox.py",
   "models/rtmpose.py",
   "models/densepose.py",
+  "models/depth_anything.py",
   "models/yolo.py",
   "models/migrations.json",
   "color_name_data.py",
@@ -260,6 +261,6 @@ python_tests = ["tests/test_lama.py", "tests/test_lama_conversion.py"]
 frontend_tests = []
 
 [groups.whisper]
-paths = ["nodes/model_nodes.py", "helpers/model_helpers.py", "helpers/whisper_timing_helpers.py", "models/whisper.py", "models/whisper_assets/*"]
+paths = ["nodes/model_nodes.py", "helpers/model_helpers.py", "helpers/whisper_timing_helpers.py", "models/whisper.py"]
 python_tests = ["tests/test_whisper.py"]
 frontend_tests = []

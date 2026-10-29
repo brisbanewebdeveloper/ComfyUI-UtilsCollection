@@ -414,6 +414,8 @@ def test_raw_query_presets_preserve_instructions_without_request_carriers():
         "h3_ref2va_attr_transfer_audio_timbre",
         "h3_ref2va_attr_transfer_audio_copy",
         "h3_ref2va_attr_transfer_no_audio",
+        "h3_scene_image_any2va",
+        "h3_storyboard_any2va",
         "h3_scene_image_t2va",
         "h3_storyboard_t2va",
     ):
@@ -1876,61 +1878,135 @@ def test_minimax_h3_fl2va_contract():
 
 
 def test_minimax_h3_scene_image_any2va_contract():
-    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_any2va_system_instruction"]
-    assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
-    assert "The single supplied image acts as the visual seed" in instruction
-    assert "extrapolate a continuous, escalating progression of motion" in instruction
-    assert "Do not emit `<Picture 1>` or any media identifier inside the summary or timeline" in instruction
-    assert (
-        "Do not create a Video namespace from the image" in instruction
-        or "Do not create a <Video N> namespace from the image" in instruction
-    )
-    assert "subject_definitions:" in instruction
-    assert "summary:" in instruction
-    assert "detailed_description:" in instruction
-    assert "retention_analysis:" not in instruction
+    for collection in (
+        vlm_presets.system_instructions_vlm,
+        vlm_motion_presets.motion_system_instructions_vlm,
+    ):
+        instruction = collection["video_timeline_minimax_h3_scene_image_any2va_system_instruction"]
+        assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
+        assert "The single supplied image acts as the visual seed" in instruction
+        assert "extrapolate a continuous, escalating progression of motion" in instruction
+        assert "do not emit `<Picture 1>` or any media identifier inside the summary or timeline" in instruction
+        assert "do not create a <Video N> namespace from the image" in instruction
+        assert "Conditional User-Instructed Reference Rule:" in instruction
+        assert "Only when the user instruction explicitly specifies" in instruction
+        assert "referenced from <Picture N>" in instruction
+        assert "#### retention_analysis (Conditional on User Instruction)" in instruction
+        assert "Segment Visual and Motion Density Requirement:" in instruction
+        assert "Detailed 3-5 sentence" in instruction
+        assert "short single sentence" not in instruction
+        assert "when no `<Video N>` reference is explicitly specified by the user instruction" in instruction
+        assert "never write `of the video`" in instruction
+        assert "First and foremost, when an <Audio N> item supplies the soundtrack, background music, or musical beat for the video" in instruction
+        assert "`non_diegetic_music:` must begin with `<Audio N>`" in instruction
+        assert "Never use the word 'both' or 'Both' in any context inside [VISUAL]" in instruction
+        assert "In-Place Character Replacement Rule (No Replacement Instructions):" in instruction
+        assert "never write a prompt that instructs replacement, swapping, editing, or transfer" in instruction
+        assert "completely replace the character in the full description across all instances" in instruction
+        assert "subject_definitions:" in instruction
+        assert "summary:" in instruction
+        assert "retention_analysis:" in instruction
+        assert "detailed_description:" in instruction
+        assert re.search(r"\{[^{}]*\{[^{}]*\}[^{}]*\}", instruction) is None
 
 
 def test_minimax_h3_scene_image_t2va_contract():
-    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_scene_image_t2va_system_instruction"]
-    assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
-    assert "The single supplied image acts as the visual seed" in instruction
-    assert "extrapolate a continuous, escalating progression of motion" in instruction
-    assert "Do not emit `<Picture 1>` or any media identifier inside the timeline" in instruction
-    assert (
-        "Do not create a Video namespace from the image" in instruction
-        or "Do not create a <Video N> namespace from the image" in instruction
-    )
-    assert "integrated_multimodal_description:" in instruction
-    assert "subject_definitions:" not in instruction
-    assert "summary:" not in instruction
-    assert "retention_analysis:" not in instruction
+    for collection in (
+        vlm_presets.system_instructions_vlm,
+        vlm_motion_presets.motion_system_instructions_vlm,
+    ):
+        instruction = collection["video_timeline_minimax_h3_scene_image_t2va_system_instruction"]
+        assert "MiniMax H3 Scene Image to Video Adaptive Timeline" in instruction
+        assert "The single supplied image acts as the visual seed" in instruction
+        assert "extrapolate a continuous, escalating progression of motion" in instruction
+        assert "Do not emit `<Picture 1>` or any media identifier inside the timeline" in instruction
+        assert (
+            "Do not create a Video namespace from the image" in instruction
+            or "Do not create a <Video N> namespace from the image" in instruction
+        )
+        assert "In-Place Character Replacement Rule (No Replacement Instructions):" in instruction
+        assert "never write a prompt that instructs replacement, swapping, editing, or transfer" in instruction
+        assert "completely replace the character in the full description across all instances" in instruction
+        assert "integrated_multimodal_description:" in instruction
+        assert "subject_definitions:" not in instruction
+        assert "summary:" not in instruction
+        assert "retention_analysis:" not in instruction
+        assert "Segment Visual and Motion Density Requirement:" in instruction
+        assert "Detailed 3-5 sentence" in instruction
+        assert "short single sentence" not in instruction
+        assert "Never use the word 'both' or 'Both' in any context inside [VISUAL]" in instruction
+        assert re.search(r"\{[^{}]*\{[^{}]*\}[^{}]*\}", instruction) is None
 
 
 def test_minimax_h3_storyboard_any2va_contract():
-    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_storyboard_any2va_system_instruction"]
-    assert "MiniMax H3 Storyboard to Video" in instruction
-    assert "Strict Graphic Strip Rule:" in instruction
-    assert "comic book or graphic conventions be described or included in the output prompt" in instruction
-    assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
-    assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
-    assert "subject_definitions:" in instruction
-    assert "summary:" in instruction
-    assert "detailed_description:" in instruction
-    assert "retention_analysis:" not in instruction
+    for collection in (
+        vlm_presets.system_instructions_vlm,
+        vlm_motion_presets.motion_system_instructions_vlm,
+    ):
+        instruction = collection["video_timeline_minimax_h3_storyboard_any2va_system_instruction"]
+        assert "MiniMax H3 Storyboard to Video" in instruction
+        assert "comic strip" in instruction
+        assert "a stitched-together row of images outlining the timeline progression" in instruction
+        assert "multiple separate images showing the progression of the timeline" in instruction
+        assert "a video showing a detailed progression" in instruction
+        assert "The storyboard is seen only by the VLM and is never seen by the downstream video model" in instruction
+        assert "every single motion, action, interaction, dialogue, song, sound, and music" in instruction
+        assert "The target video translates the sequential storyboard panels" not in instruction
+        assert "Strict Graphic Strip Rule:" in instruction
+        assert "comic book or graphic conventions, or the storyboard itself, be described or included in the output prompt" in instruction
+        assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
+        assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
+        assert "Conditional User-Instructed Reference Rule:" in instruction
+        assert "Only when the user instruction explicitly specifies" in instruction
+        assert "referenced from <Picture N>" in instruction
+        assert "#### retention_analysis (Conditional on User Instruction)" in instruction
+        assert "Segment Visual and Motion Density Requirement:" in instruction
+        assert "Detailed 3-5 sentence" in instruction
+        assert "short single sentence" not in instruction
+        assert "when no `<Video N>` reference is explicitly specified by the user instruction" in instruction
+        assert "never write `of the video`" in instruction
+        assert "First and foremost, when an <Audio N> item supplies the soundtrack, background music, or musical beat for the video" in instruction
+        assert "`non_diegetic_music:` must begin with `<Audio N>`" in instruction
+        assert "Never use the word 'both' or 'Both' in any context inside [VISUAL]" in instruction
+        assert "In-Place Character Replacement Rule (No Replacement Instructions):" in instruction
+        assert "never write a prompt that instructs replacement, swapping, editing, or transfer" in instruction
+        assert "completely replace the character in the full description across all instances" in instruction
+        assert "subject_definitions:" in instruction
+        assert "summary:" in instruction
+        assert "retention_analysis:" in instruction
+        assert "detailed_description:" in instruction
+        assert re.search(r"\{[^{}]*\{[^{}]*\}[^{}]*\}", instruction) is None
 
 
 def test_minimax_h3_storyboard_t2va_contract():
-    instruction = vlm_presets.system_instructions_vlm["video_timeline_minimax_h3_storyboard_t2va_system_instruction"]
-    assert "MiniMax H3 Storyboard to Video" in instruction
-    assert "Strict Graphic Strip Rule:" in instruction
-    assert "comic book or graphic conventions be described or included in the output prompt" in instruction
-    assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
-    assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
-    assert "integrated_multimodal_description:" in instruction
-    assert "subject_definitions:" not in instruction
-    assert "summary:" not in instruction
-    assert "retention_analysis:" not in instruction
+    for collection in (
+        vlm_presets.system_instructions_vlm,
+        vlm_motion_presets.motion_system_instructions_vlm,
+    ):
+        instruction = collection["video_timeline_minimax_h3_storyboard_t2va_system_instruction"]
+        assert "MiniMax H3 Storyboard to Video" in instruction
+        assert "comic strip" in instruction
+        assert "a stitched-together row of images outlining the timeline progression" in instruction
+        assert "multiple separate images showing the progression of the timeline" in instruction
+        assert "a video showing a detailed progression" in instruction
+        assert "The storyboard is seen only by the VLM and is never seen by the downstream video model" in instruction
+        assert "every single motion, action, interaction, dialogue, song, sound, and music" in instruction
+        assert "Strict Graphic Strip Rule:" in instruction
+        assert "comic book or graphic conventions, or the storyboard itself, be described or included in the output prompt" in instruction
+        assert "Strip panel borders, speech bubbles, sound effect lettering, and graphic conventions." in instruction
+        assert "Dialogue text visibly printed in speech bubbles must be transcribed into `[SPEECH]` rows" in instruction
+        assert "In-Place Character Replacement Rule (No Replacement Instructions):" in instruction
+        assert "never write a prompt that instructs replacement, swapping, editing, or transfer" in instruction
+        assert "completely replace the character in the full description across all instances" in instruction
+        assert "integrated_multimodal_description:" in instruction
+        assert "subject_definitions:" not in instruction
+        assert "summary:" not in instruction
+        assert "retention_analysis:" not in instruction
+        assert "Segment Visual and Motion Density Requirement:" in instruction
+        assert "Detailed 3-5 sentence" in instruction
+        assert "short single sentence" not in instruction
+        assert "Never use the word 'both' or 'Both' in any context inside [VISUAL]" in instruction
+        assert re.search(r"\{[^{}]*\{[^{}]*\}[^{}]*\}", instruction) is None
 
 
 def test_minimax_h3_ref2va_attribute_transfer_variants_contracts():
@@ -2024,26 +2100,48 @@ def test_h3_dedicated_query_presets_contracts():
     scene_any_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_any2va_prefix"]
     scene_any_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_any2va_suffix"]
     assert "strictly as an opening scene seed" in scene_any_pref
+    assert "if and only if the user request explicitly specifies" in scene_any_pref
+    assert "never write a prompt that instructs replacement" in scene_any_pref
+    assert "completely replace the character in the full description at all instances" in scene_any_pref
     assert "[reference generation]" in scene_any_suff
-    assert "No `retention_analysis:` field" in scene_any_suff
+    assert "Omit by default; include `retention_analysis:`" in scene_any_suff
+    assert "only when the user request explicitly specifies downstream reference media" in scene_any_suff
+    assert "completely replace the character in-place across all instances" in scene_any_suff
 
     scene_t2va_pref = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_prefix"]
     scene_t2va_suff = vlm_presets.system_query_additional_vlm["h3_scene_image_t2va_suffix"]
     assert "strictly as an opening scene seed" in scene_t2va_pref
+    assert "never write a prompt that instructs replacement" in scene_t2va_pref
+    assert "completely replace the character in the full description at all instances" in scene_t2va_pref
     assert "integrated_multimodal_description:" in scene_t2va_suff
     assert "overall_soundscape:" in scene_t2va_suff
+    assert "completely replace the character in-place across all instances" in scene_t2va_suff
 
     story_any_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_any2va_prefix"]
     story_any_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_any2va_suffix"]
     assert "Strict Graphic Strip Rule" in story_any_pref
+    assert "a stitched-together row of images outlining the timeline progression" in story_any_pref
+    assert "multiple separate images showing the progression of the timeline" in story_any_pref
+    assert "a video showing a detailed progression" in story_any_pref
+    assert "if and only if the user request explicitly specifies" in story_any_pref
+    assert "never write a prompt that instructs replacement" in story_any_pref
+    assert "completely replace the character in the full description at all instances" in story_any_pref
     assert "[reference generation]" in story_any_suff
-    assert "No `retention_analysis:` field" in story_any_suff
+    assert "Omit by default; include `retention_analysis:`" in story_any_suff
+    assert "only when the user request explicitly specifies downstream reference media" in story_any_suff
+    assert "completely replace the character in-place across all instances" in story_any_suff
 
     story_t2va_pref = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_prefix"]
     story_t2va_suff = vlm_presets.system_query_additional_vlm["h3_storyboard_t2va_suffix"]
     assert "Strict Graphic Strip Rule" in story_t2va_pref
+    assert "a stitched-together row of images outlining the timeline progression" in story_t2va_pref
+    assert "multiple separate images showing the progression of the timeline" in story_t2va_pref
+    assert "a video showing a detailed progression" in story_t2va_pref
+    assert "never write a prompt that instructs replacement" in story_t2va_pref
+    assert "completely replace the character in the full description at all instances" in story_t2va_pref
     assert "integrated_multimodal_description:" in story_t2va_suff
     assert "overall_soundscape:" in story_t2va_suff
+    assert "completely replace the character in-place across all instances" in story_t2va_suff
 
 
 def test_minimax_h3_attr_transfer_multi_subject_contracts():
@@ -2053,23 +2151,58 @@ def test_minimax_h3_attr_transfer_multi_subject_contracts():
         "video_timeline_minimax_h3_ref2va_attr_transfer_no_audio",
     )
     for key in keys:
-        instruction = vlm_presets.system_instructions_vlm[key]
-        assert "Original subjects from `<Video 1>` designated for replacement must NEVER be defined under `subject_definitions:`" in instruction
-        assert "`<Subject {N}>` is a {visual description of the subject that will be used in the video}, referenced from `<Picture {N}>`." in instruction
-        assert "where on-screen subject(s) are replaced by defined `<Subject {N}>` entities from `<Picture {N}>`" in instruction
-        assert "with source subjects replaced by defined `<Subject {N}>` entities" in instruction
-        assert (
-            "Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`"
-            in instruction
-            or "Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined <Subject N> must strictly and exclusively depict that <Subject N> using the visual traits established by matching <Picture N>"
-            in instruction
-        )
-        assert (
-            "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned `<Subject N>` aliases under `subject_definitions:`"
-            in instruction
-            or "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned <Subject N> aliases under `subject_definitions:`"
-            in instruction
-        )
+        for collection in (
+            vlm_presets.system_instructions_vlm,
+            vlm_motion_presets.motion_system_instructions_vlm,
+        ):
+            instruction = collection[key]
+            assert "Original subjects from `<Video 1>` designated for replacement must NEVER be defined under `subject_definitions:`" in instruction
+            assert "Every other non-replaced subject present in `<Video 1>` must be defined as its own `<Subject {N}>` under `subject_definitions:` using its visible traits from `<Video 1>`." in instruction
+            assert "When other subjects in `<Video 1>` have dialogue, attribute their `[SPEECH]` lines to their own `<Subject {N}> (S{N})` tag and never set their dialogue to be spoken by the reference-replaced subject." in instruction
+            assert "Every other non-replaced subject present in `<Video 1>` must be defined as its own <Subject N> in `subject_definitions:` using its visible traits from `<Video 1>`." in instruction
+            assert "Attribute every [SPEECH] line strictly to the <Subject N> (Sx) who speaks it; if other subjects in `<Video 1>` have dialogue, assign their dialogue to their own <Subject N> (Sx) tag and never set it to be spoken by the reference-replaced subject." in instruction
+            assert "`<Subject {N}>` is a {visual description of the subject that will be used in the video}, referenced from `<Picture {N}>`." in instruction
+            assert "where on-screen subject(s) are replaced by defined `<Subject {N}>` entities from `<Picture {N}>`" in instruction
+            assert "with source subjects replaced by defined `<Subject {N}>` entities" in instruction
+            assert (
+                "Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined `<Subject N>` must strictly and exclusively depict that `<Subject N>` using the visual traits established by matching `<Picture N>`"
+                in instruction
+                or "Strict Visual Appearance Continuity: In every single shot and timestamp block, all visual details (face, body, materials, textures, geometry, colors) for each defined <Subject N> must strictly and exclusively depict that <Subject N> using the visual traits established by matching <Picture N>"
+                in instruction
+            )
+            assert (
+                "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned `<Subject N>` aliases under `subject_definitions:`"
+                in instruction
+                or "Original subjects from `<Video 1>` designated for replacement are NEVER defined, named, described, or assigned <Subject N> aliases under `subject_definitions:`"
+                in instruction
+            )
+
+    for collection in (
+        vlm_presets.system_instructions_vlm,
+        vlm_motion_presets.motion_system_instructions_vlm,
+    ):
+        attr_transfer = collection["video_timeline_minimax_h3_ref2va_attribute_transfer"]
+        assert "Every other non-replaced subject present in `<Video 1>` must be defined as its own `<Subject {N}>` under `subject_definitions:` using its visible traits from `<Video 1>`." in attr_transfer
+        assert "Attribute every [SPEECH] line strictly to the <Subject N> (Sx) who speaks it; if other subjects in <Video 1> have dialogue, assign their dialogue to their own <Subject N> (Sx) tag and never set it to be spoken by the reference-replaced subject." in attr_transfer
+
+        ref2va_general = collection["video_timeline_minimax_h3_ref2va_general"]
+        assert "define every other non-replaced subject present in <Video N> as its own <Subject N> using its visible traits from <Video N>." in ref2va_general
+        assert "Attribute every [SPEECH] line strictly to the <Subject N> (Sx) who speaks it; if other subjects in the video have dialogue, assign their dialogue to their own <Subject N> (Sx) tag and never set it to be spoken by the reference-replaced subject." in ref2va_general
+
+    for query_key in (
+        "h3_ref2va_attr_transfer_audio_timbre",
+        "h3_ref2va_attr_transfer_audio_copy",
+        "h3_ref2va_attr_transfer_no_audio",
+    ):
+        pref = vlm_presets.system_query_additional_vlm[f"{query_key}_prefix"]
+        suff = vlm_presets.system_query_additional_vlm[f"{query_key}_suffix"]
+        raw = vlm_presets.system_query_raw_vlm[query_key]
+        assert "Any other non-replaced subjects in `<Video 1>` must be defined as separate `<Subject N>` entities" in pref
+        assert "define any other non-replaced subjects in `<Video 1>` as their own `<Subject N>` entities" in suff
+        assert "never set" in suff and "spoken by `<Subject 1>`" in suff
+        assert "define any other non-replaced subjects in `<Video 1>` as their own `<Subject N>` entities" in raw
+        assert "never set" in raw and "spoken by `<Subject 1>`" in raw
+
 
 
 def test_moss_image_json_preset_contract():

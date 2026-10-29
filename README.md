@@ -45,6 +45,7 @@ Native inference uses ComfyUI model management and attention, UEL safetensors lo
 - `UC_MiniMaxH3BasePromptBuilder`
 - `UC_MiniMaxH3DynamicPromptBuilder`
 - `UC_MiniMaxH3VLMGuide`
+- `UC_MiniMaxH3VLMFrameGuide`
 - `UC_MiniMaxH3MediaConfig`
 - `UC_MiniMaxH3RefExtract`
 - `UC_MiniMaxH3AudioRefExtract`
@@ -71,7 +72,7 @@ All four H3 image-to-video encoders preserve joint Qwen encoding regardless of e
 
 The temporal encoders fuse offset video samples into the ordinary video token budget. Set temporal density and consensus/spatial method on `UC_MiniMaxH3MediaConfig`; density 1 preserves ordinary sampling. Consensus uses `UC_TextConsensusBlendConfig`, spatial fusion uses `UC_VisualFusionConfig`.
 
-`UC_MiniMaxH3VLMGuide` inserts an independently encoded timestamp/image block before the prompt in compatible H3 conditioning. Chained guides retain insertion order. This experiment does not re-encode the original prompt jointly with the guide.
+`UC_MiniMaxH3VLMGuide` inserts an independently encoded timestamp/image block before the prompt in compatible H3 conditioning. `UC_MiniMaxH3VLMFrameGuide` is its frame-indexed child node using zero-based indexing (0 is first frame, 1 is second frame, -1 is last frame) at 24 fps, accepting an optional AV latent to resolve negative frame indices when conditioning lacks frame-count metadata. Chained guides retain insertion order. This experiment does not re-encode the original prompt jointly with the guide.
 
 `UC_MiniMaxH3FirstFrameReferences`, `UC_AdvancedMiniMaxH3ImageToVideoCombined`, and `UC_AdvMiniMaxH3ImageToVideoCombinedTokenFusion` were removed. Workflows using these IDs report missing nodes; no aliases or migration are provided.
 
@@ -178,6 +179,8 @@ the base-resolution conditioning fusion.
 - `UC_SAM3Detect`
 - `UC_YOLODetectorLoader`
 - `UC_YOLODetect`
+- `UC_DepthAnythingV3Loader`
+- `UC_DepthAnythingV3`
 - `UC_MaskToBoundingBox`
 - `UC_ImageBlendByMask`
 - `UC_ImagePad`
@@ -251,6 +254,8 @@ Both nodes share optional `temporal_filter`: it treats the input batch as ordere
 Additional files: `animalpose_ap10k_256.safetensors` under HF `preprocessors/animalpose/`, and `densepose_r50_fpn.safetensors` under `preprocessors/densepose/`; both install in the same local preprocessor model directory. Artifact conversion/loading is verified separately from numerical prediction parity and measured speed, which remain unverified for these ports.
 
 `UC_YOLODetectorLoader` and `UC_YOLODetect` run converted YOLOv8 and YOLO11 detection and segmentation `.safetensors` models through UEL and ComfyUI model management without requiring external detector packages or unsafe `.pt` pickle loading. `UC_YOLODetectorLoader` outputs `BBOX_DETECTOR` and `SEGM_DETECTOR` objects, while `UC_YOLODetect` processes single images or video frame batches in `batch_size` chunks (including partial tail chunks without padding) with vectorized tensor letterboxing, on-device NMS/mask decoding, and optional cross-chunk `temporal_filter` (`temporal_radius`, `temporal_min_support`, `temporal_match_iou`), outputting `masks` (`MASK`, combined per frame or per detection) and `bboxes` (`BOUNDING_BOX`). Missing checkpoints download on execution from `silveroxides/ComfyUI-UtilsCollection-Models` (`yolo/segm/` for `face_yolov8m-seg_60.safetensors`, `person_yolov8m-seg.safetensors`, `skin_yolov8m-seg_400.safetensors`, and `hair_yolov8n-seg_60.safetensors` into `models/yolo/segm`; `yolo/bbox/` for `face_yolov8m.safetensors`, `hand_yolov8s.safetensors`, and `yolo11x-train28-best.safetensors` into `models/yolo/bbox`).
+
+`UC_DepthAnythingV3Loader` and `UC_DepthAnythingV3` run converted Depth Anything V3 `.safetensors` models (`da3_small.safetensors`, `da3_base.safetensors`, `da3_large.safetensors`, and `da3mono_large.safetensors`) through UEL and ComfyUI model management without external packages (`xformers`, `omegaconf`, `addict`, `evo`, `e3nn`, or `gsplat`). `UC_DepthAnythingV3` processes single images, multi-view sets, or video frame batches in `batch_size` chunks (in `independent` or cross-view `multi_view` mode), returning `depth_image` (`IMAGE`), `depth_mask` (`MASK`), `confidence` (`MASK`), `sky_mask` (`MASK`), and `camera_poses` (`STRING` JSON). Missing checkpoints download on execution from `silveroxides/ComfyUI-UtilsCollection-Models` (`depthanything3/`) into `models/depthanything3`.
 
 For further models, use `MODEL_MIGRATION.md` and the shared `models/migrations.json` manifest/schema rather than inventing a new conversion/loading flow.
 
@@ -481,7 +486,7 @@ a guider without a negative input.
 
 `UC_MOSSImageEditPatcher` configures a MOSS-Image diffusion model for reference-guided image editing, character or style transfer, and masked inpainting using clean reference attention across all 42 transformer blocks and spatial structure retention on the Flux 2 latent grid.
 
-Connect the MOSS-Image `model` (after `ModelSamplingAuraFlow` with `shift = 5.0`) through `UC_MOSSImageEditPatcher` to your sampler. You can supply the reference image in any of three ways: connect a `Flux 2` `VAEEncode` latent to `reference_latent` on the patcher, attach reference images to your positive conditioning with `ReferenceLatent` or `UC_AdvancedVisualConditioningEncode` (with `vae` connected), or pass the `VAEEncode` latent directly into your sampler's `latent_image` input at `denoise = 1.0`.
+Connect the MOSS-Image `model` (after `ModelSamplingAuraFlow` with `shift = 5.0`) through `UC_MOSSImageEditPatcher` to your sampler. You can supply the reference image in any of three ways: connect a `Flux 2` `VAEEncode` latent to `reference_latent` on the patcher, attach reference images to your positive conditioning with `ReferenceLatent` or `UC_AdvancedVisualConditioningEncode` (with `vae` connected and optional `image_strength` attention scaling), or pass the `VAEEncode` latent directly into your sampler's `latent_image` input at `denoise = 1.0`.
 
 - `preset`: selects the editing profile (`balanced_edit`, `preserve_structure`, `subject_reference`, `style_reference`, or `inpaint_only`).
 - `strength`: controls how strongly the 42 transformer blocks pull visual details and appearance from the reference image (default `0.65`; `0.0` disables reference attention).

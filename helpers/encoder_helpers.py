@@ -12,7 +12,6 @@ import logging
 import numbers
 import threading
 from einops import rearrange
-from safetensors.torch import save_file
 from enum import Enum
 from fractions import Fraction
 from pathlib import Path
@@ -26,7 +25,7 @@ import comfy
 import comfy.model_management
 import comfy.nested_tensor
 import comfy.utils
-from .helper_functions import resize_nchw
+from .helper_functions import atomic_uel_writer, resize_nchw
 from .image_helpers import VIDEO_FRAME_TIMESTAMP_FORMATS, format_video_timestamp, parse_video_timestamps
 from .minimax_h3_guide_helpers import (
     LAYOUT_KEY, build_layout, splice_conditioning,
@@ -1187,7 +1186,7 @@ def _token_value(token):
 def is_image_token(t):
     val = _token_value(t)
 
-    if isinstance(val, dict) and val.get("type") == "image":
+    if isinstance(val, dict) and (val.get("type") == "image" or "data" in val):
         return True
 
     if isinstance(val, numbers.Integral) and val in (151655, 248056, 262144): # Qwen & Gemma image pad IDs
@@ -1369,7 +1368,7 @@ def vlm_resolution_samples(
 
 def _qwen3vl_image_span(token) -> int | None:
     value = _token_value(token)
-    if not isinstance(value, dict) or value.get("type") != "image":
+    if not isinstance(value, dict) or (value.get("type") != "image" and "data" not in value):
         return None
     image = value.get("data")
     if not torch.is_tensor(image) or image.ndim != 4:
@@ -2494,12 +2493,17 @@ def save_blended_visual_embeddings(
         raise ValueError("No ComfyUI embeddings directory is configured.")
     embeddings_dir = embed_paths[0]
     full_save_path = resolve_embedding_output_path(embeddings_dir, save_name)
-    os.makedirs(os.path.dirname(full_save_path), exist_ok=True)
 
     # State dict must contain exactly one layer matching the VLM's dynamic embedding_key
     state_dict = {embedding_key: stacked_vis.contiguous()}
-    save_file(state_dict, full_save_path)
+    save_uel_embedding_safetensors(full_save_path, state_dict)
     logging.info(f"[UC_VisualFusionConfig] Saved visual prompt block as {embedding_key} embedding to: {full_save_path}")
+
+
+def save_uel_embedding_safetensors(target_path: str, state_dict: Mapping[str, torch.Tensor]) -> None:
+    """Atomically write embedding tensors using UnifiedEfficientLoader batch saving."""
+    with atomic_uel_writer(target_path) as writer:
+        writer.write_batch([(k, v.contiguous()) for k, v in state_dict.items()])
 
 
 def _visual_token_embedding_blocks(clip, tokens, device: str, cache=None) -> list[dict]:
@@ -3223,6 +3227,75 @@ def find_visual_token_range(
 
     return 0, 0
 
+
+def build_context_attention_bias(
+    tokens: dict | None,
+    cond_tensor: torch.Tensor,
+    image_strength: float = 1.0,
+    visual_ranges: dict | tuple | list | None = None,
+) -> torch.Tensor | None:
+    """Build additive context attention logit bias for visual tokens (e.g. MOSS-Image).
+
+    Scales how much the diffusion model attends to the visual tokens encoded for reference image(s).
+    image_strength == 1.0 returns None (no bias attached; standard attention).
+    image_strength > 1.0 applies positive log-bias math.log(strength) to visual tokens.
+    0.0 < image_strength < 1.0 applies negative log-bias to visual tokens.
+    image_strength <= 0.0 applies a large negative logit bias (-100.0) so visual tokens are ignored.
+    Text tokens always receive 0.0 logit bias.
+    """
+    if image_strength == 1.0:
+        return None
+    if not torch.is_tensor(cond_tensor) or cond_tensor.ndim < 2:
+        return None
+
+    seq_len = cond_tensor.shape[1]
+    weight = math.log(max(image_strength, 1e-6)) if image_strength > 0.0 else -100.0
+
+    # 1. Try raw token inspection matching ComfyUI Core's nodes_moss_image.py pattern
+    if tokens and isinstance(tokens, dict):
+        key = next(iter(tokens.keys()))
+        token_list = tokens[key][0] if tokens.get(key) and isinstance(tokens[key], list) and len(tokens[key]) > 0 else []
+        bias = []
+        has_image = False
+        for t in token_list:
+            if isinstance(t, (tuple, list)) and len(t) > 0 and isinstance(t[0], dict) and "data" in t[0]:
+                has_image = True
+                try:
+                    import comfy.text_encoders.qwen_vl
+                    _, grid = comfy.text_encoders.qwen_vl.process_qwen2vl_images(t[0]["data"], patch_size=16)
+                    bias += [weight] * (int(grid[0, 1] * grid[0, 2]) // 4)
+                except Exception:
+                    bias.append(weight)
+            else:
+                bias.append(0.0)
+        if has_image and len(bias) == seq_len:
+            return torch.tensor([bias], dtype=torch.float32, device="cpu")
+
+    # 2. Fallback to mapped visual ranges
+    ranges = []
+    if isinstance(visual_ranges, dict):
+        ranges = list(visual_ranges.values())
+    elif isinstance(visual_ranges, (list, tuple)):
+        if len(visual_ranges) == 2 and isinstance(visual_ranges[0], int) and isinstance(visual_ranges[1], int):
+            ranges = [visual_ranges]
+        else:
+            ranges = list(visual_ranges)
+
+    if ranges:
+        bias_tensor = torch.zeros((1, seq_len), dtype=torch.float32, device="cpu")
+        has_range = False
+        for r in ranges:
+            if isinstance(r, (tuple, list)) and len(r) == 2:
+                start, end = int(r[0]), int(r[1])
+                if 0 <= start < end <= seq_len:
+                    bias_tensor[:, start:end] = weight
+                    has_range = True
+        if has_range:
+            return bias_tensor
+
+    return None
+
+
 def encode_embedding_classical_scaled_bias(
     clip,
     text,
@@ -3725,6 +3798,61 @@ def execute_minimax_h3_vlm_guide(conditioning, clip, image, timestamp, vlm_resol
     clip = cache.prepare_clip(clip)
     guide = _encode_minimax_h3_image_guide(clip, image, timestamp, vlm_resolution, cache)
     return splice_conditioning(conditioning, guide)
+
+
+def resolve_minimax_h3_frame_index(
+    frame_index: int,
+    conditioning=None,
+    latent=None,
+    fps: float = 24.0,
+) -> float:
+    """Resolve a zero-based frame index (0 is first, 1 is second, -1 is last) to timestamp seconds."""
+    if isinstance(frame_index, bool) or not isinstance(frame_index, numbers.Integral):
+        raise ValueError("MiniMax H3 frame index must be an integer.")
+    frame_index = int(frame_index)
+
+    frame_count = None
+    if latent is not None:
+        from .model_helpers import h3_video_from_latent, h3_pixel_frames_for_latent_steps
+        video = h3_video_from_latent(latent)
+        frame_count = h3_pixel_frames_for_latent_steps(video.shape[2])
+    elif (
+        isinstance(conditioning, (tuple, list))
+        and conditioning
+        and isinstance(conditioning[0], (tuple, list))
+        and len(conditioning[0]) > 1
+        and isinstance(conditioning[0][1], dict)
+    ):
+        frame_count = conditioning[0][1].get("minimax_frame_count")
+
+    if frame_index < 0:
+        if frame_count is None:
+            raise ValueError(
+                f"Negative frame index ({frame_index}) requires video frame count; "
+                "connect latent or use conditioning with minimax_frame_count metadata."
+            )
+        resolved_frame = frame_count + frame_index
+        if resolved_frame < 0:
+            raise ValueError(
+                f"Negative frame index ({frame_index}) is outside the video's {frame_count} frames."
+            )
+    else:
+        resolved_frame = frame_index
+        if frame_count is not None and resolved_frame >= frame_count:
+            raise ValueError(
+                f"Frame index ({frame_index}) is outside the video's {frame_count} frames."
+            )
+
+    return float(resolved_frame) / float(fps)
+
+
+def execute_minimax_h3_vlm_frame_guide(
+    conditioning, clip, image, frame_index, latent=None, vlm_resolution=384, cache=None, enable_caching="all"
+):
+    timestamp = resolve_minimax_h3_frame_index(frame_index, conditioning=conditioning, latent=latent)
+    return execute_minimax_h3_vlm_guide(
+        conditioning, clip, image, timestamp, vlm_resolution=vlm_resolution, cache=cache, enable_caching=enable_caching
+    )
 
 
 def _encode_minimax_h3_image_guide(clip, image, timestamp, vlm_resolution, cache):
@@ -4590,6 +4718,7 @@ def execute_advanced_visual_consensus(
     apply_reference_latents,
     token_fusion=False,
     semantic_anchor=False,
+    image_strength=1.0,
 ):
     """Run spatial fusion per resolution, then consensus over complete outputs."""
     if not isinstance(joint_config, dict):
@@ -4633,6 +4762,7 @@ def execute_advanced_visual_consensus(
             multiplier,
             vae_dimension_multiple,
             apply_reference_latents,
+            image_strength,
         )
 
     spatial_enabled = bool(joint_config.get("enable_spatial_fusion", True))
@@ -4692,6 +4822,8 @@ def execute_advanced_visual_consensus(
     completed_conditionings = []
     base_conditioning = None
     export_pending = True
+    sample_tokens = None
+    sample_range = None
     for lane in lanes:
         targets = vlm_resolution_samples(
             lane[0],
@@ -4713,6 +4845,8 @@ def execute_advanced_visual_consensus(
                     )
                     for source in sources
                 ]
+                if sample_tokens is None and token_sources:
+                    sample_tokens = token_sources[0]
                 token_fusion_config = dict(visual_config)
                 token_fusion_config["save_blended_embeds"] = bool(
                     export_pending
@@ -4735,6 +4869,9 @@ def execute_advanced_visual_consensus(
                 )
                 for source in sources
             ]
+            if sample_tokens is None and branches:
+                sample_tokens = branches[0].get("tokens")
+                sample_range = branches[0].get("visual_range")
             if spatial_enabled:
                 completed = _spatially_fuse_visual_consensus_sources(
                     branches, visual_config, clip, export_pending
@@ -4766,6 +4903,9 @@ def execute_advanced_visual_consensus(
         multiplier,
         vae_dimension_multiple,
         apply_reference_latents,
+        image_strength,
+        sample_tokens,
+        sample_range,
     )
 
 
@@ -4779,6 +4919,9 @@ def _scale_and_attach_visual_consensus_references(
     multiplier,
     vae_dimension_multiple,
     apply_reference_latents,
+    image_strength=1.0,
+    tokens=None,
+    visual_ranges=None,
 ):
     if multiplier != 1.0:
         conditioning = [
@@ -4795,6 +4938,19 @@ def _scale_and_attach_visual_consensus_references(
             ]
             for tensor, metadata in conditioning
         ]
+
+    if image_strength != 1.0 and reference_images:
+        for item in conditioning:
+            c_tensor = item[0]
+            c_meta = item[1]
+            ctx_bias = build_context_attention_bias(
+                tokens,
+                c_tensor,
+                image_strength=image_strength,
+                visual_ranges=visual_ranges,
+            )
+            if ctx_bias is not None:
+                c_meta["context_attention_bias"] = ctx_bias
 
     ref_latents = []
     if vae is not None and ref_latent_mode != "off":

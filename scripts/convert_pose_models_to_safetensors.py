@@ -12,7 +12,7 @@ import types
 import uuid
 
 import torch
-from unifiedefficientloader import IncrementalSafetensorsWriter
+from unifiedefficientloader import IncrementalSafetensorsWriter, MemoryEfficientSafeOpen
 
 from convert_big_lama_to_safetensors import sha256_file, verify_output
 
@@ -53,11 +53,52 @@ def convert(kind, source, destination):
             for key, value in raw_state.items()
         }
         del checkpoint, source_model, raw_state
+    elif specification["source_format"] == "safetensors":
+        handler = MemoryEfficientSafeOpen(str(source), low_memory=True)
+        try:
+            raw_keys = list(handler.keys())
+            source_meta = handler.metadata() or {}
+            raw_state = {}
+            stream = handler.async_stream(
+                raw_keys,
+                batch_size=1,
+                prefetch_batches=1,
+                pin_memory=False,
+            )
+            try:
+                for batch in stream:
+                    for key, tensor in batch:
+                        try:
+                            raw_state[key] = tensor
+                        finally:
+                            handler.mark_processed(key)
+            finally:
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    close_stream()
+        finally:
+            handler.close()
+        for alias_key, target_key in source_meta.items():
+            if alias_key not in raw_state and target_key in raw_state:
+                raw_state[alias_key] = raw_state[target_key].clone()
+        strip_prefix = "model." if raw_state and all(key.startswith("model.") for key in raw_state) else ""
+        weights = {
+            (key.removeprefix(strip_prefix) if strip_prefix else key): (value.float() if value.is_floating_point() else value)
+            for key, value in raw_state.items()
+        }
+        del raw_state
     else:
         weights = torch.load(source, map_location="cpu", weights_only=True)
     with torch.device("meta"):
         model = architecture()
-    expected = model.state_dict()
+    expected = dict(model.state_dict())
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and getattr(module, "weight", None) is None:
+            prefix = f"{name}." if name else ""
+            dtype = getattr(module, "weight_comfy_model_dtype", None) or torch.get_default_dtype()
+            expected[prefix + "weight"] = torch.empty((module.out_features, module.in_features), device="meta", dtype=dtype)
+            if getattr(module, "comfy_need_lazy_init_bias", False):
+                expected[prefix + "bias"] = torch.empty(module.out_features, device="meta", dtype=dtype)
     if specification["mapping"] == "strip_model_prefix":
         mapping = {key: ".".join(key.split(".")[1:]) for key in expected}
     else:
@@ -97,7 +138,7 @@ def convert(kind, source, destination):
     try:
         with IncrementalSafetensorsWriter(str(temporary), metadata=metadata, max_workers=1) as writer:
             for key, value in converted.items():
-                writer.write(key, value)
+                writer.write_batch([(key, value)])
         verify_output(temporary, converted)
         temporary.replace(destination)
     finally:

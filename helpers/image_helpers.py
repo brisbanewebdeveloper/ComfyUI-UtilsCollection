@@ -14,6 +14,8 @@ import uuid
 import zipfile
 import folder_paths
 from comfy.model_management import throw_exception_if_processing_interrupted
+from unifiedefficientloader import IncrementalSafetensorsWriter, MemoryEfficientSafeOpen
+from .helper_functions import atomic_uel_writer, read_uel_safetensors_dict
 import colorsys
 import comfy.model_management
 import comfy.utils
@@ -28,8 +30,10 @@ import av
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchaudio
 from torchvision.ops import nms as torchvision_nms
+from tqdm import tqdm
 from nodes import MAX_RESOLUTION
 
 from .helper_functions import ASPECT_RATIOS, resize_nchw
@@ -1153,13 +1157,23 @@ def run_yolo_detect(images, *, bbox_detector=None, segm_detector=None, threshold
 
     patcher, forward = active_detector.patcher, active_detector.forward
     use_segm = bool(getattr(active_detector, "use_segm", getattr(patcher.model, "task", "bbox") == "segm"))
+    model_name = getattr(patcher.model, "model_name", type(patcher.model).__name__)
+    task_label = "segm" if use_segm else "bbox"
     progress = comfy.utils.ProgressBar(len(images))
     detections_source = _iter_yolo_batch(
         patcher, images, forward, threshold=threshold, nms_threshold=nms_threshold,
         max_detections=max_detections, batch_size=batch_size, use_segm=use_segm, progress=progress,
     )
+    temporal_filled = 0
     if temporal_filter:
-        detections_source = fill_temporal_yolo_detections(list(detections_source), height, width, radius=temporal_radius, min_support=temporal_min_support, match_iou=temporal_match_iou)
+        raw_detections = [
+            det for det in tqdm(detections_source, total=len(images), desc=f"YOLO Detect ({model_name})", unit="frame")
+        ]
+        raw_count = sum(len(frame_dets) for frame_dets in raw_detections)
+        detections_source = fill_temporal_yolo_detections(raw_detections, height, width, radius=temporal_radius, min_support=temporal_min_support, match_iou=temporal_match_iou)
+        temporal_filled = max(0, sum(len(frame_dets) for frame_dets in detections_source) - raw_count)
+    else:
+        detections_source = tqdm(detections_source, total=len(images), desc=f"YOLO Detect ({model_name})", unit="frame")
 
     frame_masks, individual_mask_list, frame_bboxes = [], [], []
     drop_size_int = max(int(drop_size), 1)
@@ -1186,7 +1200,17 @@ def run_yolo_detect(images, *, bbox_detector=None, segm_detector=None, threshold
 
     masks_out = (torch.stack(individual_mask_list, dim=0) if individual_mask_list else torch.zeros((1, height, width), dtype=torch.float32)) if individual_masks else torch.stack(frame_masks, dim=0)
     bboxes_out = frame_bboxes[0] if len(images) == 1 else frame_bboxes
+    total_boxes = sum(len(b) for b in frame_bboxes)
+    active_frames = sum(1 for b in frame_bboxes if b)
+    temporal_note = f", temporal_filled={temporal_filled}" if temporal_filter else ""
+    logging.info(
+        "[UC_YOLODetect] Completed %s (%s): %d frame(s) at %dx%d | %d detection(s) across %d/%d frame(s)%s | masks=%s",
+        model_name, task_label, len(images), width, height, total_boxes, active_frames, len(images), temporal_note, tuple(masks_out.shape),
+    )
     return masks_out, bboxes_out
+
+
+_VIDEO_FILE_CONTENT_HASHES: dict[tuple[str, int, int], str] = {}
 
 
 def _hash_stream(stream):
@@ -1210,8 +1234,18 @@ def video_source_hash(video):
         finally:
             source.seek(position)
     else:
-        with open(source, "rb") as stream:
-            content = _hash_stream(stream)
+        try:
+            stat = os.stat(source)
+            stat_key = (os.path.abspath(source), stat.st_mtime_ns, stat.st_size)
+            if stat_key in _VIDEO_FILE_CONTENT_HASHES:
+                content = _VIDEO_FILE_CONTENT_HASHES[stat_key]
+            else:
+                with open(source, "rb") as stream:
+                    content = _hash_stream(stream)
+                _VIDEO_FILE_CONTENT_HASHES[stat_key] = content
+        except OSError:
+            with open(source, "rb") as stream:
+                content = _hash_stream(stream)
     # Core has no public crop accessor. Include the verified wrapper fields,
     # not just dimensions: equally sized crops can contain different pixels.
     settings = [video._VideoFromFile__start_time, video._VideoFromFile__duration,
@@ -1231,13 +1265,15 @@ def _frame_storage(video):
 
 
 class CachedVideoFrames:
-    """Array-shaped disk view; H3 indexing reads only requested frame entries."""
+    """Array-shaped disk view; H3 indexing reads only requested frame entries asynchronously via UEL."""
 
     def __init__(self, path, shape, storage):
-        self.path, self.shape, self.storage = path, tuple(shape), storage
+        self.path = Path(path)
+        self.shape = tuple(shape)
+        self.storage = storage
         self.ndim = len(self.shape)
 
-    def __getitem__(self, indices):
+    def _getitem_zip(self, indices):
         scalar = isinstance(indices, int)
         if scalar:
             indices = [indices]
@@ -1246,8 +1282,11 @@ class CachedVideoFrames:
         indices = [int(index) % self.shape[0] for index in indices]
         positions = {}
         frames = None
+        iterator = enumerate(indices)
+        if not scalar and len(indices) > 1:
+            iterator = tqdm(iterator, total=len(indices), desc="Reading Cached Video Frames", unit="frame", leave=False)
         with zipfile.ZipFile(self.path) as archive:
-            for position, index in enumerate(indices):
+            for position, index in iterator:
                 if index not in positions:
                     data = archive.read(f"frames/{index:08d}.{self.storage}")
                     if self.storage == "png8":
@@ -1268,6 +1307,51 @@ class CachedVideoFrames:
                     frames[position].copy_(frames[positions[index]])
         if frames is None:
             frames = torch.empty((0, *self.shape[1:]), dtype=torch.float32)
+        if scalar:
+            return frames[0]
+        return frames
+
+    def __getitem__(self, indices):
+        if str(self.path).endswith(".zip"):
+            return self._getitem_zip(indices)
+        scalar = isinstance(indices, int)
+        if scalar:
+            indices = [indices]
+        elif isinstance(indices, slice):
+            indices = range(*indices.indices(self.shape[0]))
+        indices = [int(index) % self.shape[0] for index in indices]
+        if not indices:
+            return torch.empty((0, *self.shape[1:]), dtype=torch.float32)
+
+        unique_indices = sorted(set(indices))
+        target_keys = [f"frame_{i:08d}" for i in unique_indices]
+        loaded_frames = {}
+
+        with closing(MemoryEfficientSafeOpen(str(self.path), low_memory=True)) as handle:
+            stream = handle.async_stream(
+                target_keys,
+                batch_size=1,
+                prefetch_batches=1,
+                pin_memory=False,
+            )
+            try:
+                for batch in stream:
+                    for name, tensor in batch:
+                        try:
+                            if tensor.dtype == torch.uint8:
+                                tensor = tensor.float().div_(255.0)
+                            loaded_frames[name] = tensor
+                        finally:
+                            handle.mark_processed(name)
+            finally:
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    close_stream()
+
+        frames = torch.empty((len(indices), *self.shape[1:]), dtype=torch.float32)
+        for position, index in enumerate(indices):
+            frames[position].copy_(loaded_frames[f"frame_{index:08d}"])
+
         if scalar:
             return frames[0]
         return frames
@@ -1315,52 +1399,79 @@ def read_legacy_components(path, key):
 
 
 def _read_components(path, key):
-    with zipfile.ZipFile(path) as archive:
-        manifest = json.loads(archive.read("manifest.json"))
-        if manifest["version"] != 2 or manifest["source_hash"] != key:
-            raise ValueError("Video cache source hash/version mismatch")
-        frames = CachedVideoFrames(path, manifest["shape"], manifest["storage"])
+    path = Path(path)
+    if path.suffix == ".safetensors":
+        with closing(MemoryEfficientSafeOpen(str(path), low_memory=True)) as handle:
+            metadata = handle.metadata() or {}
+            if metadata.get("version") != "4" or metadata.get("source_hash") != key:
+                raise ValueError("Video cache source hash/version mismatch")
+            shape = json.loads(metadata["shape"])
+            storage = metadata.get("storage", "uint8")
+            frame_rate = Fraction(metadata["frame_rate"])
+            sample_rate_str = metadata.get("sample_rate", "")
+            sample_rate = int(sample_rate_str) if sample_rate_str else None
+            has_audio = "audio" in handle.keys()
+
+        frames = CachedVideoFrames(path, shape, storage)
         audio = None
-        if manifest["sample_rate"] is not None:
-            with archive.open("audio.npy") as entry:
-                audio = {"waveform": torch.from_numpy(np.load(entry, allow_pickle=False)),
-                         "sample_rate": manifest["sample_rate"]}
-    return Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(manifest["frame_rate"]))
+        if has_audio and sample_rate is not None:
+            audio_tensors, _ = read_uel_safetensors_dict(path, ["audio"])
+            if "audio" in audio_tensors:
+                audio = {
+                    "waveform": audio_tensors["audio"],
+                    "sample_rate": sample_rate,
+                }
+        return Types.VideoComponents(images=frames, audio=audio, frame_rate=frame_rate)
+    elif path.suffix == ".zip":
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            if manifest["version"] != 2 or manifest["source_hash"] != key:
+                raise ValueError("Video cache source hash/version mismatch")
+            frames = CachedVideoFrames(path, manifest["shape"], manifest["storage"])
+            audio = None
+            if manifest["sample_rate"] is not None:
+                with archive.open("audio.npy") as entry:
+                    audio = {"waveform": torch.from_numpy(np.load(entry, allow_pickle=False)),
+                             "sample_rate": manifest["sample_rate"]}
+        return Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(manifest["frame_rate"]))
+    else:
+        raise ValueError(f"Unknown video cache file format: {path}")
 
 
 def _write_components(path, key, frames, shape, audio, rate, storage):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with zipfile.ZipFile(temporary, "w", allowZip64=True) as archive:
-            for index in range(shape[0]):
-                if index % 16 == 0:
-                    throw_exception_if_processing_interrupted()
-                array = frames[index].detach().cpu().numpy()
-                if storage == "png8":
-                    rgb = np.rint(np.clip(array, 0, 1) * 255).astype(np.uint8)
-                    ok, encoded = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, 3])
-                    if not ok:
-                        raise ValueError("Video frame PNG encoding failed")
-                    data = encoded.tobytes()
+    path = Path(path)
+    if path.suffix != ".safetensors":
+        path = path.with_suffix(".safetensors")
+    is_uint8 = storage in ("png8", "uint8")
+    storage_type = "uint8" if is_uint8 else "float32"
+    metadata = {
+        "version": "4",
+        "source_hash": str(key),
+        "shape": json.dumps(list(shape)),
+        "storage": storage_type,
+        "frame_rate": str(rate),
+        "sample_rate": str(audio["sample_rate"]) if audio is not None and audio.get("sample_rate") is not None else "",
+    }
+    with atomic_uel_writer(path, metadata) as writer:
+        batch_size = 32
+        for start in tqdm(range(0, shape[0], batch_size), desc="Caching Video Components", unit="batch"):
+            if start % 64 == 0:
+                throw_exception_if_processing_interrupted()
+            batch_end = min(start + batch_size, shape[0])
+            batch_items = []
+            for index in range(start, batch_end):
+                frame = frames[index].detach().cpu()
+                if is_uint8:
+                    if frame.dtype != torch.uint8:
+                        frame = (frame.clamp(0, 1) * 255.0).round().to(torch.uint8)
                 else:
-                    buffer = io.BytesIO()
-                    np.savez_compressed(buffer, frame=array)
-                    data = buffer.getvalue()
-                archive.writestr(f"frames/{index:08d}.{storage}", data)
-                del array
-            if audio is not None:
-                info = zipfile.ZipInfo("audio.npy")
-                info.compress_type = zipfile.ZIP_DEFLATED
-                with archive.open(info, "w", force_zip64=True) as entry:
-                    np.save(entry, audio["waveform"].cpu().numpy(), allow_pickle=False)
-            archive.writestr("manifest.json", json.dumps({
-                "version": 2, "source_hash": key, "shape": list(shape), "storage": storage,
-                "frame_rate": str(rate), "sample_rate": audio["sample_rate"] if audio is not None else None,
-            }))
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+                    if frame.dtype != torch.float32:
+                        frame = frame.to(torch.float32)
+                batch_items.append((f"frame_{index:08d}", frame.contiguous()))
+            writer.write_batch(batch_items)
+            del batch_items
+        if audio is not None and audio.get("waveform") is not None:
+            writer.write_batch([("audio", audio["waveform"].detach().cpu().to(torch.float32).contiguous())])
 
 
 def _h3_batch_capacity(source_shape, target_shape, dtype):
@@ -1560,86 +1671,94 @@ def _decode_h3_batches(video, megapixels, audio_file, details, stopped):
             yield _resize_h3_batch(staging[:used], width, height)
 
 
-def _write_spooled_h3_audio(archive, audio_file, details):
-    """Convert interleaved spool to existing channel-major NPY in bounded reads."""
+def _read_spooled_h3_audio_tensor(audio_file, details) -> torch.Tensor:
     channels, samples = details["channels"], details["samples"]
-    info = zipfile.ZipInfo("audio.npy")
-    info.compress_type = zipfile.ZIP_DEFLATED
-    with archive.open(info, "w", force_zip64=True) as entry:
-        np.lib.format.write_array_header_1_0(entry, {"descr": "<f4", "fortran_order": False, "shape": (1, channels, samples)})
-        for channel in range(channels):
-            audio_file.seek(0)
-            for start in range(0, samples, 65536):
-                throw_exception_if_processing_interrupted()
-                count = min(65536, samples - start)
-                chunk = np.frombuffer(audio_file.read(count * channels * 4), dtype=np.float32).reshape(count, channels)
-                entry.write(np.ascontiguousarray(chunk[:, channel]).data)
+    audio_file.seek(0)
+    chunk = np.frombuffer(audio_file.read(channels * samples * 4), dtype=np.float32).reshape(samples, channels)
+    waveform = torch.from_numpy(np.ascontiguousarray(chunk.T)).unsqueeze(0).to(torch.float32)
+    return waveform
 
 
 def _write_streamed_h3_components(path, key, video, megapixels, storage):
+    path = Path(path)
+    if path.suffix != ".safetensors":
+        path = path.with_suffix(".safetensors")
+    is_uint8 = storage in ("png8", "uint8")
+    storage_type = "uint8" if is_uint8 else "float32"
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     details = {}
-    try:
-        with tempfile.TemporaryFile(dir=path.parent) as audio_file, zipfile.ZipFile(temporary, "w", allowZip64=True) as archive:
-            # Closing the generator releases its container even on consumer failure.
-            def factory(stopped):
-                return closing(_decode_h3_batches(video, megapixels, audio_file, details, stopped))
-            count = 0
-            with _prefetch_h3_batches(factory) as batches:
+    with tempfile.TemporaryFile(dir=path.parent) as audio_file:
+        def factory(stopped):
+            return closing(_decode_h3_batches(video, megapixels, audio_file, details, stopped))
+        count = 0
+        metadata = {
+            "version": "4",
+            "source_hash": str(key),
+            "storage": storage_type,
+        }
+        with atomic_uel_writer(path, metadata) as writer:
+            with _prefetch_h3_batches(factory) as batches, tqdm(desc="Decoding & Caching H3 Video Components", unit="frame") as pbar:
                 for batch in batches:
+                    batch_items = []
                     for frame in batch:
                         throw_exception_if_processing_interrupted()
-                        array = frame.numpy()
-                        if storage == "png8":
-                            rgb = np.rint(np.clip(array, 0, 1) * 255).astype(np.uint8)
-                            ok, encoded = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_PNG_COMPRESSION, 3])
-                            if not ok:
-                                raise ValueError("Video frame PNG encoding failed")
-                            archive.writestr(f"frames/{count:08d}.png8", encoded)
+                        if is_uint8:
+                            frame_t = (frame.clamp(0, 1) * 255.0).round().to(torch.uint8)
                         else:
-                            with archive.open(f"frames/{count:08d}.npz", "w", force_zip64=True) as entry:
-                                np.savez_compressed(entry, frame=array)
+                            frame_t = frame.to(torch.float32)
+                        batch_items.append((f"frame_{count:08d}", frame_t.contiguous()))
                         count += 1
+                        pbar.update(1)
+                    writer.write_batch(batch_items)
                     shape = (count, *batch.shape[1:])
-                    del frame, array, batch
+                    del batch, batch_items
             if not count:
                 raise ValueError("Reference video must contain non-empty frames.")
-            if details["sample_rate"] is not None:
-                _write_spooled_h3_audio(archive, audio_file, details)
-            archive.writestr("manifest.json", json.dumps({
-                "version": 2, "source_hash": key, "shape": list(shape), "storage": storage,
-                "frame_rate": str(details["rate"]), "sample_rate": details["sample_rate"],
-            }))
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+            if details.get("sample_rate") is not None and details.get("samples", 0) > 0:
+                audio_tensor = _read_spooled_h3_audio_tensor(audio_file, details)
+                writer.write_batch([("audio", audio_tensor.contiguous())])
+            metadata["shape"] = json.dumps(list(shape))
+            metadata["frame_rate"] = str(details["rate"])
+            metadata["sample_rate"] = str(details["sample_rate"]) if details.get("sample_rate") is not None else ""
+
+        audio_desc = f"{details['sample_rate']}Hz ({details.get('samples', 0)} samples)" if details.get("sample_rate") else "none"
+        logging.info(
+            "[VideoComponents] Cached %d frame(s) at %dx%d (%s fps, storage=%s, audio=%s) -> %s",
+            shape[0], shape[2], shape[1], details["rate"], storage_type, audio_desc, path.name,
+        )
 
 
 def cached_video_components(video, preparation=None, prepare=None):
-    """Cache all source frames compressed; return a lazy range-readable view."""
+    """Cache all source frames via UEL safetensors; return a lazy async-readable view."""
     key = video_source_hash(video)
     if key is None:
         components = video.get_components()
         return prepare(components) if prepare is not None else components
     source_key = key
     if preparation is not None:
-        key = hashlib.sha256(json.dumps([3, key, preparation], sort_keys=True).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps([4, key, preparation], sort_keys=True).encode()).hexdigest()
     root = Path(folder_paths.get_temp_directory()) / "utilscollection_video_components"
-    path = root / ("v3" if preparation is not None else "v2") / f"{key}.zip"
+    path = root / ("v4" if preparation is not None else "v4_raw") / f"{key}.safetensors"
     try:
         return _read_components(path, key)
     except FileNotFoundError:
         pass
-    except (zipfile.BadZipFile, KeyError, ValueError) as error:
+    except Exception as error:
         logging.warning("Rebuilding invalid video cache: %s", error)
     storage = _frame_storage(video)
     legacy = root / "v1" / f"{source_key}.safetensors"
-    previous = root / "v2" / f"{source_key}.zip"
-    if preparation is not None and previous.is_file():
-        components = _read_components(previous, source_key)
+    previous_v4_raw = root / "v4_raw" / f"{source_key}.safetensors"
+    previous_zip = root / ("v3" if preparation is not None else "v2") / f"{key}.zip"
+    if previous_zip.is_file():
+        try:
+            return _read_components(previous_zip, key)
+        except Exception:
+            pass
+    if preparation is not None and previous_v4_raw.is_file():
+        components = _read_components(previous_v4_raw, source_key)
+    elif preparation is not None and (root / "v2" / f"{source_key}.zip").is_file():
+        components = _read_components(root / "v2" / f"{source_key}.zip", source_key)
     elif legacy.is_file():
-        # Migrate frame-by-frame, never materializing the old multi-GB tensor.
         components = read_legacy_components(legacy, source_key)
     elif preparation is not None and preparation.get("resize") == "h3-bicubic-center-v2":
         if not preparation.get("cache_long_window") and hasattr(video, "get_duration") and float(video.get_duration()) > 15.0:
@@ -2731,8 +2850,10 @@ def scan_video_frame_records(
             timestamp=timestamp,
             key_frame=bool(frame.key_frame),
         )
-        for frame_index, timestamp, frame in _active_video_frames(
-            video, source_factory
+        for frame_index, timestamp, frame in tqdm(
+            _active_video_frames(video, source_factory),
+            desc="Scanning Video Stream",
+            unit="frame",
         )
     ]
     if not records:
@@ -3044,16 +3165,18 @@ def decode_selected_video_frames(
     selected_images: dict[int, torch.Tensor] = {}
     last_index = max(expected)
 
-    for frame_index, timestamp, frame in _active_video_frames(
-        video, source_factory
-    ):
-        record = expected.get(frame_index)
-        if record is not None:
-            if timestamp != record.timestamp:
-                raise ValueError("Video timestamps changed between selection and decoding.")
-            selected_images[frame_index] = _frame_to_image(frame)
-        if frame_index >= last_index:
-            break
+    with tqdm(total=len(records), desc="Decoding Selected Video Frames", unit="frame") as pbar:
+        for frame_index, timestamp, frame in _active_video_frames(
+            video, source_factory
+        ):
+            record = expected.get(frame_index)
+            if record is not None:
+                if timestamp != record.timestamp:
+                    raise ValueError("Video timestamps changed between selection and decoding.")
+                selected_images[frame_index] = _frame_to_image(frame)
+                pbar.update(1)
+            if frame_index >= last_index:
+                break
 
     missing = [record.frame_index for record in records if record.frame_index not in selected_images]
     if missing:
@@ -3408,6 +3531,13 @@ def sample_video_frames_as_images(
         format_video_timestamp(timestamp, timestamp_format)
         for timestamp in output_timestamps
     ]
+    keyframe_count = sum(1 for r in records if r.key_frame)
+    out_h, out_w = int(image_batch.shape[1]), int(image_batch.shape[2])
+    ts_range = f"{timestamps[0]}..{timestamps[-1]}" if timestamps else "none"
+    logging.info(
+        "[UC_SampleVideoFrames] Scanned %d frame(s) (%d keyframes) -> selected %d frame(s) via '%s' at %dx%d | runtime=%.2fs | range=%s",
+        len(records), keyframe_count, len(selected), sampling_strategy, out_w, out_h, video_runtime, ts_range,
+    )
 
     return SampledVideoFrames(
         image_batch=image_batch,
@@ -3553,3 +3683,259 @@ def split_image_batch_into_batches(images: torch.Tensor, batch_size: int) -> lis
     size = max(1, int(batch_size))
     total = images.shape[0]
     return [images[i : i + size] for i in range(0, total, size)]
+
+
+DEPTH_ANYTHING_PATCH_SIZE = 14
+DEPTH_ANYTHING_RESIZE_METHODS = (
+    "upper_bound_resize",
+    "upper_bound_crop",
+    "lower_bound_resize",
+    "lower_bound_crop",
+)
+DEPTH_ANYTHING_MULTI_VIEW_MODES = ("independent", "multi_view")
+DEPTH_ANYTHING_REF_VIEW_STRATEGIES = ("saddle_balanced", "saddle_sim_range", "first", "middle")
+DEPTH_ANYTHING_OUTPUT_MODES = ("disparity", "depth", "raw_depth")
+DEPTH_ANYTHING_NORM_SCOPES = ("per_frame", "per_batch")
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def _nearest_patch_multiple(value: int, patch_size: int = DEPTH_ANYTHING_PATCH_SIZE) -> int:
+    down = max(patch_size, (value // patch_size) * patch_size)
+    up = down + patch_size
+    return up if abs(up - value) <= abs(value - down) else down
+
+
+def preprocess_depth_anything_batch(
+    images_bhwc: torch.Tensor,
+    process_res: int = 504,
+    resize_method: str = "upper_bound_resize",
+) -> torch.Tensor:
+    if not torch.is_tensor(images_bhwc) or images_bhwc.ndim != 4 or images_bhwc.shape[0] < 1:
+        raise ValueError("Depth Anything 3 input must be a non-empty BHWC image tensor.")
+    if resize_method not in DEPTH_ANYTHING_RESIZE_METHODS:
+        raise ValueError(
+            f"Unsupported Depth Anything 3 resize_method: {resize_method!r}. "
+            f"Expected one of: {', '.join(DEPTH_ANYTHING_RESIZE_METHODS)}."
+        )
+    target_res = max(DEPTH_ANYTHING_PATCH_SIZE, int(process_res))
+    orig_h, orig_w = int(images_bhwc.shape[1]), int(images_bhwc.shape[2])
+    nchw = images_bhwc[..., :3].movedim(-1, 1).float().clamp(0.0, 1.0)
+
+    bound = max(orig_h, orig_w) if resize_method.startswith("upper_bound") else min(orig_h, orig_w)
+    scale = target_res / float(max(1, bound))
+    scaled_h = max(DEPTH_ANYTHING_PATCH_SIZE, int(round(orig_h * scale)))
+    scaled_w = max(DEPTH_ANYTHING_PATCH_SIZE, int(round(orig_w * scale)))
+    if (scaled_h, scaled_w) != (orig_h, orig_w):
+        mode = "bicubic" if scale > 1.0 else "area"
+        kwargs = {"align_corners": False} if mode == "bicubic" else {}
+        nchw = F.interpolate(nchw, size=(scaled_h, scaled_w), mode=mode, **kwargs)
+
+    if resize_method.endswith("resize"):
+        final_h = _nearest_patch_multiple(scaled_h, DEPTH_ANYTHING_PATCH_SIZE)
+        final_w = _nearest_patch_multiple(scaled_w, DEPTH_ANYTHING_PATCH_SIZE)
+        if (final_h, final_w) != (scaled_h, scaled_w):
+            upscale = (final_h > scaled_h) or (final_w > scaled_w)
+            mode = "bicubic" if upscale else "area"
+            kwargs = {"align_corners": False} if mode == "bicubic" else {}
+            nchw = F.interpolate(nchw, size=(final_h, final_w), mode=mode, **kwargs)
+    else:
+        final_h = max(DEPTH_ANYTHING_PATCH_SIZE, (scaled_h // DEPTH_ANYTHING_PATCH_SIZE) * DEPTH_ANYTHING_PATCH_SIZE)
+        final_w = max(DEPTH_ANYTHING_PATCH_SIZE, (scaled_w // DEPTH_ANYTHING_PATCH_SIZE) * DEPTH_ANYTHING_PATCH_SIZE)
+        if (final_h, final_w) != (scaled_h, scaled_w):
+            top = (scaled_h - final_h) // 2
+            left = (scaled_w - final_w) // 2
+            nchw = nchw[:, :, top : top + final_h, left : left + final_w]
+
+    mean = torch.tensor(_IMAGENET_MEAN, dtype=nchw.dtype, device=nchw.device).view(1, 3, 1, 1)
+    std = torch.tensor(_IMAGENET_STD, dtype=nchw.dtype, device=nchw.device).view(1, 3, 1, 1)
+    return (nchw - mean) / std
+
+
+def _normalize_depth_anything_tensor(
+    values: torch.Tensor,
+    scope: str = "per_frame",
+    percentile_clip: float = 0.0,
+    invert: bool = False,
+) -> torch.Tensor:
+    clip_q = max(0.0, min(49.0, float(percentile_clip))) / 100.0
+    out = values.clone().float()
+
+    def _norm_slice(tensor_slice: torch.Tensor) -> torch.Tensor:
+        flat = tensor_slice.reshape(-1)
+        if clip_q > 0.0 and flat.numel() > 1:
+            if flat.numel() > 1_000_000:
+                step = max(1, flat.numel() // 1_000_000)
+                sampled = flat[::step]
+            else:
+                sampled = flat
+            low = torch.quantile(sampled, clip_q)
+            high = torch.quantile(sampled, 1.0 - clip_q)
+        else:
+            low = flat.min()
+            high = flat.max()
+        span = high - low
+        if float(span) <= 1e-8:
+            normed = torch.zeros_like(tensor_slice)
+        else:
+            normed = ((tensor_slice - low) / span).clamp(0.0, 1.0)
+        return 1.0 - normed if invert else normed
+
+    if scope == "per_batch":
+        return _norm_slice(out)
+    for idx in range(out.shape[0]):
+        out[idx] = _norm_slice(out[idx])
+    return out
+
+
+def run_depth_anything(
+    da3_model,
+    image: torch.Tensor,
+    process_res: int = 504,
+    resize_method: str = "upper_bound_resize",
+    multi_view_mode: str = "independent",
+    ref_view_strategy: str = "saddle_balanced",
+    output_mode: str = "disparity",
+    normalization_scope: str = "per_frame",
+    percentile_clip: float = 0.0,
+    invert_depth: bool = False,
+    sky_fill: bool = True,
+    keep_model_size: bool = False,
+    batch_size: int = 4,
+    forward=None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]:
+    if da3_model is None:
+        raise ValueError("Connect a Depth Anything V3 model from Depth Anything V3 Loader.")
+    if multi_view_mode not in DEPTH_ANYTHING_MULTI_VIEW_MODES:
+        raise ValueError(f"Unsupported multi_view_mode: {multi_view_mode!r}.")
+    if ref_view_strategy not in DEPTH_ANYTHING_REF_VIEW_STRATEGIES:
+        raise ValueError(f"Unsupported ref_view_strategy: {ref_view_strategy!r}.")
+    if output_mode not in DEPTH_ANYTHING_OUTPUT_MODES:
+        raise ValueError(f"Unsupported output_mode: {output_mode!r}.")
+    if normalization_scope not in DEPTH_ANYTHING_NORM_SCOPES:
+        raise ValueError(f"Unsupported normalization_scope: {normalization_scope!r}.")
+
+    if forward is None:
+        from .model_helpers import depth_anything_forward
+        forward = depth_anything_forward
+
+    orig_h, orig_w = int(image.shape[1]), int(image.shape[2])
+    total_frames = int(image.shape[0])
+    normalized_nchw = preprocess_depth_anything_batch(
+        image, process_res=process_res, resize_method=resize_method
+    )
+    proc_h, proc_w = int(normalized_nchw.shape[2]), int(normalized_nchw.shape[3])
+
+    chunk_sz = max(1, int(batch_size))
+    supports_multiview = getattr(getattr(da3_model, "model", None), "ALT_START", 8) != -1
+    use_multiview = (multi_view_mode == "multi_view") and supports_multiview
+
+    depth_chunks: list[torch.Tensor] = []
+    conf_chunks: list[torch.Tensor] = []
+    sky_chunks: list[torch.Tensor] = []
+    pose_records: list[dict] = []
+    progress = comfy.utils.ProgressBar(total_frames)
+
+    for start in range(0, total_frames, chunk_sz):
+        comfy.model_management.throw_exception_if_processing_interrupted()
+        end = min(start + chunk_sz, total_frames)
+        chunk = normalized_nchw[start:end]
+        count = chunk.shape[0]
+        images_5d = chunk.unsqueeze(0) if use_multiview else chunk.unsqueeze(1)
+        raw_out = forward(da3_model, images_5d, ref_view_strategy=ref_view_strategy)
+
+        depth = raw_out["depth"].reshape(count, proc_h, proc_w).float().cpu()
+        if "depth_conf" in raw_out and raw_out["depth_conf"] is not None:
+            conf = raw_out["depth_conf"].reshape(count, proc_h, proc_w).float().cpu()
+        else:
+            conf = torch.ones((count, proc_h, proc_w), dtype=torch.float32)
+
+        if "sky" in raw_out and raw_out["sky"] is not None:
+            sky = raw_out["sky"].reshape(count, proc_h, proc_w).float().cpu()
+            sky_binary = (sky >= 0.3).float()
+            if sky_fill:
+                for idx in range(count):
+                    non_sky = sky[idx] < 0.3
+                    if int(non_sky.sum()) > 10 and int((~non_sky).sum()) > 10:
+                        valid = depth[idx][non_sky]
+                        if valid.numel() > 100_000:
+                            step = max(1, valid.numel() // 100_000)
+                            valid = valid[::step]
+                        max_d = torch.quantile(valid, 0.99)
+                        depth[idx] = torch.where(non_sky, depth[idx], max_d)
+        else:
+            sky_binary = torch.zeros((count, proc_h, proc_w), dtype=torch.float32)
+
+        if "extrinsics" in raw_out and "intrinsics" in raw_out:
+            ext = raw_out["extrinsics"].reshape(count, 3, 4).float().cpu()
+            ixt = raw_out["intrinsics"].reshape(count, 3, 3).float().cpu()
+            out_h = proc_h if keep_model_size else orig_h
+            out_w = proc_w if keep_model_size else orig_w
+            scale_x = out_w / float(proc_w)
+            scale_y = out_h / float(proc_h)
+            for idx in range(count):
+                k_mat = ixt[idx].clone()
+                k_mat[0, :] *= scale_x
+                k_mat[1, :] *= scale_y
+                fx = float(k_mat[0, 0])
+                fy = float(k_mat[1, 1])
+                fov_x = math.degrees(2.0 * math.atan((out_w / 2.0) / max(fx, 1e-6)))
+                fov_y = math.degrees(2.0 * math.atan((out_h / 2.0) / max(fy, 1e-6)))
+                pose_records.append(
+                    {
+                        "frame_index": start + idx,
+                        "extrinsics_w2c": [[round(float(v), 6) for v in row] for row in ext[idx]],
+                        "intrinsics": [[round(float(v), 6) for v in row] for row in k_mat],
+                        "fov_x_deg": round(fov_x, 4),
+                        "fov_y_deg": round(fov_y, 4),
+                    }
+                )
+
+        depth_chunks.append(depth)
+        conf_chunks.append(conf)
+        sky_chunks.append(sky_binary)
+        progress.update(count)
+
+    all_depth = torch.cat(depth_chunks, dim=0)
+    all_conf = torch.cat(conf_chunks, dim=0)
+    all_sky = torch.cat(sky_chunks, dim=0)
+
+    if not keep_model_size and (proc_h, proc_w) != (orig_h, orig_w):
+        all_depth = F.interpolate(
+            all_depth.unsqueeze(1), size=(orig_h, orig_w), mode="bilinear", align_corners=True
+        ).squeeze(1)
+        all_conf = F.interpolate(
+            all_conf.unsqueeze(1), size=(orig_h, orig_w), mode="bilinear", align_corners=True
+        ).squeeze(1)
+        all_sky = (
+            F.interpolate(
+                all_sky.unsqueeze(1), size=(orig_h, orig_w), mode="bilinear", align_corners=False
+            ).squeeze(1)
+            >= 0.5
+        ).float()
+
+    if output_mode == "disparity":
+        inv_depth = 1.0 / all_depth.clamp_min(1e-6)
+        depth_mask = _normalize_depth_anything_tensor(
+            inv_depth,
+            scope=normalization_scope,
+            percentile_clip=percentile_clip,
+            invert=invert_depth,
+        )
+    elif output_mode == "depth":
+        depth_mask = _normalize_depth_anything_tensor(
+            all_depth,
+            scope=normalization_scope,
+            percentile_clip=percentile_clip,
+            invert=not invert_depth,
+        )
+    else:
+        depth_mask = all_depth
+
+    conf_mask = _normalize_depth_anything_tensor(all_conf, scope="per_frame", percentile_clip=0.0, invert=False)
+    if float(all_conf.max() - all_conf.min()) <= 1e-8:
+        conf_mask = torch.ones_like(all_conf)
+
+    depth_image = depth_mask.unsqueeze(-1).repeat(1, 1, 1, 3)
+    return depth_image, depth_mask, conf_mask, all_sky, json.dumps(pose_records)
+

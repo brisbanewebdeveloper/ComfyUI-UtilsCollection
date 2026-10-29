@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from fractions import Fraction
 from typing import Union
 import json
+import logging
 import os
 import torch
 from comfy_execution.graph import ExecutionBlocker
@@ -126,6 +127,19 @@ class UC_MiniMaxH3RefVid(io.ComfyNode):
         transcribed_audio = transcribe_reference_audio(whisper_model, components.audio, audio, timestamp_format, length) if enable_whisper else ""
         prepared_video = InputImpl.VideoFromComponents(
             Types.VideoComponents(images=frames, audio=audio, frame_rate=Fraction(24)),
+        )
+        src_fps = float(getattr(components, "frame_rate", 24.0) or 24.0)
+        src_sec = float(preview.get("source_seconds", 0.0))
+        start_f = int(preview.get("start_frame", 0))
+        pad_f = int(preview.get("padded_frames", 0))
+        seg_info = f" | segment={segment_index + 1}/{segment_count}" if segment_count else ""
+        pad_info = f" (padded={pad_f})" if pad_f else ""
+        has_src_audio = components.audio is not None and components.audio.get("waveform") is not None and components.audio["waveform"].numel() > 0
+        audio_info = f"32kHz ({audio['waveform'].shape[-1]} samples)" if has_src_audio else "silence-filled"
+        whisper_info = f", transcript_chars={len(transcribed_audio)}" if enable_whisper and whisper_model is not None else ""
+        logging.info(
+            "[UC_MiniMaxH3RefVid] Source %.2fs (%.2f fps)%s -> prepared %d frame(s)%s at %dx%d (24 fps, %.2fs, start_frame=%d) | audio=%s%s",
+            src_sec, src_fps, seg_info, length, pad_info, width, height, length / 24.0, start_f, audio_info, whisper_info,
         )
         return io.NodeOutput(frames, audio, width, height, length, prepared_video, transcribed_audio, ui={"h3_reference_range": [preview]})
 
@@ -1771,6 +1785,7 @@ class UC_EncoderNodesGuide(io.ComfyNode):
                 "- `UC_MiniMaxH3ClipContinuationApply`: attaches a previous clip's ending frames and sound (`continuation_latent` or `continuation_media`) directly onto any MiniMax H3 conditioning and outputs `trim_frames` without re-running the text encoder.\n"
                 "- `UC_MiniMaxH3ClipContinuationSampler`: samples a list of MiniMax H3 segments in a single run, automatically chaining each finished segment's latent tail into the next segment without re-encoding media, and outputs both per-segment latents/trim counts for A/B testing and the combined full-length latent.\n"
                 "- `UC_MiniMaxH3VLMGuide`: experimental CONDITIONING-only guide. Independently encodes a timestamp and image together, then splices them before the existing H3 prompt.\n"
+                "- `UC_MiniMaxH3VLMFrameGuide`: experimental CONDITIONING-only guide. Frame-indexed child of `UC_MiniMaxH3VLMGuide` with zero-based frame indexing (0 is first frame, 1 is second frame, -1 is last frame).\n"
                 "- `UC_AdvMiniMaxH3ImageToVideoTemporalFusion`: experimental video fusion after separate Qwen encodes. Fuses corresponding video blocks into lane zero; returns CONDITIONING and LATENT.\n"
                 "- `UC_AdvMiniMaxH3ImageToVideoTemporalTokenFusion`: experimental video fusion of corresponding visual tokens and DeepStack features before Qwen encoding; returns CONDITIONING and LATENT.\n"
                 "- `UC_TextEncodeSystemPrompt`: selectable Flux2 Dev, Klein, Krea2, Z-Image, or Z-Image Thinking text template.\n"
