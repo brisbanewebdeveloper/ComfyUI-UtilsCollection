@@ -94,6 +94,7 @@ DESCRIPTIONS = {
     "UC_MiniMaxH3RadialAttentionConfig": "Configures sparse radial attention for target video rows in MiniMax H3.",
     "UC_UnifiedAttentionPatcher": "Applies one selected attention implementation to a cloned model.",
     "UC_Krea2NAG": "Enables negative prompts on Krea2 even at CFG 1.0 by steering attention away from unwanted concepts without breaking image quality.",
+    "UC_Krea2EditPatcher": "Configures a Krea2 diffusion model for reference-guided image editing, character transfer, and scene composition using clean ModelPatcher object patches.",
     "UC_MOSSImageEditPatcher": "Configures a MOSS-Image diffusion model for reference-guided image editing, character or style transfer, and masked inpainting.",
     "UC_AdvancedVisConEncoder": "Spatially fuses visual sources at each encoder resolution, then consensus-blends the complete conditionings.",
     "UC_AdvancedVisConEncoderTokenFusion": "Fuses per-source visual tokens at each encoder resolution before consensus-blending the completed resolution samples.",
@@ -186,6 +187,7 @@ DESCRIPTIONS = {
     "UC_MiniMaxH3ClipContinuationSampler": "Samples a list of MiniMax H3 video segments in a single run, automatically slicing each finished segment's latent video and audio tail into the next segment without re-encoding media.",
     "UC_MiniMaxH3RefVid": "Prepares video frames, audio, and matching generation dimensions for MiniMax H3 reference video workflows.",
     "UC_H3RefVideoSegments": "Prepares all sequential H3 reference segments as list outputs for multi-chunk captioning and conditioning workflows.",
+    "UC_CreateListOfSame": "Creates a list containing the input item repeated a specified number of times.",
 }
 
 
@@ -234,6 +236,7 @@ EXTRA_ALIASES = {
     "UC_LoraStackLoaderModelOnly": ["lora stack", "stack loader", "model lora", "load lora", "lora loader"],
     "UC_LoraStack": ["lora stack", "stack", "dynamic group", "lora template", "load lora"],
     "UC_Krea2NAG": ["nag", "normalized attention guidance", "krea2 negative prompt", "negative guidance"],
+    "UC_Krea2EditPatcher": ["krea2 edit", "krea2 reference", "identity edit", "krea edit patcher", "ref boost", "ref position", "reference latent", "pixel path"],
     "UC_MOSSImageEditPatcher": ["moss image edit", "moss reference", "image editing", "inpaint", "character transfer", "style reference", "reference latent", "uncond skip"],
     "UC_SaveVideo": ["save video", "export video", "video combine", "keyframe video", "mp4 export"],
     "UC_ConcatenateVideoList": ["join videos", "merge videos", "stitch videos", "video concat", "video list"],
@@ -252,6 +255,7 @@ EXTRA_ALIASES = {
     "UC_DepthAnythingV3": ["depth anything", "depth anything v3", "da3", "depth map", "controlnet depth", "disparity", "camera pose", "sky mask"],
     "UC_MiniMaxH3RefVid": ["minimax", "h3", "reference video", "h3 ref video", "24 fps"],
     "UC_H3RefVideoSegments": ["minimax", "h3", "reference", "video", "segments", "list", "h3 segments"],
+    "UC_CreateListOfSame": ["create list", "repeat item", "list of same", "duplicate item", "list duplicator"],
 }
 
 

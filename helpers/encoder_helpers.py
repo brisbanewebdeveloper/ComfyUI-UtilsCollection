@@ -309,6 +309,29 @@ def is_qwen_image21_text_encoder(clip) -> bool:
     )
 
 
+def prepare_qwen_image21_image(image: torch.Tensor, resolution: int | None = 1024) -> tuple[torch.Tensor, torch.Tensor]:
+    """Resize image to multiples of 32 for Qwen Image 2.1, returning (rgb_image, vae_image).
+    Every 32x32 vision slot covers exactly 2x2 VAE latents (patch size 16x16)."""
+    samples = image[:1].movedim(-1, 1)
+    target_res = resolution if resolution is not None else 1024
+    if target_res <= 0:
+        width = round(samples.shape[3] / 32) * 32
+        height = round(samples.shape[2] / 32) * 32
+    else:
+        ratio = samples.shape[3] / samples.shape[2]
+        width = round(math.sqrt(target_res * target_res * ratio) / 32) * 32
+        height = round(math.sqrt(target_res * target_res / ratio) / 32) * 32
+    width, height = max(32, width), max(32, height)
+    if (width, height) == (samples.shape[3], samples.shape[2]):
+        s = image[:1]
+    else:
+        s = comfy.utils.common_upscale(samples, width, height, "lanczos", "disabled").movedim(1, -1)
+    rgb = s[:, :, :, :3]
+    if s.shape[-1] > 3:
+        rgb = rgb * s[:, :, :, 3:] + (1.0 - s[:, :, :, 3:])
+    return rgb, s
+
+
 def format_qwen_image21_prompt(prompt, system_prompt):
     system = system_prompt or "Comprehend and analyze the provided prompt."
     return (
@@ -1449,6 +1472,19 @@ def build_token_to_conditioning_map(
     )
     if qwen_image21:
         prefix_len = _qwen_image21_prefix_end(token_list)
+        text_only_len = sum(
+            exact_spans[i] for i in range(prefix_len, len(token_list))
+            if not is_image_token(token_list[i])
+        )
+        if cond_len == text_only_len:
+            token_spans = [
+                0 if is_image_token(token_list[i]) else exact_spans[i]
+                for i in range(prefix_len, len(token_list))
+            ]
+            expected_length = text_only_len
+        else:
+            token_spans = exact_spans[prefix_len:]
+            expected_length = sum(token_spans)
     elif total_length == cond_len or klein_tail_padding:
         prefix_len = 0
     else:
@@ -1463,8 +1499,9 @@ def build_token_to_conditioning_map(
     if any(is_image_token(token) for token in token_list[:prefix_len]):
         raise ValueError("Released Core's Qwen3-VL prefix slice crosses a visual token; mapping is unsafe.")
 
-    token_spans = exact_spans[prefix_len:]
-    expected_length = sum(token_spans)
+    if not qwen_image21:
+        token_spans = exact_spans[prefix_len:]
+        expected_length = sum(token_spans)
     if expected_length != cond_len and not klein_tail_padding:
         image_details = [
             (index, exact_spans[index])
@@ -4727,8 +4764,6 @@ def execute_advanced_visual_consensus(
     qwen_image21 = is_qwen_image21_text_encoder(clip)
     flux3 = is_flux3_text_encoder(clip)
     moss_image = is_moss_image_text_encoder(clip)
-    if qwen_image21 and ref_latent_mode != "off":
-        raise ValueError("Qwen-Image-2.1 VAE-reference fusion is not supported yet; set ref_latent_mode to off.")
     minimax_h3 = is_minimax_h3_text_encoder(clip)
     if minimax_h3 and ref_latent_mode != "off":
         raise ValueError(
@@ -4967,10 +5002,14 @@ def _scale_and_attach_visual_consensus_references(
             target = (
                 None if vae_resolution == "Original" else resolutions[vae_resolution]
             )
-            prepared = prepare_vae_reference_image(
-                image.movedim(-1, 1), target, vae_dimension_multiple
-            )
-            ref_latents.append(vae.encode(prepared.movedim(1, -1)[..., :3]))
+            if is_qwen_image21_text_encoder(clip):
+                _, s_vae = prepare_qwen_image21_image(image, 0 if target is None else target)
+                ref_latents.append(vae.encode(s_vae))
+            else:
+                prepared = prepare_vae_reference_image(
+                    image.movedim(-1, 1), target, vae_dimension_multiple
+                )
+                ref_latents.append(vae.encode(prepared.movedim(1, -1)[..., :3]))
     return apply_reference_latents(
         clip, conditioning, ref_latents, ref_latent_mode
     )
@@ -5024,3 +5063,54 @@ def krea2_attn_forward_weight(self, x, freqs=None, mask=None, transformer_option
             mask = additive_mask + bias.to(device=mask.device, dtype=q.dtype)
     out = optimized_attention(q, k, v, self.heads, mask=mask, skip_reshape=True, transformer_options=transformer_options)
     return self.wo(out * torch.sigmoid(gate))
+
+
+def prepare_krea2_edit_reference_latent(
+    image: torch.Tensor,
+    vae,
+    target_width: int,
+    target_height: int,
+    fit_mode: str = "fit",
+) -> torch.Tensor:
+    """Pre-sample pixel fitting and VAE encoding for Krea2 reference images.
+
+    Pre-fits source image to target canvas in pixel space before VAE encoding.
+    Running at node execution time prevents mid-sampler VAE execution and DiT
+    VRAM eviction.
+    """
+    if not torch.is_tensor(image) or image.ndim != 4:
+        raise ValueError("Source image must be a 4D BHWC tensor.")
+    if vae is None:
+        raise ValueError("VAE is required to encode source image to latent.")
+
+    px_h = int(target_height)
+    px_w = int(target_width)
+    img = image.movedim(-1, 1)  # B,H,W,C -> B,C,H,W
+    ih, iw = img.shape[-2:]
+
+    if fit_mode == "fit":
+        sc = min(px_h / ih, px_w / iw)
+        crop_tol = 0.08
+        if ih * sc >= px_h * (1 - crop_tol) and iw * sc >= px_w * (1 - crop_tol):
+            s = max(px_h / ih, px_w / iw)
+            ch, cw = min(ih, int(round(px_h / s))), min(iw, int(round(px_w / s)))
+            y0, x0 = (ih - ch) // 2, (iw - cw) // 2
+            img = img[..., y0 : y0 + ch, x0 : x0 + cw]
+            nh, nw = px_h, px_w
+        else:
+            nh = min(max(16, int(ih * sc) // 16 * 16), max(16, px_h // 16 * 16))
+            nw = min(max(16, int(iw * sc) // 16 * 16), max(16, px_w // 16 * 16))
+            ch2 = min(ih, max(1, int(round(nh / sc))))
+            cw2 = min(iw, max(1, int(round(nw / sc))))
+            y0, x0 = (ih - ch2) // 2, (iw - cw2) // 2
+            img = img[..., y0 : y0 + ch2, x0 : x0 + cw2]
+        img = F.interpolate(img.float(), size=(nh, nw), mode="bicubic", antialias=True)
+        return vae.encode(img.movedim(1, -1)[..., :3].clamp(0, 1))
+
+    s = max(px_h / ih, px_w / iw)
+    ch, cw = min(ih, int(round(px_h / s))), min(iw, int(round(px_w / s)))
+    y0, x0 = (ih - ch) // 2, (iw - cw) // 2
+    img = img[..., y0 : y0 + ch, x0 : x0 + cw]
+    img = F.interpolate(img.float(), size=(px_h, px_w), mode="bicubic", antialias=True)
+    return vae.encode(img.movedim(1, -1)[..., :3].clamp(0, 1))
+
